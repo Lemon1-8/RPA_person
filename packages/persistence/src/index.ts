@@ -1,0 +1,61 @@
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { workflowSchema, type RunEvent, type RunSnapshot, type WorkflowDefinition } from '../../contracts/src/index.js';
+import { validateActions } from '../../actions/src/index.js';
+
+export async function writeJsonAtomic(path: string, value: unknown) {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(value, null, 2), 'utf8');
+  await rename(temporary, path);
+}
+export class FileStore {
+  private queue: Promise<unknown> = Promise.resolve();
+  constructor(readonly directory: string) {}
+  async initialize() {
+    await mkdir(join(this.directory, 'workflows'), { recursive: true });
+    await mkdir(join(this.directory, 'runs'), { recursive: true });
+  }
+  async listWorkflows(): Promise<WorkflowDefinition[]> {
+    const files = (await readdir(join(this.directory, 'workflows'))).filter(f => f.endsWith('.json'));
+    return Promise.all(files.map(async f => workflowSchema.parse(JSON.parse(await readFile(join(this.directory, 'workflows', f), 'utf8')))));
+  }
+  saveWorkflow(input: WorkflowDefinition): Promise<WorkflowDefinition> {
+    const workflow = workflowSchema.parse(input); validateActions(workflow);
+    const operation = this.queue.then(async () => {
+      const path = join(this.directory, 'workflows', `${workflow.workflowId}.json`);
+      let revision = 0;
+      try { revision = workflowSchema.parse(JSON.parse(await readFile(path, 'utf8'))).revision; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (workflow.revision !== revision) throw new Error(`流程版本已改变（当前 ${revision}），请重新加载后保存。`);
+      const saved = { ...workflow, revision: revision + 1 };
+      await writeJsonAtomic(path, saved); return saved;
+    });
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  async createRun(workflow: WorkflowDefinition, run: RunSnapshot) {
+    const path = join(this.directory, 'runs', run.runId); await mkdir(path, { recursive: true });
+    await writeJsonAtomic(join(path, 'workflow.json'), workflow);
+    await this.saveRun(run);
+  }
+  saveRun(run: RunSnapshot): Promise<void> {
+    const snapshot = structuredClone(run);
+    const operation = this.queue.then(() => writeJsonAtomic(join(this.directory, 'runs', snapshot.runId, 'run.json'), snapshot));
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  async listRuns(): Promise<RunSnapshot[]> {
+    const dirs = await readdir(join(this.directory, 'runs'), { withFileTypes: true });
+    const runs: RunSnapshot[] = [];
+    for (const dir of dirs.filter(d => d.isDirectory())) {
+      try { runs.push(JSON.parse(await readFile(join(this.directory, 'runs', dir.name, 'run.json'), 'utf8')) as RunSnapshot); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    return runs;
+  }
+  recordEvent(event: RunEvent): Promise<void> {
+    const serialized = JSON.stringify(event) + '\n';
+    const operation = this.queue.then(() => writeFile(join(this.directory, 'runs', event.runId, 'events.jsonl'), serialized, { flag: 'a' }));
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  async flush() { await this.queue; }
+}

@@ -1,0 +1,16 @@
+import { createServer } from 'vite';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { buildBackend } from './build.mjs';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+await buildBackend();
+const server = await createServer({ root: resolve(root, 'apps/desktop'), server: { host: '127.0.0.1', port: 5173, strictPort: false } });
+await server.listen();
+const require = createRequire(import.meta.url);
+const env = { ...process.env, RPA_ROOT: root, RPA_DEV_URL: server.resolvedUrls.local[0] };
+delete env.ELECTRON_RUN_AS_NODE;
+const child = spawn(require('electron'), ['.'], { cwd: root, env, stdio: 'inherit', windowsHide: true });
+child.on('exit', async code => { await server.close(); process.exitCode = code ?? 0; });
+process.on('SIGINT', () => child.kill());

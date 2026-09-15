@@ -1,0 +1,61 @@
+import { afterEach, expect, it } from 'vitest';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { RunManager } from '../apps/runner/src/manager.js';
+import { BrowserSession } from '../packages/browser/src/index.js';
+import { startFixtureServer } from './fixtures/server.js';
+import type { WorkflowDefinition } from '../packages/contracts/src/index.js';
+
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+it('旧流程默认在结束后保留真实浏览器，用户仍可显示并手动关闭', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rpa-retention-'));
+  const site = await startFixtureServer(); cleanup.push(() => site.close());
+  const manager = new RunManager({ dataDir: directory }); await manager.initialize(); cleanup.push(() => manager.shutdown());
+  const flow: WorkflowDefinition = { schemaVersion: 1, workflowId: 'open-and-keep', name: '打开网页', revision: 0, variables: {}, elements: {}, settings: { downloadDir: directory, headless: true }, steps: [{ stepId: 'open', name: '打开', actionType: 'browser.open', params: { url: site.url } }] };
+  const saved = await manager.saveWorkflow(flow);
+  const result = await manager.waitForRun((await manager.runWorkflow(saved)).runId);
+  expect(result.status).toBe('succeeded');
+  expect(result.browserOpen).toBe(true);
+  const other = new BrowserSession({ profileDir: join(directory, 'profiles', flow.workflowId), downloadDir: directory, runId: 'probe', headless: true }); cleanup.push(() => other.close());
+  await expect(other.start()).rejects.toThrow(/正在使用/);
+  await expect(manager.controlRun(result.runId, 'show')).resolves.toBeUndefined();
+  await expect(manager.runWorkflow(saved)).rejects.toThrow('浏览器仍保留');
+  await manager.controlRun(result.runId, 'closeBrowser');
+  expect(manager.listRuns().find(run => run.runId === result.runId)?.browserOpen).toBe(false);
+  expect(manager.listRuns().find(run => run.runId === result.runId)?.status).toBe('succeeded');
+  const reopened = new BrowserSession({ profileDir: join(directory, 'profiles', flow.workflowId), downloadDir: directory, runId: 'after-close', headless: true }); cleanup.push(() => reopened.close());
+  await expect(reopened.start()).resolves.toBeUndefined();
+});
+it('用户选择自动关闭后释放浏览器，允许同一流程再次运行', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rpa-auto-close-'));
+  const manager = new RunManager({ dataDir: directory }); await manager.initialize(); cleanup.push(() => manager.shutdown());
+  const flow: WorkflowDefinition = { schemaVersion: 1, workflowId: 'auto-close', name: '自动关闭', revision: 0, variables: {}, elements: {}, settings: { downloadDir: directory, headless: true, keepBrowserOpen: false }, steps: [{ stepId: 'open', name: '打开', actionType: 'browser.start', params: {} }] };
+  const saved = await manager.saveWorkflow(flow);
+  const result = await manager.waitForRun((await manager.runWorkflow(saved)).runId);
+  expect(result.status).toBe('succeeded'); expect(result.browserOpen).toBe(false);
+  const repeated = await manager.waitForRun((await manager.runWorkflow(saved)).runId);
+  expect(repeated.status).toBe('succeeded'); expect(repeated.browserOpen).toBe(false);
+});
+it('保留浏览器占用名额，手动关闭后排队任务继续', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rpa-retention-queue-'));
+  const manager = new RunManager({ dataDir: directory, maxConcurrent: 1 }); await manager.initialize(); cleanup.push(() => manager.shutdown());
+  const base: WorkflowDefinition = { schemaVersion: 1, workflowId: 'keep-slot', name: '保留', revision: 0, variables: {}, elements: {}, settings: { downloadDir: directory, headless: true }, steps: [{ stepId: 'open', name: '打开', actionType: 'browser.start', params: {} }] };
+  const first = await manager.waitForRun((await manager.runWorkflow(await manager.saveWorkflow(base))).runId);
+  const second = await manager.runWorkflow(await manager.saveWorkflow({ ...base, workflowId: 'next-slot', steps: [{ stepId: 'set', name: '设置', actionType: 'variables.set', params: { name: 'done', value: true } }] }));
+  expect(manager.listRuns().find(run => run.runId === second.runId)?.status).toBe('queued');
+  await manager.controlRun(first.runId, 'closeBrowser');
+  const finished = await manager.waitForRun(second.runId);
+  expect(finished.status).toBe('succeeded'); expect(finished.variables.done).toBe(true);
+});
+it('浏览器窗口自行关闭后，结束的任务释放进程并更新浏览器状态', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rpa-window-close-'));
+  const manager = new RunManager({ dataDir: directory }); await manager.initialize(); cleanup.push(() => manager.shutdown());
+  const base: WorkflowDefinition = { schemaVersion: 1, workflowId: 'close-window', name: '关闭窗口', revision: 0, variables: {}, elements: {}, settings: { downloadDir: directory, headless: false }, steps: [{ stepId: 'open', name: '打开', actionType: 'browser.start', params: {} }, { stepId: 'close-later', name: '窗口关闭事件', actionType: 'script.run', params: { language: 'javascript', code: 'await rpa.call("browser.evaluate", { expression: "setTimeout(() => window.close(), 800); null" }); await rpa.output(null);' } }] };
+  const run = await manager.waitForRun((await manager.runWorkflow(await manager.saveWorkflow(base))).runId);
+  expect(run.status).toBe('succeeded'); expect(run.browserOpen).toBe(true);
+  await manager.waitForBrowserClosed(run.runId);
+  expect(manager.listRuns().find(item => item.runId === run.runId)?.browserOpen).toBe(false);
+  expect(manager.listRuns().find(item => item.runId === run.runId)?.status).toBe('succeeded');
+});

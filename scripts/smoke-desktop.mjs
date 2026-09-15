@@ -1,0 +1,73 @@
+import { _electron as electron } from 'playwright';
+import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
+import assert from 'node:assert/strict';
+const root = process.cwd();
+const data = await mkdtemp(join(tmpdir(), 'rpa-desktop-'));
+const output = join(data, 'downloads');
+const qa = resolve('.rpa/qa'); await mkdir(qa, { recursive: true });
+const require = createRequire(import.meta.url);
+const env = { ...process.env, RPA_ROOT: root, RPA_DATA_DIR: data }; delete env.ELECTRON_RUN_AS_NODE;
+const app = await electron.launch({ executablePath: require('electron'), args: ['.'], cwd: root, env });
+try {
+  const page = await app.firstWindow();
+  const pageErrors = []; page.on('pageerror', error => pageErrors.push(error.message));
+  await page.getByRole('heading', { name: '订单采集与导出', exact: true }).waitFor();
+  await page.getByRole('button', { name: '运行设置', exact: true }).click();
+  await page.getByLabel('流程名称', { exact: true }).fill('桌面验收 · 订单导出');
+  await page.getByRole('textbox', { name: /^下载目录/ }).fill(output);
+  await page.getByRole('combobox', { name: /^浏览器运行方式/ }).selectOption('headless');
+  const retention = page.getByRole('combobox', { name: /^流程结束后的浏览器/ });
+  assert.equal(await retention.inputValue(), 'keep');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
+  const before = await page.evaluate(() => window.rpa.bootstrap());
+  assert.equal(before.workflows[0].name, '桌面验收 · 订单导出');
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  let after;
+  const deadline = Date.now() + 45000;
+  do {
+    after = await page.evaluate(() => window.rpa.bootstrap());
+    if (after.runs[0] && ['succeeded', 'failed', 'interrupted', 'stopped'].includes(after.runs[0].status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  assert.equal(after.runs[0].status, 'succeeded', after.runs[0].error);
+  assert.equal(after.runs[0].browserOpen, true);
+  const firstRunId = after.runs[0].runId;
+  const file = after.runs[0].artifacts[0];
+  assert.match(await readFile(file.path, 'utf8'), /跨语言订单/);
+  await page.getByRole('tab', { name: /下载|产物/ }).click();
+  await page.getByText(file.name, { exact: true }).waitFor();
+  await page.screenshot({ path: join(qa, 'desktop-success.png'), fullPage: true });
+  assert.equal(await page.getByRole('button', { name: '显示所选运行浏览器', exact: true }).isEnabled(), true);
+  await page.getByRole('button', { name: '显示所选运行浏览器', exact: true }).click();
+  await page.getByRole('button', { name: '关闭所选运行浏览器', exact: true }).click();
+  const closedDeadline = Date.now() + 10000;
+  do {
+    after = await page.evaluate(() => window.rpa.bootstrap());
+    if (after.runs.find(run => run.runId === firstRunId)?.browserOpen === false) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < closedDeadline);
+  assert.equal(after.runs.find(run => run.runId === firstRunId)?.browserOpen, false);
+  await retention.selectOption('close');
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  const secondDeadline = Date.now() + 45000;
+  let second;
+  do {
+    after = await page.evaluate(() => window.rpa.bootstrap());
+    second = after.runs.find(run => run.runId !== firstRunId);
+    if (second && ['succeeded', 'failed', 'interrupted', 'stopped'].includes(second.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < secondDeadline);
+  assert.equal(second?.status, 'succeeded', second?.error);
+  assert.equal(second?.browserOpen, false);
+  assert.equal(after.workflows[0].settings.keepBrowserOpen, false);
+  // Closing the editor must leave the tray process alive and able to reopen the same window.
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+  assert.equal(pageErrors.length, 0, pageErrors.join('\n'));
+  console.log(JSON.stringify({ status: 'passed', runId: firstRunId, file: file.path, screenshot: join(qa, 'desktop-success.png'), defaultRetained: true, manualClose: true, automaticClose: true, closeToTray: true }, null, 2));
+} finally { await app.close(); }

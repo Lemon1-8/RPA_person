@@ -1,0 +1,180 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { resolve, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
+import { FileStore } from '../../../packages/persistence/src/index.js';
+import { validateActions } from '../../../packages/actions/src/index.js';
+import { workflowSchema, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition } from '../../../packages/contracts/src/index.js';
+
+const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
+interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl> }
+async function killOwnedTree(child: ChildProcess) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') await new Promise<void>(resolve => {
+    const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    killer.on('error', () => { child.kill(); resolve(); }); killer.on('close', () => resolve());
+  });
+  else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+}
+export interface ManagerOptions { dataDir: string; maxConcurrent?: number; rootDir?: string; workerPath?: string }
+export class RunManager extends EventEmitter {
+  readonly store: FileStore;
+  private jobs = new Map<string, Job>();
+  private pending: string[] = [];
+  private shuttingDown = false;
+  private startQueue: Promise<unknown> = Promise.resolve();
+  constructor(private options: ManagerOptions) {
+    super();
+    const concurrency = options.maxConcurrent ?? 2;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error('并发数须为 1–16 的整数');
+    this.store = new FileStore(options.dataDir);
+  }
+  async initialize() {
+    await this.store.initialize();
+    for (const run of await this.store.listRuns()) {
+      const browserWasOpen = run.browserOpen;
+      run.browserOpen = false;
+      if (!terminal(run.status)) {
+        run.status = 'interrupted'; run.endedAt = new Date().toISOString(); run.error = '运行器曾退出，原浏览器现场不可恢复。';
+        await this.store.saveRun(run);
+      } else if (browserWasOpen) await this.store.saveRun(run);
+      this.jobs.set(run.runId, { run, workflow: undefined as unknown as WorkflowDefinition });
+    }
+  }
+  listRuns() { return [...this.jobs.values()].map(j => structuredClone(j.run)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  listWorkflows() { return this.store.listWorkflows(); }
+  saveWorkflow(workflow: WorkflowDefinition) { return this.store.saveWorkflow(workflow); }
+  runWorkflow(input: WorkflowDefinition): Promise<RunSnapshot> {
+    const workflow = workflowSchema.parse(input); validateActions(workflow);
+    const operation = this.startQueue.then(async () => {
+      if (this.shuttingDown) throw new Error('运行器正在退出');
+      const saved = (await this.listWorkflows()).find(w => w.workflowId === workflow.workflowId);
+      if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
+      const sameWorkflow = [...this.jobs.values()].find(j => j.run.workflowId === workflow.workflowId && (!terminal(j.run.status) || j.child));
+      if (sameWorkflow?.run.browserOpen && terminal(sameWorkflow.run.status)) throw new Error('同一流程的浏览器仍保留，请在运行记录中关闭该浏览器后再运行。');
+      if (sameWorkflow) throw new Error('同一流程已有未结束的任务，请先完成或停止。');
+      const profileId = workflow.settings.profileId ?? workflow.workflowId;
+      if ([...this.jobs.values()].some(j => j.child && terminal(j.run.status) && j.run.browserOpen && (j.workflow.settings.profileId ?? j.workflow.workflowId) === profileId)) throw new Error('浏览器配置仍被已结束的任务保留，请先关闭该浏览器。');
+      const run: RunSnapshot = {
+        runId: randomUUID(), workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
+        status: 'queued', startedAt: new Date().toISOString(), variables: structuredClone(workflow.variables), artifacts: [], browserOpen: false,
+      };
+      await this.store.createRun(workflow, run);
+      this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
+      this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run) });
+      this.drain(); return structuredClone(run);
+    });
+    this.startQueue = operation.catch(() => {}); return operation;
+  }
+  private publish(event: RunEvent) {
+    this.store.recordEvent(event).catch(error => this.emit('storage-error', error));
+    this.emit('event', structuredClone(event));
+  }
+  private drain() {
+    if (this.shuttingDown) return;
+    const limit = Math.max(1, this.options.maxConcurrent ?? 2);
+    while ([...this.jobs.values()].filter(j => j.child).length < limit && this.pending.length) {
+      const job = this.jobs.get(this.pending.shift()!)!;
+      if (job.run.status !== 'queued') continue;
+      this.launch(job);
+    }
+  }
+  private launch(job: Job) {
+    const root = this.options.rootDir ?? process.env.RPA_ROOT ?? process.cwd();
+    const bundled = join(root, 'dist', 'runner', 'worker.cjs');
+    const entry = this.options.workerPath ?? (typeof __filename !== 'undefined' && __filename.endsWith('.cjs') ? bundled : join(root, 'apps', 'runner', 'src', 'worker.ts'));
+    const child = spawn(process.execPath, [...(entry.endsWith('.ts') ? ['--import', 'tsx'] : []), resolve(entry)], {
+      cwd: root, detached: process.platform !== 'win32',
+      env: { ...process.env, RPA_ROOT: root, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
+    });
+    job.child = child; job.controls = new Map(); job.finished = new Promise(resolve => { job.exit = resolve; });
+    child.stdout?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
+    child.stderr?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
+    child.on('message', (message: { type: string; event?: RunEvent; message?: string; requestId?: string; error?: string }) => {
+      if (message.type === 'event' && message.event) {
+        if (message.event.run) {
+          job.run = message.event.run;
+          this.store.saveRun(job.run).catch(error => this.emit('storage-error', error));
+        }
+        this.publish(message.event);
+      }
+      if (message.type === 'control-result' && message.requestId) {
+        const pending = job.controls?.get(message.requestId);
+        if (pending) {
+          clearTimeout(pending.timer); job.controls!.delete(message.requestId);
+          if (message.error) pending.reject(new Error(message.error)); else pending.resolve();
+        }
+      }
+      if (message.type === 'control-error') this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: message.message });
+    });
+    child.on('error', error => { job.run.error = error.message; });
+    child.once('close', (code, signal) => {
+      clearTimeout(job.stopping); job.child = undefined;
+      for (const pending of job.controls?.values() ?? []) { clearTimeout(pending.timer); pending.reject(new Error('任务进程已退出')); }
+      job.controls?.clear();
+      const browserWasOpen = job.run.browserOpen; job.run.browserOpen = false;
+      if (!terminal(job.run.status)) {
+        job.run.status = job.stopping ? 'stopped' : 'interrupted'; job.run.endedAt = new Date().toISOString();
+        job.run.error ||= `任务进程意外退出（${code ?? signal}）`;
+        this.store.saveRun(job.run).catch(error => this.emit('storage-error', error));
+        this.publish({ type: 'run', runId: job.run.runId, at: new Date().toISOString(), run: structuredClone(job.run), status: job.run.status });
+      } else if (browserWasOpen) {
+        this.store.saveRun(job.run).catch(error => this.emit('storage-error', error));
+        this.publish({ type: 'run', runId: job.run.runId, at: new Date().toISOString(), run: structuredClone(job.run), status: job.run.status, message: '浏览器已关闭' });
+      }
+      job.exit?.(); this.drain();
+    });
+    child.send({ type: 'start', workflow: job.workflow, options: { dataDir: this.options.dataDir, runId: job.run.runId } }, error => { if (error) job.run.error = error.message; });
+  }
+  async controlRun(runId: string, command: RunCommand) {
+    const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
+    if (terminal(job.run.status)) {
+      if (command === 'closeBrowser' && !job.run.browserOpen) { await job.finished; return; }
+      if (!job.run.browserOpen || !['show', 'hide', 'closeBrowser'].includes(command)) throw new Error('任务已结束');
+    } else if (command === 'closeBrowser') throw new Error('任务执行中，请先停止任务再关闭浏览器');
+    if (job.run.status === 'queued' && !job.child) {
+      if (command !== 'stop') throw new Error('任务正在排队，可停止或等待开始');
+      job.run.status = 'stopped'; job.run.endedAt = new Date().toISOString(); await this.store.saveRun(job.run);
+      this.publish({ type: 'run', runId, at: new Date().toISOString(), run: structuredClone(job.run), status: 'stopped' }); return;
+    }
+    if (!job.child?.connected) throw new Error('任务进程未连接');
+    if (command === 'stop' || command === 'closeBrowser') {
+      job.stopping ??= setTimeout(() => { if (job.child) void killOwnedTree(job.child); }, 8_000);
+    }
+    const requestId = randomUUID();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { job.controls?.delete(requestId); reject(new Error('任务操作确认超时')); }, 10_000);
+      job.controls!.set(requestId, { resolve, reject, timer });
+      const fail = (error: Error) => { clearTimeout(timer); job.controls?.delete(requestId); reject(error); };
+      try { job.child!.send({ type: 'control', requestId, command }, error => { if (error) fail(error); }); }
+      catch (error) { fail(error as Error); }
+    });
+    if (command === 'closeBrowser') { await job.finished; await this.store.flush(); }
+  }
+  async waitForRun(runId: string): Promise<RunSnapshot> {
+    const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
+    if (!terminal(job.run.status)) await new Promise<void>(resolve => {
+      const listener = (event: RunEvent) => { if (event.runId === runId && event.run && terminal(event.run.status)) { this.off('event', listener); resolve(); } };
+      this.on('event', listener);
+    });
+    if (!job.run.browserOpen) await job.finished;
+    await this.store.flush(); return structuredClone(job.run);
+  }
+  async waitForBrowserClosed(runId: string): Promise<void> {
+    const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
+    await job.finished; await this.store.flush();
+  }
+  async shutdown() {
+    this.shuttingDown = true;
+    await this.startQueue;
+    await Promise.all([...this.jobs.values()].map(async job => {
+      try {
+        if (!terminal(job.run.status)) await this.controlRun(job.run.runId, 'stop');
+        else if (job.child && job.run.browserOpen) await this.controlRun(job.run.runId, 'closeBrowser');
+      } catch (error) { if (job.child) await killOwnedTree(job.child); }
+    }));
+    await Promise.all([...this.jobs.values()].map(j => j.finished)); await this.store.flush();
+  }
+}

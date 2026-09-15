@@ -1,0 +1,43 @@
+{
+  "name": "personal-rpa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows 本地网页自动化工作台",
+  "type": "module",
+  "main": "dist/desktop/main.cjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run tests/integration",
+    "browser:install": "playwright install chromium",
+    "setup": "node node_modules/electron/install.js && playwright install chromium",
+    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs",
+    "demo": "tsx apps/runner/src/cli.ts demo",
+    "rpa": "tsx apps/runner/src/cli.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "lucide-react": "1.46.0",
+    "playwright": "1.63.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "44.3.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vitest": "5.0.0"
+  }
+}

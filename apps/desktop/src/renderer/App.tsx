@@ -1,0 +1,1822 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  Braces,
+  Check,
+  ChevronRight,
+  Circle,
+  Code2,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  FileText,
+  FolderOpen,
+  GitBranch,
+  Globe,
+  Layers,
+  ListTree,
+  Loader2,
+  MousePointer2,
+  Pause,
+  Play,
+  Plus,
+  Save,
+  Search,
+  Settings2,
+  Square,
+  Terminal,
+  Trash2,
+  Workflow,
+  X,
+} from "lucide-react";
+import type {
+  ActionDefinition,
+  Artifact,
+  DesktopApi,
+  RunCommand,
+  RunEvent,
+  RunSnapshot,
+  StepDefinition,
+  WorkflowDefinition,
+} from "../../../../packages/contracts/src/index.js";
+
+const api = (window as Window & { rpa?: DesktopApi }).rpa;
+const terminalStatuses = new Set([
+  "succeeded",
+  "failed",
+  "stopped",
+  "interrupted",
+]);
+const statusLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "运行中",
+  paused: "已暂停",
+  waiting_manual: "等待人工",
+  succeeded: "已完成",
+  failed: "失败",
+  stopped: "已停止",
+  interrupted: "意外中断",
+  started: "开始",
+  retrying: "重试中",
+  skipped: "已跳过",
+};
+type BottomTab = "logs" | "variables" | "artifacts" | "runs";
+type InspectorTab = "step" | "settings" | "inputs" | "elements";
+type StepLocation = {
+  step: StepDefinition;
+  siblings: StepDefinition[];
+  index: number;
+  parentId?: string;
+  branch?: "children" | "elseSteps";
+  depth: number;
+};
+const uuid = () => crypto.randomUUID();
+const clone = <T,>(value: T): T => structuredClone(value);
+const formatTime = (value: string) =>
+  new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
+const toText = (value: unknown) =>
+  typeof value === "string" ? value : JSON.stringify(value);
+const eventFile = (event: RunEvent) =>
+  event.data &&
+  typeof event.data === "object" &&
+  "path" in event.data &&
+  typeof event.data.path === "string"
+    ? event.data.path
+    : undefined;
+
+function flatten(
+  steps: StepDefinition[],
+  depth = 0,
+  parentId?: string,
+  branch?: "children" | "elseSteps",
+): StepLocation[] {
+  return steps.flatMap((step, index) => [
+    { step, siblings: steps, index, parentId, branch, depth },
+    ...flatten(step.children ?? [], depth + 1, step.stepId, "children"),
+    ...flatten(step.elseSteps ?? [], depth + 1, step.stepId, "elseSteps"),
+  ]);
+}
+
+function replaceStep(
+  steps: StepDefinition[],
+  id: string,
+  update: (step: StepDefinition) => StepDefinition,
+): StepDefinition[] {
+  return steps.map((step) =>
+    step.stepId === id
+      ? update(step)
+      : {
+          ...step,
+          ...(step.children
+            ? { children: replaceStep(step.children, id, update) }
+            : {}),
+          ...(step.elseSteps
+            ? { elseSteps: replaceStep(step.elseSteps, id, update) }
+            : {}),
+        },
+  );
+}
+
+function changeSiblings(
+  steps: StepDefinition[],
+  id: string,
+  update: (siblings: StepDefinition[], index: number) => StepDefinition[],
+): StepDefinition[] {
+  const index = steps.findIndex((step) => step.stepId === id);
+  if (index >= 0) return update(steps, index);
+  return steps.map((step) => ({
+    ...step,
+    ...(step.children
+      ? { children: changeSiblings(step.children, id, update) }
+      : {}),
+    ...(step.elseSteps
+      ? { elseSteps: changeSiblings(step.elseSteps, id, update) }
+      : {}),
+  }));
+}
+
+function copyStep(step: StepDefinition): StepDefinition {
+  return {
+    ...clone(step),
+    stepId: uuid(),
+    ...(step.children ? { children: step.children.map(copyStep) } : {}),
+    ...(step.elseSteps ? { elseSteps: step.elseSteps.map(copyStep) } : {}),
+  };
+}
+
+function ActionIcon({ type, size = 17 }: { type: string; size?: number }) {
+  if (/script|python|javascript|typescript/.test(type))
+    return <Code2 size={size} />;
+  if (/download/.test(type)) return <Download size={size} />;
+  if (/click|fill|select/.test(type)) return <MousePointer2 size={size} />;
+  if (/if|condition|loop|each/i.test(type)) return <GitBranch size={size} />;
+  if (/variable|assert/.test(type)) return <Braces size={size} />;
+  if (/browser|page|navigate|open/.test(type)) return <Globe size={size} />;
+  return <Layers size={size} />;
+}
+
+function Status({ status }: { status: string }) {
+  return (
+    <span className={`status status-${status}`}>
+      <span className="status-dot" />
+      {statusLabels[status] ?? status}
+    </span>
+  );
+}
+
+function RetainedBrowserStatus() {
+  return (
+    <span
+      className="status status-browser-retained"
+      title="流程已结束，浏览器仍占用资源。可显示、最小化或手动关闭。"
+    >
+      <Globe size={11} />
+      浏览器保留中
+    </span>
+  );
+}
+
+function IconButton({
+  label,
+  children,
+  disabled,
+  onClick,
+  danger,
+}: {
+  label: string;
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={`icon-button${danger ? " danger" : ""}`}
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function JsonEditor({
+  label,
+  value,
+  onChange,
+  onValidity,
+  hint,
+  objectOnly = false,
+  disabled = false,
+}: {
+  label: string;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  onValidity: (valid: boolean) => void;
+  hint?: string;
+  objectOnly?: boolean;
+  disabled?: boolean;
+}) {
+  const serialized = JSON.stringify(value === undefined ? {} : value, null, 2);
+  const [draft, setDraft] = useState(serialized);
+  const [error, setError] = useState("");
+  const ownValue = useRef(serialized);
+  useEffect(() => {
+    if (ownValue.current !== serialized) {
+      setDraft(serialized);
+      ownValue.current = serialized;
+    }
+    setError("");
+    onValidity(true);
+  }, [serialized]);
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <textarea
+        spellCheck={false}
+        disabled={disabled}
+        className={`code-input${error ? " input-error" : ""}`}
+        value={draft}
+        aria-invalid={!!error}
+        onChange={(event) => {
+          const text = event.target.value;
+          setDraft(text);
+          try {
+            const parsed: unknown = JSON.parse(text);
+            if (
+              objectOnly &&
+              (parsed === null ||
+                Array.isArray(parsed) ||
+                typeof parsed !== "object")
+            )
+              throw new Error("请输入 JSON 对象，例如 {}。");
+            ownValue.current = JSON.stringify(parsed, null, 2);
+            setError("");
+            onValidity(true);
+            onChange(parsed);
+          } catch (cause) {
+            setError(
+              cause instanceof Error && cause.message.startsWith("请输入")
+                ? cause.message
+                : "JSON 格式无效，请检查引号、逗号及括号。",
+            );
+            onValidity(false);
+          }
+        }}
+      />
+      {error ? (
+        <span className="field-error">{error}</span>
+      ) : (
+        hint && <small>{hint}</small>
+      )}
+    </label>
+  );
+}
+
+export function App() {
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [workflowId, setWorkflowId] = useState("");
+  const [actions, setActions] = useState<ActionDefinition[]>([]);
+  const [runs, setRuns] = useState<RunSnapshot[]>([]);
+  const [runId, setRunId] = useState("");
+  const [events, setEvents] = useState<RunEvent[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [query, setQuery] = useState("");
+  const [inspector, setInspector] = useState<InspectorTab>("step");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("logs");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [dataDir, setDataDir] = useState("");
+  const [downloadDir, setDownloadDir] = useState("");
+  const [demoUrl, setDemoUrl] = useState("");
+  const [saved, setSaved] = useState<Record<string, string>>({});
+  const [invalidFields, setInvalidFields] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [insertBranch, setInsertBranch] = useState<
+    "after" | "children" | "elseSteps"
+  >("after");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const workflow = workflows.find((item) => item.workflowId === workflowId);
+  const steps = useMemo(
+    () => flatten(workflow?.steps ?? []),
+    [workflow?.steps],
+  );
+  const selected = steps.find((item) => item.step.stepId === selectedId);
+  const selectedAction = actions.find(
+    (action) => action.type === selected?.step.actionType,
+  );
+  const run = runs.find((item) => item.runId === runId);
+  const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
+  const invalid = Object.values(invalidFields).some(Boolean);
+  const activeRun = run && !terminalStatuses.has(run.status);
+  const retainedBrowser = !!run?.browserOpen && !activeRun;
+  const browserAvailable = !!activeRun || !!run?.browserOpen;
+  const retainedBrowserCount = runs.filter(
+    (item) => item.browserOpen && terminalStatuses.has(item.status),
+  ).length;
+  const visibleEvents = events.filter(
+    (event) => event.runId === runId && event.message,
+  );
+  const stepEvents = events.filter(
+    (event) => event.runId === runId && event.type === "step",
+  );
+  const stepStatuses = new Map(
+    stepEvents.map((event) => [event.stepId, event.status]),
+  );
+  const actionGroups = useMemo(() => {
+    const groups = new Map<string, ActionDefinition[]>();
+    for (const action of actions.filter((item) =>
+      `${item.label} ${item.type} ${item.description}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+    )) {
+      const group = groups.get(action.category) ?? [];
+      group.push(action);
+      groups.set(action.category, group);
+    }
+    return [...groups.entries()];
+  }, [actions, query]);
+
+  useEffect(() => {
+    if (!api) {
+      setLoading(false);
+      setError(
+        "桌面运行服务未连接。请使用项目的桌面启动命令打开应用，浏览器预览无法保存或执行流程。",
+      );
+      return;
+    }
+    let mounted = true;
+    const off = api.onEvent((event) => {
+      if (!mounted) return;
+      setEvents((previous) => [...previous.slice(-3999), event]);
+      if (event.run) {
+        const snapshot = event.run;
+        setRuns((previous) => [
+          snapshot,
+          ...previous.filter((item) => item.runId !== snapshot.runId),
+        ]);
+      }
+    });
+    api
+      .bootstrap()
+      .then((state) => {
+        if (!mounted) return;
+        setWorkflows(state.workflows);
+        setActions(state.actions);
+        setRuns((previous) => [
+          ...previous,
+          ...state.runs.filter(
+            (item) => !previous.some((latest) => latest.runId === item.runId),
+          ),
+        ]);
+        setWorkflowId(state.workflows[0]?.workflowId ?? "");
+        setSelectedId(state.workflows[0]?.steps[0]?.stepId ?? "");
+        setRunId(state.runs[0]?.runId ?? "");
+        setSaved(
+          Object.fromEntries(
+            state.workflows.map((item) => [
+              item.workflowId,
+              JSON.stringify(item),
+            ]),
+          ),
+        );
+        setDataDir(state.dataDir);
+        setDownloadDir(state.defaultDownloadDir);
+        setDemoUrl(state.demoUrl);
+      })
+      .catch(
+        (cause) =>
+          mounted &&
+          setError(String(cause instanceof Error ? cause.message : cause)),
+      )
+      .finally(() => mounted && setLoading(false));
+    return () => {
+      mounted = false;
+      off();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 5000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => {
+    setInsertBranch("after");
+    setInvalidFields({});
+  }, [selectedId, workflowId, inspector]);
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ block: "nearest" });
+  }, [visibleEvents.length, bottomTab]);
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
+  const markValid = (key: string, valid: boolean) =>
+    setInvalidFields((previous) =>
+      previous[key] === !valid ? previous : { ...previous, [key]: !valid },
+    );
+  const updateWorkflow = (
+    update: (value: WorkflowDefinition) => WorkflowDefinition,
+  ) => {
+    if (busy) return;
+    setWorkflows((previous) =>
+      previous.map((item) =>
+        item.workflowId === workflowId ? update(item) : item,
+      ),
+    );
+  };
+  const updateSelected = (update: (step: StepDefinition) => StepDefinition) =>
+    updateWorkflow((value) => ({
+      ...value,
+      steps: replaceStep(value.steps, selectedId, update),
+    }));
+  const setParam = (key: string, value: unknown) =>
+    updateSelected((step) => {
+      const params = { ...step.params };
+      if (value === undefined) delete params[key];
+      else params[key] = value;
+      return { ...step, params };
+    });
+  const catchError = (cause: unknown) =>
+    setError(cause instanceof Error ? cause.message : String(cause));
+
+  async function saveWorkflow(thenRun = false) {
+    if (!api || !workflow || busy || invalid) return;
+    setBusy(thenRun ? "run" : "save");
+    setError("");
+    try {
+      const persisted = await api.saveWorkflow(workflow);
+      setWorkflows((previous) =>
+        previous.map((item) =>
+          item.workflowId === persisted.workflowId ? persisted : item,
+        ),
+      );
+      setSaved((previous) => ({
+        ...previous,
+        [persisted.workflowId]: JSON.stringify(persisted),
+      }));
+      if (thenRun) {
+        const snapshot = await api.runWorkflow(persisted);
+        setRuns((previous) =>
+          previous.some((item) => item.runId === snapshot.runId)
+            ? previous
+            : [snapshot, ...previous],
+        );
+        setRunId(snapshot.runId);
+        setBottomTab("logs");
+        setNotice(`已提交运行 · 修订 ${snapshot.revision}`);
+      } else setNotice("流程已保存");
+    } catch (cause) {
+      catchError(cause);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function control(command: RunCommand) {
+    if (!api || !run || busy) return;
+    setBusy(command);
+    setError("");
+    try {
+      await api.controlRun(run.runId, command);
+    } catch (cause) {
+      catchError(cause);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function addAction(action: ActionDefinition) {
+    if (!workflow) return;
+    const step: StepDefinition = {
+      stepId: uuid(),
+      name: action.label,
+      actionType: action.type,
+      params: clone(action.defaults),
+      timeoutMs: 30000,
+      onError: "fail",
+    };
+    updateWorkflow((value) => ({
+      ...value,
+      steps:
+        selectedId && selected
+          ? insertBranch === "after"
+            ? changeSiblings(value.steps, selectedId, (siblings, index) => [
+                ...siblings.slice(0, index + 1),
+                step,
+                ...siblings.slice(index + 1),
+              ])
+            : replaceStep(value.steps, selectedId, (parent) => ({
+                ...parent,
+                [insertBranch]: [...(parent[insertBranch] ?? []), step],
+              }))
+          : [...value.steps, step],
+    }));
+    setSelectedId(step.stepId);
+    setInspector("step");
+  }
+
+  function mutateStep(id: string, command: "up" | "down" | "copy" | "delete") {
+    const original = steps.find((item) => item.step.stepId === id)?.step;
+    const copied =
+      command === "copy" && original ? copyStep(original) : undefined;
+    if (copied) copied.name += " 副本";
+    updateWorkflow((value) => ({
+      ...value,
+      steps: changeSiblings(value.steps, id, (siblings, index) => {
+        const items = [...siblings];
+        if (command === "delete") items.splice(index, 1);
+        if (copied) items.splice(index + 1, 0, copied);
+        if (command === "up" && index > 0)
+          [items[index - 1], items[index]] = [items[index]!, items[index - 1]!];
+        if (command === "down" && index < items.length - 1)
+          [items[index], items[index + 1]] = [items[index + 1]!, items[index]!];
+        return items;
+      }),
+    }));
+    if (command === "delete" && selectedId === id) setSelectedId("");
+    if (copied) setSelectedId(copied.stepId);
+  }
+
+  function createWorkflow() {
+    const created: WorkflowDefinition = {
+      schemaVersion: 1,
+      workflowId: uuid(),
+      name: "未命名流程",
+      revision: 0,
+      variables: {},
+      elements: {},
+      steps: [],
+      settings: { downloadDir, headless: false, keepBrowserOpen: true },
+    };
+    setWorkflows((previous) => [...previous, created]);
+    setWorkflowId(created.workflowId);
+    setSelectedId("");
+    setInspector("settings");
+  }
+
+  const tabs: {
+    id: BottomTab;
+    label: string;
+    icon: ReactNode;
+    count?: number;
+  }[] = [
+    { id: "logs", label: "运行日志", icon: <Terminal size={15} /> },
+    { id: "variables", label: "变量", icon: <Braces size={15} /> },
+    {
+      id: "artifacts",
+      label: "下载产物",
+      icon: <Download size={15} />,
+      count: run?.artifacts.length,
+    },
+    {
+      id: "runs",
+      label: "全部运行",
+      icon: <Layers size={15} />,
+      count: runs.length,
+    },
+  ];
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">
+            <Workflow size={21} />
+          </span>
+          <div>
+            <strong>本地 RPA</strong>
+            <span>流程工作台</span>
+          </div>
+        </div>
+        <div className="workflow-heading">
+          <span className="breadcrumb">
+            我的流程 <ChevronRight size={14} />
+          </span>
+          <h1>{workflow?.name ?? "流程编辑器"}</h1>
+          <span className="revision">v{workflow?.revision ?? 0}</span>
+          {dirty && <span className="unsaved">未保存</span>}
+        </div>
+        <div className="toolbar">
+          <button
+            disabled={!api || !workflow || !!busy || invalid}
+            onClick={() => void saveWorkflow()}
+          >
+            <Save size={16} />
+            {busy === "save" ? "保存中" : "保存"}
+          </button>
+          <button
+            className="primary"
+            disabled={
+              !api || !workflow || !!busy || invalid || !workflow.steps.length
+            }
+            title={
+              !workflow?.steps.length
+                ? "添加至少一个步骤后运行"
+                : "保存当前流程并运行"
+            }
+            onClick={() => void saveWorkflow(true)}
+          >
+            {busy === "run" ? (
+              <Loader2 className="spin" size={16} />
+            ) : (
+              <Play size={16} />
+            )}
+            运行
+          </button>
+          <button
+            className="top-run-control"
+            title="控制下方选中的运行；当前步骤完成后暂停"
+            disabled={!activeRun || !!busy || run?.status === "queued"}
+            onClick={() =>
+              void control(
+                run?.status === "paused" || run?.status === "waiting_manual"
+                  ? "resume"
+                  : "pause",
+              )
+            }
+          >
+            {run?.status === "paused" || run?.status === "waiting_manual" ? (
+              <Play size={16} />
+            ) : (
+              <Pause size={16} />
+            )}
+            {run?.status === "paused" || run?.status === "waiting_manual"
+              ? "继续"
+              : "暂停"}
+          </button>
+          <button
+            className="top-run-control"
+            title="停止下方选中的运行"
+            disabled={!activeRun || !!busy}
+            onClick={() => void control("stop")}
+          >
+            <Square size={14} />
+            停止
+          </button>
+        </div>
+      </header>
+
+      {error && (
+        <div className="alert" role="alert">
+          <AlertCircle size={17} />
+          <span>{error}</span>
+          <IconButton label="关闭提示" onClick={() => setError("")}>
+            <X size={16} />
+          </IconButton>
+        </div>
+      )}
+      {notice && (
+        <div className="toast" role="status">
+          <Check size={16} />
+          {notice}
+          <IconButton label="关闭通知" onClick={() => setNotice("")}>
+            <X size={14} />
+          </IconButton>
+        </div>
+      )}
+
+      <div className="workspace">
+        <aside className="library" aria-label="指令库">
+          <div className="workflow-picker">
+            <label htmlFor="workflow-picker">当前流程</label>
+            <div>
+              <select
+                id="workflow-picker"
+                value={workflowId}
+                disabled={loading || !!busy}
+                onChange={(event) => {
+                  const next = workflows.find(
+                    (item) => item.workflowId === event.target.value,
+                  );
+                  setWorkflowId(event.target.value);
+                  setSelectedId(next?.steps[0]?.stepId ?? "");
+                }}
+              >
+                <option value="" disabled>
+                  选择流程
+                </option>
+                {workflows.map((item) => (
+                  <option key={item.workflowId} value={item.workflowId}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+              <IconButton
+                label="新建流程"
+                disabled={!api || loading || !!busy}
+                onClick={createWorkflow}
+              >
+                <Plus size={18} />
+              </IconButton>
+            </div>
+          </div>
+          <div className="section-heading">
+            <h2>指令库</h2>
+            <span>{actions.length}</span>
+          </div>
+          <label className="search">
+            <Search size={16} />
+            <input
+              ref={searchRef}
+              aria-label="搜索指令"
+              placeholder="搜索指令"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <kbd>Ctrl K</kbd>
+          </label>
+          <div className="action-groups">
+            {loading ? (
+              <div className="skeleton-list" aria-label="加载指令库">
+                {[1, 2, 3, 4, 5].map((item) => (
+                  <div key={item} />
+                ))}
+              </div>
+            ) : actionGroups.length ? (
+              actionGroups.map(([category, items]) => (
+                <section key={category} className="action-group">
+                  <h3>{category}</h3>
+                  {items.map((action) => (
+                    <button
+                      type="button"
+                      className="library-action"
+                      key={action.type}
+                      disabled={!workflow || !!busy}
+                      title={action.description}
+                      onClick={() => addAction(action)}
+                    >
+                      <span className="action-icon">
+                        <ActionIcon type={action.type} />
+                      </span>
+                      <span>{action.label}</span>
+                      <Plus size={14} className="add-sign" />
+                    </button>
+                  ))}
+                </section>
+              ))
+            ) : (
+              <div className="subtle-empty">
+                {query ? "没有匹配的指令" : "连接桌面服务后加载指令"}
+              </div>
+            )}
+          </div>
+          <div className="library-footer">
+            <span className="local-dot" />
+            本机执行<span>数据保存在本地</span>
+          </div>
+        </aside>
+
+        <main className="editor">
+          <div className="editor-top">
+            <div>
+              <ListTree size={17} />
+              <h2>流程步骤</h2>
+              <span className="count">{steps.length}</span>
+            </div>
+            <button
+              className="text-button"
+              disabled={!workflow}
+              onClick={() => setInspector("settings")}
+            >
+              <Settings2 size={15} />
+              运行设置
+            </button>
+          </div>
+          <div className="editor-caption">
+            <span>点击左侧指令，添加到当前步骤之后</span>
+            {selected && (
+              <select
+                className="insert-select"
+                aria-label="新指令插入位置"
+                value={insertBranch}
+                onChange={(event) =>
+                  setInsertBranch(event.target.value as typeof insertBranch)
+                }
+              >
+                <option value="after">插入到选中步骤之后</option>
+                {/if|condition|loop|each/i.test(selected.step.actionType) && (
+                  <option value="children">添加到执行分支</option>
+                )}
+                {/if|condition/.test(selected.step.actionType) && (
+                  <option value="elseSteps">添加到否则分支</option>
+                )}
+              </select>
+            )}
+          </div>
+          <div className="step-scroll">
+            {loading ? (
+              <div className="skeleton-steps" aria-label="正在加载流程">
+                {[1, 2, 3, 4].map((item) => (
+                  <div key={item} />
+                ))}
+              </div>
+            ) : steps.length ? (
+              <div className="step-list">
+                <div className="flow-terminal">
+                  <span />
+                  <span>开始</span>
+                </div>
+                {steps.map(
+                  ({ step, depth, index, siblings, branch }, flatIndex) => {
+                    const state =
+                      run?.workflowId === workflowId
+                        ? (stepStatuses.get(step.stepId) ??
+                          (run.currentStepId === step.stepId && activeRun
+                            ? run.status
+                            : undefined))
+                        : undefined;
+                    const action = actions.find(
+                      (item) => item.type === step.actionType,
+                    );
+                    const summary = Object.entries(step.params)
+                      .filter(
+                        ([key, value]) =>
+                          !/code|script|source/.test(key) &&
+                          value !== "" &&
+                          value !== undefined,
+                      )
+                      .slice(0, 2)
+                      .map(([key, value]) => `${key}: ${toText(value)}`)
+                      .join(" · ");
+                    return (
+                      <div
+                        key={step.stepId}
+                        className="step-wrapper"
+                        style={{ marginLeft: depth * 20 }}
+                      >
+                        {depth > 0 && index === 0 && (
+                          <div className="branch-label">
+                            <GitBranch size={12} />
+                            {branch === "elseSteps" ? "否则" : "执行分支"}
+                          </div>
+                        )}
+                        <article
+                          className={`step-card${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
+                        >
+                          <button
+                            className="step-main"
+                            aria-label={`步骤 ${flatIndex + 1}：${step.name}`}
+                            aria-pressed={selectedId === step.stepId}
+                            onClick={() => {
+                              setSelectedId(step.stepId);
+                              setInspector("step");
+                            }}
+                          >
+                            <span className="step-number">
+                              {String(flatIndex + 1).padStart(2, "0")}
+                            </span>
+                            <span className="step-action-icon">
+                              <ActionIcon type={step.actionType} size={19} />
+                            </span>
+                            <span className="step-copy">
+                              <strong>{step.name}</strong>
+                              <span>
+                                {summary ||
+                                  action?.description ||
+                                  step.actionType}
+                              </span>
+                            </span>
+                            {state && <Status status={state} />}
+                          </button>
+                          <div className="step-actions">
+                            <IconButton
+                              label={`上移 ${step.name}`}
+                              disabled={index === 0 || !!busy}
+                              onClick={() => mutateStep(step.stepId, "up")}
+                            >
+                              <ArrowUp size={14} />
+                            </IconButton>
+                            <IconButton
+                              label={`下移 ${step.name}`}
+                              disabled={index === siblings.length - 1 || !!busy}
+                              onClick={() => mutateStep(step.stepId, "down")}
+                            >
+                              <ArrowDown size={14} />
+                            </IconButton>
+                            <IconButton
+                              label={`复制 ${step.name}`}
+                              disabled={!!busy}
+                              onClick={() => mutateStep(step.stepId, "copy")}
+                            >
+                              <Copy size={14} />
+                            </IconButton>
+                            <IconButton
+                              label={`删除 ${step.name}`}
+                              disabled={!!busy}
+                              danger
+                              onClick={() => mutateStep(step.stepId, "delete")}
+                            >
+                              <Trash2 size={14} />
+                            </IconButton>
+                          </div>
+                        </article>
+                      </div>
+                    );
+                  },
+                )}
+                <div className="flow-terminal end">
+                  <span />
+                  <span>结束</span>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-editor">
+                <span className="empty-icon">
+                  <Workflow size={32} />
+                </span>
+                <h3>{workflow ? "搭建第一个步骤" : "连接你的流程工作台"}</h3>
+                <p>
+                  {workflow
+                    ? "从左侧指令库选择一个动作，开始编排流程。"
+                    : "请从 Electron 桌面应用启动，以加载流程和运行服务。"}
+                </p>
+                {workflow && (
+                  <button onClick={() => searchRef.current?.focus()}>
+                    <Plus size={16} />
+                    选择指令
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="editor-bottom">
+            <span>
+              <Circle size={8} fill="currentColor" />
+              {workflow
+                ? dirty
+                  ? "草稿有未保存更改"
+                  : "流程已保存"
+                : "等待桌面服务"}
+            </span>
+            <span>执行时使用保存的固定版本</span>
+          </div>
+        </main>
+
+        <aside className="inspector" aria-label="参数与设置">
+          <nav className="inspector-tabs" aria-label="属性面板">
+            {(
+              [
+                { id: "step", label: "步骤参数" },
+                { id: "settings", label: "设置" },
+                { id: "inputs", label: "变量" },
+                { id: "elements", label: "元素" },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                aria-current={inspector === tab.id ? "page" : undefined}
+                onClick={() => setInspector(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          <div className="inspector-body">
+            {inspector === "step" &&
+              (selected ? (
+                <>
+                  <div className="inspector-title">
+                    <span className="step-action-icon">
+                      <ActionIcon type={selected.step.actionType} size={21} />
+                    </span>
+                    <div>
+                      <h2>
+                        {selectedAction?.label ?? selected.step.actionType}
+                      </h2>
+                      <span>{selected.step.actionType}</span>
+                    </div>
+                  </div>
+                  <p className="help-text">
+                    {selectedAction?.description ??
+                      "此动作没有可用的参数定义，可在下方编辑原始 JSON 参数。"}
+                  </p>
+                  <label className="field">
+                    <span>步骤名称</span>
+                    <input
+                      value={selected.step.name}
+                      disabled={!!busy}
+                      onChange={(event) =>
+                        updateSelected((step) => ({
+                          ...step,
+                          name: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                  {selectedAction?.fields.map((field) => (
+                    <div key={`${selectedId}-${field.key}`}>
+                      {field.type === "json" ? (
+                        <JsonEditor
+                          disabled={!!busy}
+                          label={field.label}
+                          value={
+                            selected.step.params[field.key] === undefined
+                              ? (field.defaultValue ?? {})
+                              : selected.step.params[field.key]
+                          }
+                          onChange={(value) => setParam(field.key, value)}
+                          onValidity={(valid) =>
+                            markValid(`param:${field.key}`, valid)
+                          }
+                          hint={field.placeholder}
+                        />
+                      ) : field.type === "boolean" ? (
+                        <label className="checkbox-field">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(
+                              selected.step.params[field.key] ??
+                                field.defaultValue,
+                            )}
+                            disabled={!!busy}
+                            onChange={(event) =>
+                              setParam(field.key, event.target.checked)
+                            }
+                          />
+                          <span>{field.label}</span>
+                        </label>
+                      ) : (
+                        <label className="field">
+                          <span>
+                            {field.label}
+                            {field.required && (
+                              <span className="required"> *</span>
+                            )}
+                          </span>
+                          {field.type === "select" ? (
+                            <select
+                              value={String(
+                                selected.step.params[field.key] ??
+                                  field.defaultValue ??
+                                  "",
+                              )}
+                              disabled={!!busy}
+                              onChange={(event) =>
+                                setParam(field.key, event.target.value)
+                              }
+                            >
+                              {!field.required && (
+                                <option value="">未设置</option>
+                              )}
+                              {field.options?.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          ) : field.type === "textarea" ? (
+                            <textarea
+                              className={
+                                /code|script/.test(field.key)
+                                  ? "code-input script-input"
+                                  : ""
+                              }
+                              value={String(
+                                selected.step.params[field.key] ??
+                                  field.defaultValue ??
+                                  "",
+                              )}
+                              disabled={!!busy}
+                              placeholder={field.placeholder}
+                              spellCheck={false}
+                              onChange={(event) =>
+                                setParam(field.key, event.target.value)
+                              }
+                            />
+                          ) : (
+                            <input
+                              type={field.type === "number" ? "number" : "text"}
+                              value={String(
+                                selected.step.params[field.key] ??
+                                  field.defaultValue ??
+                                  "",
+                              )}
+                              disabled={!!busy}
+                              placeholder={field.placeholder}
+                              onChange={(event) =>
+                                setParam(
+                                  field.key,
+                                  field.type === "number"
+                                    ? event.target.value === ""
+                                      ? undefined
+                                      : Number(event.target.value)
+                                    : event.target.value,
+                                )
+                              }
+                            />
+                          )}
+                        </label>
+                      )}
+                    </div>
+                  ))}
+                  {!selectedAction && (
+                    <JsonEditor
+                      disabled={!!busy}
+                      label="原始动作参数"
+                      value={selected.step.params}
+                      objectOnly
+                      onValidity={(valid) => markValid("params", valid)}
+                      onChange={(value) =>
+                        updateSelected((step) => ({
+                          ...step,
+                          params: value as Record<string, unknown>,
+                        }))
+                      }
+                    />
+                  )}
+                  <label className="field">
+                    <span>输出变量</span>
+                    <input
+                      value={selected.step.output ?? ""}
+                      disabled={!!busy}
+                      placeholder="例如：exportFile"
+                      onChange={(event) =>
+                        updateSelected((step) => ({
+                          ...step,
+                          output: event.target.value || undefined,
+                        }))
+                      }
+                    />
+                    <small>将动作结果写入指定变量。</small>
+                  </label>
+                  <details className="advanced">
+                    <summary>超时与失败处理</summary>
+                    <label className="field">
+                      <span>步骤超时（毫秒）</span>
+                      <input
+                        type="number"
+                        min={100}
+                        max={3600000}
+                        value={selected.step.timeoutMs ?? 30000}
+                        disabled={!!busy}
+                        onChange={(event) =>
+                          updateSelected((step) => ({
+                            ...step,
+                            timeoutMs: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="field">
+                      <span>失败后</span>
+                      <select
+                        value={selected.step.onError ?? "fail"}
+                        disabled={!!busy}
+                        onChange={(event) =>
+                          updateSelected((step) => ({
+                            ...step,
+                            onError: event.target.value as "fail" | "pause",
+                          }))
+                        }
+                      >
+                        <option value="fail">结束运行并记录错误</option>
+                        <option
+                          value="pause"
+                          disabled={!selectedAction?.safeToRetry}
+                        >
+                          暂停，等待人工恢复（读取 / 校验）
+                        </option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>最多尝试次数</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={5}
+                        value={selected.step.retry?.maxAttempts ?? 1}
+                        disabled={!!busy || !selectedAction?.safeToRetry}
+                        onChange={(event) =>
+                          updateSelected((step) => ({
+                            ...step,
+                            retry: {
+                              maxAttempts: Number(event.target.value),
+                              delayMs: step.retry?.delayMs ?? 1000,
+                            },
+                          }))
+                        }
+                      />
+                      <small>
+                        {selectedAction?.safeToRetry
+                          ? "包含首次执行；仅为支持安全重试的动作启用。"
+                          : "此动作可能产生外部效果，不启用自动重试。"}
+                      </small>
+                    </label>
+                    {(selected.step.retry?.maxAttempts ?? 1) > 1 && (
+                      <label className="field">
+                        <span>重试间隔（毫秒）</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selected.step.retry?.delayMs ?? 1000}
+                          disabled={!!busy}
+                          onChange={(event) =>
+                            updateSelected((step) => ({
+                              ...step,
+                              retry: {
+                                maxAttempts: step.retry?.maxAttempts ?? 1,
+                                delayMs: Number(event.target.value),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                    )}
+                  </details>
+                </>
+              ) : (
+                <div className="panel-empty">
+                  <MousePointer2 size={26} />
+                  <h3>选择一个步骤</h3>
+                  <p>在中央列表中选择步骤，编辑动作参数和失败策略。</p>
+                </div>
+              ))}
+            {inspector === "settings" && workflow && (
+              <>
+                <h2 className="panel-title">运行设置</h2>
+                <p className="help-text">
+                  设置随流程保存，在下一次运行时生效。
+                </p>
+                <label className="field">
+                  <span>流程名称</span>
+                  <input
+                    value={workflow.name}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>下载目录</span>
+                  <div className="input-with-button">
+                    <input
+                      value={workflow.settings.downloadDir}
+                      disabled={!!busy}
+                      placeholder={downloadDir}
+                      onChange={(event) =>
+                        updateWorkflow((value) => ({
+                          ...value,
+                          settings: {
+                            ...value.settings,
+                            downloadDir: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                    <IconButton
+                      label="选择下载目录"
+                      disabled={!api || !!busy}
+                      onClick={() =>
+                        void api
+                          ?.chooseDirectory()
+                          .then((path) => {
+                            if (path)
+                              updateWorkflow((value) => ({
+                                ...value,
+                                settings: {
+                                  ...value.settings,
+                                  downloadDir: path,
+                                },
+                              }));
+                          })
+                          .catch(catchError)
+                      }
+                    >
+                      <FolderOpen size={17} />
+                    </IconButton>
+                  </div>
+                  <small>下载产物保留本次运行的独立归属。</small>
+                </label>
+                <label className="field">
+                  <span>浏览器运行方式</span>
+                  <select
+                    value={workflow.settings.headless ? "headless" : "headed"}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          headless: event.target.value === "headless",
+                        },
+                      }))
+                    }
+                  >
+                    <option value="headed">
+                      有界面 · 支持人工接管与最小化
+                    </option>
+                    <option value="headless">无头 · 不显示浏览器窗口</option>
+                  </select>
+                  <small>人工登录使用有界面模式；运行时不能切换模式。</small>
+                </label>
+                <label className="field">
+                  <span>流程结束后的浏览器</span>
+                  <select
+                    value={workflow.settings.keepBrowserOpen !== false ? "keep" : "close"}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          keepBrowserOpen: event.target.value === "keep",
+                        },
+                      }))
+                    }
+                  >
+                    <option value="keep">保留浏览器（默认）</option>
+                    <option value="close">自动关闭浏览器</option>
+                  </select>
+                  <small>
+                    保留后仍占用资源，可在运行记录中显示、最小化或手动关闭。停止任务会关闭浏览器。
+                  </small>
+                </label>
+                <label className="field">
+                  <span>浏览器配置名称</span>
+                  <input
+                    value={workflow.settings.profileId ?? ""}
+                    disabled={!!busy}
+                    placeholder="留空使用独立运行配置"
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          profileId: event.target.value || undefined,
+                        },
+                      }))
+                    }
+                  />
+                  <small>
+                    命名配置可保留登录。同一配置同时只供一个任务使用；再次使用前，请关闭保留的浏览器。
+                  </small>
+                </label>
+                <label className="field">
+                  <span>Python 可执行文件</span>
+                  <input
+                    value={workflow.settings.pythonExecutable ?? ""}
+                    disabled={!!busy}
+                    placeholder="python"
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          pythonExecutable: event.target.value || undefined,
+                        },
+                      }))
+                    }
+                  />
+                  <small>Python 步骤调用本地环境，不自动安装依赖。</small>
+                </label>
+                {dataDir && (
+                  <div className="environment-info">
+                    <span>本地数据目录</span>
+                    <code>{dataDir}</code>
+                    <button
+                      className="text-button"
+                      onClick={() =>
+                        void api?.openPath(dataDir).catch(catchError)
+                      }
+                    >
+                      <FolderOpen size={14} />
+                      打开目录
+                    </button>
+                  </div>
+                )}
+                {demoUrl && (
+                  <div className="environment-info">
+                    <span>受控演示页</span>
+                    <code>{demoUrl}</code>
+                    <small>
+                      示例用于验证自动化闭环，不代表真实站点已适配。
+                    </small>
+                  </div>
+                )}
+              </>
+            )}
+            {inspector === "inputs" && workflow && (
+              <>
+                <h2 className="panel-title">初始变量</h2>
+                <p className="help-text">
+                  变量随流程初始化；运行产生的当前值在下方「变量」中查看。
+                </p>
+                <JsonEditor
+                  disabled={!!busy}
+                  key={workflowId + "-variables"}
+                  label="变量 JSON"
+                  value={workflow.variables}
+                  objectOnly
+                  onValidity={(valid) => markValid("variables", valid)}
+                  onChange={(value) =>
+                    updateWorkflow((item) => ({
+                      ...item,
+                      variables: value as WorkflowDefinition["variables"],
+                    }))
+                  }
+                  hint={"使用 {{变量名}} 在动作参数中引用变量。"}
+                />
+              </>
+            )}
+            {inspector === "elements" && workflow && (
+              <>
+                <h2 className="panel-title">元素引用</h2>
+                <p className="help-text">
+                  使用已知定位信息定义元素，动作通过元素名称引用。元素拾取器将在后续阶段补齐。
+                </p>
+                <JsonEditor
+                  disabled={!!busy}
+                  key={workflowId + "-elements"}
+                  label="元素库 JSON"
+                  value={workflow.elements}
+                  objectOnly
+                  onValidity={(valid) => markValid("elements", valid)}
+                  onChange={(value) =>
+                    updateWorkflow((item) => ({
+                      ...item,
+                      elements: value as WorkflowDefinition["elements"],
+                    }))
+                  }
+                />
+              </>
+            )}
+            {invalid && (
+              <p className="field-error" role="alert">
+                请修正 JSON 格式后保存或运行。
+              </p>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      <section className="console" aria-label="运行监控">
+        <div className="console-header">
+          <div className="bottom-tabs" role="tablist" aria-label="运行信息">
+            {tabs.map((tab, index) => (
+              <button
+                key={tab.id}
+                id={`tab-${tab.id}`}
+                role="tab"
+                aria-selected={bottomTab === tab.id}
+                aria-controls={`panel-${tab.id}`}
+                tabIndex={bottomTab === tab.id ? 0 : -1}
+                className={bottomTab === tab.id ? "active" : ""}
+                onClick={() => setBottomTab(tab.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    const next =
+                      tabs[
+                        (index +
+                          (event.key === "ArrowRight" ? 1 : -1) +
+                          tabs.length) %
+                          tabs.length
+                      ]!;
+                    setBottomTab(next.id);
+                    document.getElementById(`tab-${next.id}`)?.focus();
+                  }
+                }}
+              >
+                {tab.icon}
+                {tab.label}
+                {!!tab.count && <span className="count">{tab.count}</span>}
+              </button>
+            ))}
+          </div>
+          <div className="run-tools">
+            {run && (
+              <>
+                <Status status={run.status} />
+                {retainedBrowser && <RetainedBrowserStatus />}
+                <span className="run-version">v{run.revision}</span>
+              </>
+            )}
+            <select
+              aria-label="当前查看的运行"
+              value={runId}
+              onChange={(event) => setRunId(event.target.value)}
+            >
+              <option value="">选择运行记录</option>
+              {runs.map((item) => (
+                <option key={item.runId} value={item.runId}>
+                  {formatTime(item.startedAt)} · {item.workflowName}
+                </option>
+              ))}
+            </select>
+            <IconButton
+              label={
+                run?.status === "paused" || run?.status === "waiting_manual"
+                  ? "继续所选运行"
+                  : "暂停所选运行（当前步骤完成后）"
+              }
+              disabled={!activeRun || !!busy || run?.status === "queued"}
+              onClick={() =>
+                void control(
+                  run?.status === "paused" || run?.status === "waiting_manual"
+                    ? "resume"
+                    : "pause",
+                )
+              }
+            >
+              {run?.status === "paused" || run?.status === "waiting_manual" ? (
+                <Play size={16} />
+              ) : (
+                <Pause size={16} />
+              )}
+            </IconButton>
+            <IconButton
+              label="停止所选运行"
+              disabled={!activeRun || !!busy}
+              danger
+              onClick={() => void control("stop")}
+            >
+              <Square size={15} />
+            </IconButton>
+            <IconButton
+              label="显示所选运行浏览器"
+              disabled={!browserAvailable || !!busy}
+              onClick={() => void control("show")}
+            >
+              <Eye size={16} />
+            </IconButton>
+            <IconButton
+              label="最小化所选运行浏览器"
+              disabled={!browserAvailable || !!busy}
+              onClick={() => void control("hide")}
+            >
+              <EyeOff size={16} />
+            </IconButton>
+            <IconButton
+              label={activeRun ? "关闭浏览器前请先停止所选运行" : "关闭所选运行浏览器"}
+              disabled={!retainedBrowser || !!busy}
+              danger
+              onClick={() => void control("closeBrowser")}
+            >
+              <X size={16} />
+            </IconButton>
+          </div>
+        </div>
+        <div
+          className="console-content"
+          role="tabpanel"
+          id={`panel-${bottomTab}`}
+          aria-labelledby={`tab-${bottomTab}`}
+          tabIndex={0}
+        >
+          {bottomTab === "logs" &&
+            (visibleEvents.length ? (
+              <div className="log-lines">
+                {visibleEvents.map((event, index) => (
+                  <div
+                    key={`${event.at}-${index}`}
+                    className={`log-line${event.status === "failed" ? " log-error" : ""}`}
+                  >
+                    <time>{formatTime(event.at)}</time>
+                    <span className="log-type">
+                      {event.type === "step"
+                        ? (statusLabels[event.status ?? ""] ?? "步骤")
+                        : event.type === "artifact"
+                          ? "文件"
+                          : event.type === "run"
+                            ? "运行"
+                            : "日志"}
+                    </span>
+                    <span>
+                      {event.stepId && (
+                        <button
+                          className="log-step"
+                          onClick={() => {
+                            const found = steps.find(
+                              (item) => item.step.stepId === event.stepId,
+                            );
+                            if (found) {
+                              setSelectedId(found.step.stepId);
+                              setInspector("step");
+                            }
+                          }}
+                        >
+                          {steps.find(
+                            (item) => item.step.stepId === event.stepId,
+                          )?.step.name ?? event.stepId.slice(0, 8)}
+                        </button>
+                      )}
+                      {event.message}
+                      {eventFile(event) && (
+                        <button
+                          className="log-step"
+                          onClick={() =>
+                            void api
+                              ?.openPath(eventFile(event)!)
+                              .catch(catchError)
+                          }
+                        >
+                          打开文件
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            ) : (
+              <div className="console-empty">
+                <Terminal size={22} />
+                <span>
+                  {run?.error ??
+                    (run
+                      ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。"
+                      : "运行流程后，在这里查看步骤进度和执行日志。")}
+                </span>
+              </div>
+            ))}
+          {bottomTab === "variables" &&
+            (run && Object.keys(run.variables).length ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>变量名称</th>
+                    <th>类型</th>
+                    <th>当前值</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(run.variables).map(([name, value]) => (
+                    <tr key={name}>
+                      <td>
+                        <code>{name}</code>
+                      </td>
+                      <td className="muted">
+                        {value === null
+                          ? "null"
+                          : Array.isArray(value)
+                            ? "array"
+                            : typeof value}
+                      </td>
+                      <td>
+                        <code className="variable-value">{toText(value)}</code>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="console-empty">
+                <Braces size={23} />
+                <span>所选运行尚未产生变量。</span>
+              </div>
+            ))}
+          {bottomTab === "artifacts" &&
+            (run?.artifacts.length ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>文件名称</th>
+                    <th>保存路径</th>
+                    <th className="number-cell">大小</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {run.artifacts.map((artifact: Artifact) => (
+                    <tr key={artifact.path}>
+                      <td>
+                        <span className="file-name">
+                          <FileText size={16} />
+                          {artifact.name}
+                        </span>
+                      </td>
+                      <td>
+                        <code className="artifact-path" title={artifact.path}>
+                          {artifact.path}
+                        </code>
+                      </td>
+                      <td className="number-cell">
+                        {artifact.size < 1024
+                          ? `${artifact.size} B`
+                          : `${(artifact.size / 1024).toFixed(1)} KB`}
+                      </td>
+                      <td>
+                        <button
+                          className="text-button"
+                          onClick={() =>
+                            void api?.openPath(artifact.path).catch(catchError)
+                          }
+                        >
+                          <FolderOpen size={14} />
+                          打开
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="console-empty">
+                <Download size={23} />
+                <span>下载成功后，文件路径和大小将在这里显示。</span>
+              </div>
+            ))}
+          {bottomTab === "runs" &&
+            (runs.length ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>流程 / 运行 ID</th>
+                    <th>版本</th>
+                    <th>开始时间</th>
+                    <th>状态</th>
+                    <th>当前步骤 / 错误</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map((item) => (
+                    <tr
+                      key={item.runId}
+                      className={runId === item.runId ? "selected-row" : ""}
+                    >
+                      <td>
+                        <button
+                          className="run-select"
+                          onClick={() => {
+                            setRunId(item.runId);
+                            setBottomTab("logs");
+                          }}
+                        >
+                          <strong>{item.workflowName}</strong>
+                          <code>{item.runId.slice(0, 12)}</code>
+                        </button>
+                      </td>
+                      <td>v{item.revision}</td>
+                      <td>
+                        {new Date(item.startedAt).toLocaleString("zh-CN", {
+                          hour12: false,
+                        })}
+                      </td>
+                      <td>
+                        <Status status={item.status} />
+                        {item.browserOpen && terminalStatuses.has(item.status) && (
+                          <RetainedBrowserStatus />
+                        )}
+                      </td>
+                      <td className={item.error ? "error-text" : "muted"}>
+                        {item.error ?? item.currentStepId ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="console-empty">
+                <Layers size={23} />
+                <span>还没有运行记录。保存流程后，点击顶部「运行」。</span>
+              </div>
+            ))}
+        </div>
+      </section>
+      <footer className="statusbar">
+        <span>
+          <span className={`connection-dot${api ? " connected" : ""}`} />
+          {loading
+            ? "正在连接运行服务"
+            : api
+              ? "本地运行服务"
+              : "桌面服务未连接"}
+        </span>
+        <span>
+          {runs.filter((item) => !terminalStatuses.has(item.status)).length}{" "}
+          个活跃任务
+          {retainedBrowserCount > 0 && (
+            <>
+              <span className="footer-divider">·</span>
+              {retainedBrowserCount} 个浏览器保留中（占用资源）
+            </>
+          )}
+          <span className="footer-divider">·</span>JSON 流程 v1
+        </span>
+      </footer>
+    </div>
+  );
+}
