@@ -5,7 +5,8 @@ import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { FileStore } from '../../../packages/persistence/src/index.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
-import { workflowSchema, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition } from '../../../packages/contracts/src/index.js';
+import { scheduleIdentifier, scheduleSchema, workflowSchema, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
+import { nextScheduleTime } from './schedule.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
 interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
@@ -18,13 +19,16 @@ async function killOwnedTree(child: ChildProcess) {
   });
   else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
 }
-export interface ManagerOptions { dataDir: string; maxConcurrent?: number; rootDir?: string; workerPath?: string }
+export interface ManagerOptions { dataDir: string; maxConcurrent?: number; rootDir?: string; workerPath?: string; now?: () => Date; schedulePollMs?: number; autoStartSchedules?: boolean }
 export class RunManager extends EventEmitter {
   readonly store: FileStore;
   private jobs = new Map<string, Job>();
   private pending: string[] = [];
   private shuttingDown = false;
   private startQueue: Promise<unknown> = Promise.resolve();
+  private schedules = new Map<string, WorkflowSchedule>();
+  private scheduleTimer?: NodeJS.Timeout;
+  private checkingSchedules = false;
   constructor(private options: ManagerOptions) {
     super();
     const concurrency = options.maxConcurrent ?? 2;
@@ -42,31 +46,134 @@ export class RunManager extends EventEmitter {
       } else if (browserWasOpen) await this.store.saveRun(run);
       this.jobs.set(run.runId, { run, workflow: undefined as unknown as WorkflowDefinition });
     }
+    const workflows = await this.listWorkflows();
+    const now = this.now();
+    for (const schedule of await this.store.listSchedules()) {
+      if (!workflows.some(workflow => workflow.workflowId === schedule.workflowId)) {
+        schedule.enabled = false; schedule.nextRunAt = undefined; schedule.lastError = '关联流程已不存在，定时计划已停用。';
+      } else if (schedule.enabled && (!schedule.nextRunAt || Date.parse(schedule.nextRunAt) <= now.getTime())) {
+        if (schedule.kind === 'once' && Date.parse(schedule.at!) <= now.getTime()) {
+          schedule.enabled = false; schedule.nextRunAt = undefined;
+          schedule.lastError = '工作台未运行时错过执行时间，单次计划已停用，请重新选择时间。';
+        } else {
+          const missed = Boolean(schedule.nextRunAt);
+          schedule.nextRunAt = nextScheduleTime(schedule, now);
+          if (missed) schedule.lastError = '工作台未运行时错过的执行已跳过，将从下一次开始。';
+        }
+      }
+      await this.store.saveSchedule(schedule);
+      this.schedules.set(schedule.scheduleId, schedule);
+    }
+    if (this.options.autoStartSchedules !== false) this.startScheduling();
+  }
+  startScheduling() {
+    if (this.shuttingDown) throw new Error('运行器正在退出');
+    if (this.scheduleTimer) return;
+    const pollMs = this.options.schedulePollMs ?? 1_000;
+    if (pollMs > 0) {
+      this.scheduleTimer = setInterval(() => {
+        if (this.checkingSchedules) return;
+        this.checkingSchedules = true;
+        void this.checkSchedules().catch(error => this.emit('storage-error', error)).finally(() => { this.checkingSchedules = false; });
+      }, pollMs);
+      this.scheduleTimer.unref();
+    }
+  }
+  private now() { return this.options.now?.() ?? new Date(); }
+  private serialize<T>(callback: () => Promise<T>): Promise<T> {
+    const operation = this.startQueue.then(async () => {
+      if (this.shuttingDown) throw new Error('运行器正在退出');
+      return callback();
+    });
+    this.startQueue = operation.catch(() => {}); return operation;
   }
   listRuns() { return [...this.jobs.values()].map(j => structuredClone(j.run)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
   listWorkflows() { return this.store.listWorkflows(); }
-  saveWorkflow(workflow: WorkflowDefinition) { return this.store.saveWorkflow(workflow); }
+  saveWorkflow(workflow: WorkflowDefinition) { return this.serialize(() => this.store.saveWorkflow(workflow)); }
+  deleteWorkflow(workflowId: string): Promise<void> {
+    const id = scheduleIdentifier.parse(workflowId);
+    return this.serialize(async () => {
+      if ([...this.jobs.values()].some(job => job.run.workflowId === id && (!terminal(job.run.status) || job.child))) throw new Error('该流程仍有任务或浏览器正在运行，请先停止任务并关闭浏览器。');
+      if (!(await this.listWorkflows()).some(workflow => workflow.workflowId === id)) throw new Error('流程不存在');
+      for (const schedule of this.schedules.values()) if (schedule.workflowId === id) {
+        await this.store.deleteSchedule(schedule.scheduleId); this.schedules.delete(schedule.scheduleId);
+      }
+      await this.store.deleteWorkflow(id);
+    });
+  }
+  listSchedules(): WorkflowSchedule[] { return [...this.schedules.values()].map(schedule => structuredClone(schedule)); }
+  saveSchedule(input: WorkflowSchedule): Promise<WorkflowSchedule> {
+    const parsed = scheduleSchema.parse(input);
+    return this.serialize(async () => {
+      if (!(await this.listWorkflows()).some(workflow => workflow.workflowId === parsed.workflowId)) throw new Error('请先保存要定时运行的流程');
+      const now = this.now();
+      if (parsed.enabled && parsed.kind === 'once' && Date.parse(parsed.at!) <= now.getTime()) throw new Error('单次运行时间必须晚于当前时间');
+      const previous = this.schedules.get(parsed.scheduleId);
+      const sameWorkflow = previous?.workflowId === parsed.workflowId;
+      const sameTrigger = sameWorkflow && previous?.kind === parsed.kind && (
+        parsed.kind === 'once' ? previous.at === parsed.at : parsed.kind === 'daily' ? previous.time === parsed.time : previous.intervalMinutes === parsed.intervalMinutes
+      );
+      const saved: WorkflowSchedule = {
+        scheduleId: parsed.scheduleId, workflowId: parsed.workflowId, name: parsed.name, enabled: parsed.enabled,
+        kind: parsed.kind, at: parsed.kind === 'once' ? parsed.at : undefined,
+        time: parsed.kind === 'daily' ? parsed.time : undefined, intervalMinutes: parsed.kind === 'interval' ? parsed.intervalMinutes : undefined,
+        lastRunAt: sameWorkflow ? previous?.lastRunAt : undefined, lastRunId: sameWorkflow ? previous?.lastRunId : undefined,
+        lastError: sameTrigger ? previous?.lastError : undefined,
+        nextRunAt: parsed.enabled ? (sameTrigger && previous.enabled && previous.nextRunAt ? previous.nextRunAt : nextScheduleTime(parsed, now)) : undefined,
+      };
+      await this.store.saveSchedule(saved); this.schedules.set(saved.scheduleId, saved); return structuredClone(saved);
+    });
+  }
+  deleteSchedule(scheduleId: string): Promise<void> {
+    const id = scheduleIdentifier.parse(scheduleId);
+    return this.serialize(async () => {
+      if (!this.schedules.has(id)) throw new Error('定时计划不存在');
+      await this.store.deleteSchedule(id); this.schedules.delete(id);
+    });
+  }
+  checkSchedules(): Promise<void> {
+    return this.serialize(async () => {
+      const now = this.now();
+      for (const schedule of this.schedules.values()) {
+        if (!schedule.enabled || !schedule.nextRunAt || Date.parse(schedule.nextRunAt) > now.getTime()) continue;
+        const scheduledFor = schedule.nextRunAt;
+        const claimed: WorkflowSchedule = { ...schedule, lastRunAt: now.toISOString(), lastRunId: undefined, lastError: undefined };
+        if (claimed.kind === 'once') { claimed.enabled = false; claimed.nextRunAt = undefined; }
+        else claimed.nextRunAt = nextScheduleTime(claimed, now);
+        // Persist the occurrence before creating a run so restarting cannot execute it twice.
+        await this.store.saveSchedule(claimed); this.schedules.set(claimed.scheduleId, claimed);
+        try {
+          const workflow = (await this.listWorkflows()).find(item => item.workflowId === claimed.workflowId);
+          if (!workflow) throw new Error('关联流程已不存在');
+          const run = await this.startWorkflow(workflow, { scheduleId: claimed.scheduleId, scheduledFor });
+          claimed.lastRunId = run.runId;
+        } catch (error) { claimed.lastError = error instanceof Error ? error.message : String(error); }
+        await this.store.saveSchedule(claimed);
+      }
+    });
+  }
   runWorkflow(input: WorkflowDefinition): Promise<RunSnapshot> {
     const workflow = workflowSchema.parse(input); validateActions(workflow);
-    const operation = this.startQueue.then(async () => {
-      if (this.shuttingDown) throw new Error('运行器正在退出');
-      const saved = (await this.listWorkflows()).find(w => w.workflowId === workflow.workflowId);
-      if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
-      const sameWorkflow = [...this.jobs.values()].find(j => j.run.workflowId === workflow.workflowId && (!terminal(j.run.status) || j.child));
-      if (sameWorkflow?.run.browserOpen && terminal(sameWorkflow.run.status)) throw new Error('同一流程的浏览器仍保留，请在运行记录中关闭该浏览器后再运行。');
-      if (sameWorkflow) throw new Error('同一流程已有未结束的任务，请先完成或停止。');
-      const profileId = workflow.settings.profileId ?? workflow.workflowId;
-      if ([...this.jobs.values()].some(j => j.child && terminal(j.run.status) && j.run.browserOpen && (j.workflow.settings.profileId ?? j.workflow.workflowId) === profileId)) throw new Error('浏览器配置仍被已结束的任务保留，请先关闭该浏览器。');
-      const run: RunSnapshot = {
-        runId: randomUUID(), workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
-        status: 'queued', startedAt: new Date().toISOString(), variables: structuredClone(workflow.variables), artifacts: [], browserOpen: false,
-      };
-      await this.store.createRun(workflow, run);
-      this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
-      this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run) });
-      this.drain(); return structuredClone(run);
-    });
-    this.startQueue = operation.catch(() => {}); return operation;
+    return this.serialize(() => this.startWorkflow(workflow));
+  }
+  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string }): Promise<RunSnapshot> {
+    if (this.shuttingDown) throw new Error('运行器正在退出');
+    const saved = (await this.listWorkflows()).find(w => w.workflowId === workflow.workflowId);
+    if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
+    const sameWorkflow = [...this.jobs.values()].find(j => j.run.workflowId === workflow.workflowId && (!terminal(j.run.status) || j.child));
+    if (sameWorkflow?.run.browserOpen && terminal(sameWorkflow.run.status)) throw new Error('同一流程的浏览器仍保留，请在运行记录中关闭该浏览器后再运行。');
+    if (sameWorkflow) throw new Error('同一流程已有未结束的任务，请先完成或停止。');
+    const profileId = workflow.settings.profileId ?? workflow.workflowId;
+    if ([...this.jobs.values()].some(j => j.child && terminal(j.run.status) && j.run.browserOpen && (j.workflow.settings.profileId ?? j.workflow.workflowId) === profileId)) throw new Error('浏览器配置仍被已结束的任务保留，请先关闭该浏览器。');
+    const run: RunSnapshot = {
+      runId: randomUUID(), workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
+      status: 'queued', startedAt: new Date().toISOString(), variables: structuredClone(workflow.variables), artifacts: [], browserOpen: false,
+      ...schedule,
+    };
+    await this.store.createRun(workflow, run);
+    this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
+    this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run) });
+    this.drain(); return structuredClone(run);
   }
   private publish(event: RunEvent) {
     this.store.recordEvent(event).catch(error => this.emit('storage-error', error));
@@ -126,7 +233,7 @@ export class RunManager extends EventEmitter {
       }
       job.exit?.(); this.drain();
     });
-    child.send({ type: 'start', workflow: job.workflow, options: { dataDir: this.options.dataDir, runId: job.run.runId } }, error => { if (error) job.run.error = error.message; });
+    child.send({ type: 'start', workflow: job.workflow, options: { dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor } }, error => { if (error) job.run.error = error.message; });
   }
   async controlRun(runId: string, command: RunCommand) {
     const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
@@ -168,6 +275,7 @@ export class RunManager extends EventEmitter {
   }
   async shutdown() {
     this.shuttingDown = true;
+    clearInterval(this.scheduleTimer); this.scheduleTimer = undefined;
     await this.startQueue;
     await Promise.all([...this.jobs.values()].map(async job => {
       try {

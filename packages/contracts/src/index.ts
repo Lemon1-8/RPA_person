@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
+import type { WorkflowSchedule } from './schedule.js';
+export { scheduleSchema, scheduleIdentifier, type WorkflowSchedule } from './schedule.js';
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export interface ElementRef { pageRef?: string; framePath?: string[]; selector: string; expectedCount?: number }
 export interface StepDefinition {
   stepId: string; name: string; actionType: string; params: Record<string, unknown>; output?: string;
   timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause';
+  variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
+  settings?: { downloadDir?: string; pythonExecutable?: string };
   children?: StepDefinition[]; elseSteps?: StepDefinition[];
 }
 export interface WorkflowDefinition {
@@ -27,6 +31,7 @@ export interface RunSnapshot {
   runId: string; workflowId: string; workflowName: string; revision: number; status: RunStatus;
   startedAt: string; endedAt?: string; currentStepId?: string; variables: Record<string, unknown>;
   artifacts: Artifact[]; error?: string; browserOpen?: boolean;
+  scheduleId?: string; scheduledFor?: string;
 }
 export interface RunEvent {
   type: 'run' | 'step' | 'log' | 'artifact'; runId: string; at: string; stepId?: string;
@@ -35,11 +40,16 @@ export interface RunEvent {
 export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser';
 export interface BootstrapData {
   workflows: WorkflowDefinition[]; actions: ActionDefinition[]; runs: RunSnapshot[];
+  schedules: WorkflowSchedule[];
   demoUrl: string; dataDir: string; defaultDownloadDir: string;
 }
 export interface DesktopApi {
   bootstrap(): Promise<BootstrapData>;
   saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowDefinition>;
+  deleteWorkflow(workflowId: string): Promise<void>;
+  listSchedules(): Promise<WorkflowSchedule[]>;
+  saveSchedule(schedule: WorkflowSchedule): Promise<WorkflowSchedule>;
+  deleteSchedule(scheduleId: string): Promise<void>;
   runWorkflow(workflow: WorkflowDefinition): Promise<RunSnapshot>;
   controlRun(runId: string, command: RunCommand): Promise<void>;
   chooseDirectory(): Promise<string | null>;
@@ -57,6 +67,12 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
   stepId: identifier, name: z.string().min(1), actionType: z.string().min(1), params: z.record(safeKey, jsonValue),
   output: safeKey.optional(), timeoutMs: z.number().int().min(100).max(3_600_000).optional(),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(5), delayMs: z.number().int().min(0).max(60_000) }).optional(),
+  variables: z.record(safeKey.refine(key => !['runId', 'scheduledFor'].includes(key), '系统变量不可覆盖'), jsonValue).optional(),
+  elements: z.record(safeKey, elementSchema).optional(),
+  settings: z.object({
+    downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径').optional(),
+    pythonExecutable: z.string().min(1).optional(),
+  }).optional(),
   onError: z.enum(['fail', 'pause']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
 }));
 export const workflowSchema: z.ZodType<WorkflowDefinition> = z.object({

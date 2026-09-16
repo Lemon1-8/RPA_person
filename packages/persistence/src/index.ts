@@ -1,7 +1,7 @@
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { workflowSchema, type RunEvent, type RunSnapshot, type WorkflowDefinition } from '../../contracts/src/index.js';
+import { scheduleIdentifier, scheduleSchema, workflowSchema, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../contracts/src/index.js';
 import { validateActions } from '../../actions/src/index.js';
 
 export async function writeJsonAtomic(path: string, value: unknown) {
@@ -15,6 +15,7 @@ export class FileStore {
   async initialize() {
     await mkdir(join(this.directory, 'workflows'), { recursive: true });
     await mkdir(join(this.directory, 'runs'), { recursive: true });
+    await mkdir(join(this.directory, 'schedules'), { recursive: true });
   }
   async listWorkflows(): Promise<WorkflowDefinition[]> {
     const files = (await readdir(join(this.directory, 'workflows'))).filter(f => f.endsWith('.json'));
@@ -31,6 +32,25 @@ export class FileStore {
       const saved = { ...workflow, revision: revision + 1 };
       await writeJsonAtomic(path, saved); return saved;
     });
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  deleteWorkflow(workflowId: string): Promise<void> {
+    const id = scheduleIdentifier.parse(workflowId);
+    const operation = this.queue.then(() => unlink(join(this.directory, 'workflows', `${id}.json`)));
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  async listSchedules(): Promise<WorkflowSchedule[]> {
+    const files = (await readdir(join(this.directory, 'schedules'))).filter(f => f.endsWith('.json'));
+    return Promise.all(files.map(async file => scheduleSchema.parse(JSON.parse(await readFile(join(this.directory, 'schedules', file), 'utf8')))));
+  }
+  saveSchedule(input: WorkflowSchedule): Promise<void> {
+    const schedule = scheduleSchema.parse(input);
+    const operation = this.queue.then(() => writeJsonAtomic(join(this.directory, 'schedules', `${schedule.scheduleId}.json`), schedule));
+    this.queue = operation.catch(() => {}); return operation;
+  }
+  deleteSchedule(scheduleId: string): Promise<void> {
+    const id = scheduleIdentifier.parse(scheduleId);
+    const operation = this.queue.then(() => unlink(join(this.directory, 'schedules', `${id}.json`)));
     this.queue = operation.catch(() => {}); return operation;
   }
   async createRun(workflow: WorkflowDefinition, run: RunSnapshot) {

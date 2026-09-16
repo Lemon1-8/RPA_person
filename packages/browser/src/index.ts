@@ -1,20 +1,20 @@
 import { mkdir, open, readFile, realpath, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { chromium, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
+import { assertDebugPortAvailable, BrowserSessionError, killNativeBrowser, launchNativeBrowser, resolveBrowser, type BrowserChannel, type NativeBrowser } from './native-browser.js';
+import { removeTemporaryDownloadHistory } from './download-history.js';
+
+export { BrowserSessionError } from './native-browser.js';
+export type { BrowserChannel } from './native-browser.js';
 
 export interface BrowserSessionOptions {
   profileDir: string;
   downloadDir: string;
   headless?: boolean;
+  browserChannel?: BrowserChannel;
+  debugPort?: number;
   runId: string;
-}
-
-export class BrowserSessionError extends Error {
-  constructor(public readonly code: string, message: string) {
-    super(message);
-    this.name = 'BrowserSessionError';
-  }
 }
 
 function requiredString(params: Record<string, unknown>, key: string): string {
@@ -40,7 +40,13 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
 /** One persistent browser owner. Calls from visual actions and scripts share this queue. */
 export class BrowserSession {
   private context?: BrowserContext;
+  private browser?: Browser;
+  private native?: NativeBrowser;
+  private stoppingNative?: Promise<void>;
+  private readonly launchAbort = new AbortController();
+  private connectionInfo?: { pageId: string; browserChannel: Exclude<BrowserChannel, 'auto'>; debugPort: number };
   private readonly pages = new Map<string, Page>();
+  private readonly temporaryDownloadPaths = new Set<string>();
   private starting?: Promise<void>;
   private closing?: Promise<void>;
   private finishingClose?: Promise<void>;
@@ -55,7 +61,12 @@ export class BrowserSession {
     return !!this.context && !this.closed;
   }
 
-  /** Reports closure only after the profile lease has been released. */
+  getInfo(): { pageId: string; browserChannel: Exclude<BrowserChannel, 'auto'>; debugPort: number } {
+    if (!this.connectionInfo || !this.isOpen()) throw new BrowserSessionError('BROWSER_CLOSED', '浏览器会话尚未启动或已经关闭');
+    return { ...this.connectionInfo };
+  }
+
+  /** Reports native closure after finishing profile cleanup and releasing its lease. */
   onClosed(listener: () => void): () => void {
     this.closeListeners.add(listener);
     return () => { this.closeListeners.delete(listener); };
@@ -90,21 +101,23 @@ export class BrowserSession {
     }
     await handle.close();
     try {
-      this.context = await chromium.launchPersistentContext(profileDir, {
-        headless: this.options.headless ?? false,
-        acceptDownloads: true,
-        viewport: { width: 1280, height: 850 },
-        timeout: 30_000,
-      });
-      this.context.once('close', () => {
-        // This can run inside context.close(), including while start() is finishing.
-        // Do not wait for either operation from the event handler.
-        void this.finishClose().catch(() => undefined);
-      });
+      const installed = await resolveBrowser(this.options.browserChannel ?? 'auto', this.options.headless ?? false);
+      await assertDebugPortAvailable(this.options.debugPort ?? 0);
+      if (this.closed) throw new BrowserSessionError('BROWSER_START_CANCELLED', '浏览器启动已取消');
+      this.native = launchNativeBrowser(installed.executablePath, profileDir, this.options.debugPort ?? 0, this.options.headless ?? false, this.launchAbort.signal);
+      const endpoint = await this.native.endpoint;
+      // The WebSocket UUID comes from our own child, never from an unrelated port occupant.
+      this.browser = await chromium.connectOverCDP(endpoint.url, { timeout: 30_000, isLocal: true });
+      this.browser.once('disconnected', () => { void this.close().catch(() => undefined); });
+      this.native.child.once('exit', () => { void this.close().catch(() => undefined); });
+      if (this.closed) throw new BrowserSessionError('BROWSER_START_CANCELLED', '浏览器启动已取消');
+      this.context = this.browser.contexts()[0];
+      if (!this.context) throw new BrowserSessionError('BROWSER_START_FAILED', '浏览器未提供默认页面上下文');
       this.pages.set('main', this.context.pages()[0] ?? await this.context.newPage());
+      this.connectionInfo = { pageId: 'main', browserChannel: installed.channel, debugPort: endpoint.port };
       if (!this.options.headless) await this.setWindowState('minimized', {});
     } catch (error) {
-      await this.context?.close();
+      await this.stopNativeBrowser();
       await this.finishClose();
       throw error;
     }
@@ -278,6 +291,8 @@ export class BrowserSession {
         }
         const failure = await download.failure();
         if (failure) throw new Error(`下载失败：${failure}`);
+        const temporaryPath = await download.path();
+        if (temporaryPath) this.temporaryDownloadPaths.add(temporaryPath);
         const file = await stat(target);
         if (!file.isFile()) throw new Error('下载产物不是文件');
         return { path: target, name: basename(target), size: file.size, sourceUrl: download.url() };
@@ -344,9 +359,32 @@ export class BrowserSession {
 
   private async closeInternal(): Promise<void> {
     this.closed = true;
+    this.launchAbort.abort();
+    // Abort a pending CDP connection by terminating its owned process immediately.
+    if (this.native && !this.browser) await this.stopNativeBrowser();
     await this.starting?.catch(() => undefined);
-    await this.context?.close();
+    await this.stopNativeBrowser();
     await this.finishClose();
+  }
+
+  private stopNativeBrowser(): Promise<void> {
+    if (!this.stoppingNative) this.stoppingNative = (async () => {
+      if (this.browser?.isConnected()) {
+        // browser.close() only disconnects a CDP client. Send the native close command first.
+        await bounded((async () => {
+          const session = await this.browser!.newBrowserCDPSession();
+          await session.send('Browser.close');
+        })(), 2_000).catch(() => undefined);
+      }
+      if (this.native) {
+        if (!this.browser) await killNativeBrowser(this.native);
+        else {
+          await bounded(this.native.exited, 5_000).catch(() => killNativeBrowser(this.native!));
+        }
+      }
+      await this.browser?.close().catch(() => undefined);
+    })();
+    return this.stoppingNative;
   }
 
   private finishClose(): Promise<void> {
@@ -354,10 +392,16 @@ export class BrowserSession {
     this.context = undefined;
     this.pages.clear();
     if (!this.finishingClose) this.finishingClose = Promise.resolve().then(async () => {
-      await this.releaseLease();
-      const listeners = [...this.closeListeners];
-      this.closeListeners.clear();
-      for (const listener of listeners) listener();
+      try {
+        if (this.lease) await removeTemporaryDownloadHistory(dirname(this.lease.path), this.temporaryDownloadPaths);
+      } finally {
+        try { await this.releaseLease(); }
+        finally {
+          const listeners = [...this.closeListeners];
+          this.closeListeners.clear();
+          for (const listener of listeners) listener();
+        }
+      }
     });
     return this.finishingClose;
   }

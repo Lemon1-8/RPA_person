@@ -1535,3 +1535,68 @@ td > .status-browser-retained {
   height: 26px;
   opacity: 1;
 }
+
+[hidden] { display: none !important; }
+.workspace-nav { display: flex; align-items: center; gap: 8px; min-height: 47px; padding: 0 20px; border-bottom: 1px solid var(--border); background: #fff; }
+.workspace-nav > button { border: 0; background: transparent; height: 46px; border-radius: 0; border-bottom: 2px solid transparent; }
+.workspace-nav > button[aria-current="page"] { color: var(--teal-dark); background: #f1f8f7; border-bottom-color: var(--teal); }
+.panel-controls { margin-left: auto; display: flex; gap: 5px; }
+.panel-controls button { width: 31px; min-height: 30px; padding: 0; border-color: transparent; }
+.workspace.left-collapsed .library, .workspace.right-collapsed .inspector { display: none; }
+.workspace.left-collapsed { grid-template-columns: minmax(300px, 1fr) 330px; }
+.workspace.right-collapsed { grid-template-columns: 236px minmax(300px, 1fr); }
+.workspace.left-collapsed.right-collapsed { grid-template-columns: minmax(0, 1fr); }
+.workflow-tabs { min-height: 39px; display: flex; flex-shrink: 0; overflow-x: auto; border-bottom: 1px solid var(--border); background: #eef1f2; }
+.workflow-tabs > div { display: flex; flex-shrink: 0; align-items: center; border-right: 1px solid var(--border); border-top: 2px solid transparent; }
+.workflow-tabs > div.active { background: #fff; border-top-color: var(--teal); }
+.workflow-tabs button { border: 0; background: transparent; border-radius: 0; min-height: 35px; padding: 0 10px; max-width: 230px; overflow: hidden; text-overflow: ellipsis; }
+.workflow-tabs button + button { padding: 0 7px; color: var(--muted); }
+.draft-dot { width: 6px; height: 6px; background: #b18934; border-radius: 50%; flex-shrink: 0; }
+.step-card.drop-target { border-color: var(--teal); box-shadow: 0 3px 0 var(--teal); background: var(--teal-bg); }
+.library-action[draggable="true"] { cursor: grab; }
+.inspector-context { display: flex; gap: 9px; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--border); background: #f8faf9; font-size: 12px; min-width: 0; }
+.inspector-context span { color: var(--muted); flex-shrink: 0; }
+.inspector-context strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.management-page { flex: 1; min-height: 0; overflow: auto; padding: 30px 36px; background: #f7f9f9; }
+.page-heading { display: flex; justify-content: space-between; align-items: center; gap: 25px; margin-bottom: 24px; }
+.eyebrow { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.page-heading h2 { font-size: 23px; font-weight: 650; margin: 0 0 9px; }
+.page-heading p { color: #65737a; margin: 0; line-height: 1.7; }
+.page-heading h2 .count { font-size: 13px; vertical-align: middle; }
+.management-filters { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.management-filters .search { width: 360px; margin: 0; background: #fff; }
+.management-filters > select { width: 160px; margin-left: auto; }
+.management-table-wrap { overflow-x: auto; background: #fff; border: 1px solid var(--border); border-radius: 7px; }
+.management-table { width: 100%; border-collapse: collapse; text-align: left; }
+.management-table th { color: #68777e; font-weight: 500; background: #f8faf9; border-bottom: 1px solid var(--border); padding: 13px 18px; white-space: nowrap; }
+.management-table td { padding: 16px 18px; border-bottom: 1px solid #edf0f0; vertical-align: middle; }
+.management-table tr:last-child td { border-bottom: 0; }
+.management-table tbody tr:hover { background: #fafcfb; }
+.management-table td > small, .flow-name small { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.management-table td > small.field-error { color: var(--danger); max-width: 290px; overflow-wrap: anywhere; }
+.flow-name { display: flex; justify-content: flex-start; text-align: left; border: 0; background: transparent; padding: 0; gap: 12px; white-space: normal; }
+.flow-name > svg { color: var(--teal); flex-shrink: 0; }
+.flow-name strong { font-size: 14px; overflow-wrap: anywhere; }
+.flow-name small { font-family: Consolas, monospace; font-size: 11px; }
+.row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.row-actions button { min-height: 30px; padding: 0 9px; font-size: 12px; }
+button.danger { color: var(--danger); }
+.delete-confirm { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--danger); }
+.page-empty { display: flex; align-items: center; flex-direction: column; justify-content: center; padding: 60px 20px; gap: 14px; color: var(--muted); }
+.page-empty h3 { color: #34454c; }
+.settings-content { max-width: 730px; margin: 0 auto; padding: 24px 34px; background: #fff; border: 1px solid var(--border); border-radius: 7px; }
+.settings-content > .text-button { margin-bottom: 20px; }
+.settings-content .panel-title { font-size: 22px; }
+.schedule-note { display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; background: var(--teal-bg); border: 1px solid #d7ebe6; border-radius: 6px; color: #356a61; margin-bottom: 20px; line-height: 1.7; }
+.schedule-note svg { flex-shrink: 0; margin-top: 3px; }
+.schedule-form { padding: 22px; border: 1px solid #cadfda; border-radius: 7px; background: #fff; margin-bottom: 24px; }
+.form-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.form-heading h3 { font-size: 16px; }
+.form-heading button { padding: 0 7px; min-height: 28px; border: 0; }
+.schedule-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; max-width: 880px; }
+.form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+.check-field { display: flex; gap: 8px; align-items: center; margin-right: auto; }
+.check-field input { width: 16px; height: 16px; accent-color: var(--teal); }
+.step-settings .panel-title { margin-top: 0; }
+@media (max-width: 1100px) { .management-page { padding: 24px; } .management-table td, .management-table th { padding: 12px; } .flow-name small { max-width: 190px; overflow: hidden; text-overflow: ellipsis; } }
+@media (max-width: 700px) { .management-page { padding: 16px; } .page-heading { align-items: flex-start; } .page-heading h2 { font-size: 20px; } .schedule-fields { grid-template-columns: 1fr; } .workspace-nav { padding: 0 8px; gap: 0; flex-wrap: wrap; } .workspace-nav > button { padding: 0 8px; font-size: 12px; } .panel-controls { margin-left: 0; } .settings-content { padding: 20px; } }

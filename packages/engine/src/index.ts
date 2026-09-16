@@ -2,12 +2,12 @@ import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { BrowserSession } from '../../browser/src/index.js';
+import { BrowserSession, type BrowserSessionOptions } from '../../browser/src/index.js';
 import { runScript } from '../../scripts/src/index.js';
 import { actionDefinitions, getAction, validateActionParams, validateActions } from '../../actions/src/index.js';
-import { workflowSchema, type Artifact, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
+import { workflowSchema, type Artifact, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduledFor?: string }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
 const reserved = new Set(['__proto__', 'prototype', 'constructor']);
 const systemVariables = new Set(['runId', 'scheduledFor']);
 function validateName(name: string) {
@@ -54,12 +54,17 @@ export class WorkflowEngine {
   private consumed = false;
   private executionFinished = false;
   private deadlines: { expiresAt: number; stepName: string }[] = [];
+  private scopedElements: Record<string, ElementRef>;
+  private scopedSettings: NonNullable<StepDefinition['settings']>;
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
     this.workflow = workflowSchema.parse(workflow);
     validateActions(this.workflow);
+    this.scopedElements = this.workflow.elements;
+    this.scopedSettings = this.workflow.settings;
     this.snapshot = {
       runId: options.runId, workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
       status: 'queued', startedAt: new Date().toISOString(), artifacts: [], browserOpen: false,
+      scheduleId: options.scheduleId, scheduledFor: options.scheduledFor,
       variables: { ...structuredClone(workflow.variables), runId: options.runId, scheduledFor: options.scheduledFor ?? new Date().toISOString() },
     };
   }
@@ -104,6 +109,25 @@ export class WorkflowEngine {
     try { const result = await run(); this.remainingTimeout(30_000); return result; }
     finally { this.deadlines.splice(this.deadlines.indexOf(deadline), 1); }
   }
+  private async withinStepScope<T>(step: StepDefinition, run: () => Promise<T>): Promise<T> {
+    const locals = Object.entries(structuredClone(step.variables ?? {}));
+    for (const [name] of locals) validateName(name);
+    const previous = locals.map(([name]) => ({ name, had: Object.hasOwn(this.snapshot.variables, name), value: this.snapshot.variables[name] }));
+    const parentElements = this.scopedElements;
+    const parentSettings = this.scopedSettings;
+    for (const [name, value] of locals) this.snapshot.variables[name] = value;
+    this.scopedElements = { ...parentElements, ...step.elements };
+    this.scopedSettings = { ...parentSettings, ...Object.fromEntries(Object.entries(step.settings ?? {}).filter(([, value]) => value !== undefined)) };
+    try { return await run(); }
+    finally {
+      for (const { name, had, value } of previous) {
+        if (had) this.snapshot.variables[name] = value;
+        else delete this.snapshot.variables[name];
+      }
+      this.scopedElements = parentElements;
+      this.scopedSettings = parentSettings;
+    }
+  }
   private async waitForResume(manual = false) {
     if (!this.pauseRequested && !manual) return;
     this.checkStop();
@@ -115,20 +139,32 @@ export class WorkflowEngine {
     this.resumeWaiter = undefined; this.checkStop();
     delete this.snapshot.error; this.state('running');
   }
-  private async ensureBrowser() {
-    if (!this.browser) {
-      this.browser = new BrowserSession({
+  private async ensureBrowser(startParams: Record<string, unknown> = {}) {
+    let browser = this.browser;
+    if (!browser) {
+      browser = new BrowserSession({
         profileDir: join(this.options.dataDir, 'profiles', this.workflow.settings.profileId ?? this.workflow.workflowId),
-        downloadDir: this.workflow.settings.downloadDir, headless: this.workflow.settings.headless, runId: this.snapshot.runId,
+        downloadDir: this.scopedSettings.downloadDir ?? this.workflow.settings.downloadDir, headless: this.workflow.settings.headless, runId: this.snapshot.runId,
+        browserChannel: startParams.browserChannel as BrowserSessionOptions['browserChannel'],
+        debugPort: startParams.debugPort as number | undefined,
       });
-      this.browser.onClosed(() => {
+      this.browser = browser;
+      const session = browser;
+      browser.onClosed(() => {
+        if (this.browser !== session) return;
+        this.browser = undefined;
         this.snapshot.browserOpen = false;
         if (this.executionFinished) this.emit({ type: 'run', run: this.getSnapshot(), status: this.snapshot.status, message: '浏览器已关闭' });
       });
-      await this.browser.start();
-      this.snapshot.browserOpen = this.browser.isOpen();
     }
-    return this.browser;
+    await browser.start();
+    this.snapshot.browserOpen = browser.isOpen();
+    const info = browser.getInfo();
+    if ((startParams.browserChannel && startParams.browserChannel !== 'auto' && startParams.browserChannel !== info.browserChannel)
+      || (startParams.debugPort && startParams.debugPort !== info.debugPort)) {
+      throw new Error('当前流程已启动浏览器，不能更改浏览器类型或调试端口；请在首次浏览器指令中配置。');
+    }
+    return browser;
   }
   private setVariable(name: string, value: unknown) {
     validateName(name); this.snapshot.variables[name] = jsonClone(value);
@@ -140,10 +176,10 @@ export class WorkflowEngine {
     let abort: (() => void) | undefined;
     this.activeBrowserCalls++;
     const operation = (async () => {
-      const browser = await this.ensureBrowser();
+      const browser = await this.ensureBrowser(method === 'browser.start' ? params : {});
       this.checkStop(); signal?.throwIfAborted();
       if (expired) throw new Error(`浏览器动作超时（${timeoutMs} ms）`);
-      return method === 'browser.start' ? { pageId: 'main' } : browser.call(method, params);
+      return method === 'browser.start' ? browser.getInfo() : browser.call(method, params);
     })();
     try {
       return await Promise.race([operation, new Promise<never>((_, reject) => {
@@ -179,15 +215,15 @@ export class WorkflowEngine {
     this.checkStop(); signal?.throwIfAborted();
     const params: Record<string, unknown> = { ...validated, timeoutMs };
     if (typeof params.selector === 'string' && params.selector.startsWith('@')) {
-      const key = params.selector.slice(1); const element = this.workflow.elements[key];
+      const key = params.selector.slice(1); const element = this.scopedElements[key];
       if (!element) throw new Error(`元素库不存在：${key}`);
-      params.element = element; delete params.selector;
+      params.element = resolveValue(element, this.snapshot.variables); delete params.selector;
     } else if (params.framePath && typeof params.selector === 'string') {
       params.element = { selector: params.selector, framePath: params.framePath, pageRef: params.pageId };
       delete params.selector; delete params.framePath;
     }
     if (method === 'browser.download') {
-      params.directory ||= this.workflow.settings.downloadDir;
+      params.directory ||= this.scopedSettings.downloadDir ?? this.workflow.settings.downloadDir;
       if (!params.filename) delete params.filename;
     }
     {
@@ -216,7 +252,7 @@ export class WorkflowEngine {
         const result = await runScript({
           language: params.language as 'python' | 'javascript' | 'typescript', code: String(params.code),
           variables: this.snapshot.variables, timeoutMs: timeout, signal,
-          pythonExecutable: this.workflow.settings.pythonExecutable,
+          pythonExecutable: this.scopedSettings.pythonExecutable,
           onLog: message => this.emit({ type: 'log', stepId: step.stepId, message }),
           dispatch: (method, input) => {
             const operation = this.rpcQueue.then(() => {
@@ -272,15 +308,20 @@ export class WorkflowEngine {
         for (let attempt = 1; attempt <= attempts; attempt++) {
           this.checkStop();
           this.snapshot.currentStepId = step.stepId;
-          this.stepAbort = new AbortController();
-          this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: { attempt } });
+          const parentAbort = this.stepAbort;
+          const attemptAbort = new AbortController();
+          this.stepAbort = attemptAbort;
           const started = Date.now();
           try {
-            // Script source is literal code; it uses the SDK for variable access.
-            const raw = step.actionType === 'script.run' ? { ...step.params } : resolveValue(step.params, this.snapshot.variables) as Record<string, unknown>;
-            const params = validateActionParams(step.actionType, raw);
-            const result = await this.execute(step, params);
+            const result = await this.withinStepScope(step, async () => {
+              this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: { attempt } });
+              // Script source is literal code; it uses the SDK for variable access.
+              const raw = step.actionType === 'script.run' ? { ...step.params } : resolveValue(step.params, this.snapshot.variables) as Record<string, unknown>;
+              const params = validateActionParams(step.actionType, raw);
+              return this.execute(step, params);
+            });
             this.checkStop();
+            // Publish only after restoring local declarations, including same-name outputs.
             if (step.output) this.setVariable(step.output, result ?? null);
             this.snapshot.currentStepId = step.stepId;
             this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: step.name, data: { durationMs: Date.now() - started, result } });
@@ -290,11 +331,14 @@ export class WorkflowEngine {
             if (attempt < attempts) {
               this.emit({ type: 'log', stepId: step.stepId, message: `步骤失败，准备第 ${attempt + 1} 次尝试：${String(caught)}` });
               await new Promise<void>(resolve => {
-                const signal = this.stepAbort!.signal;
+                const signal = attemptAbort.signal;
                 const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
                 const timer = setTimeout(done, step.retry?.delayMs ?? 500); signal.addEventListener('abort', done, { once: true });
+                if (signal.aborted) done();
               });
             }
+          } finally {
+            this.stepAbort = parentAbort;
           }
         }
         if (!completed) {

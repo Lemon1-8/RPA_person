@@ -22,7 +22,10 @@ const definitions: { metadata: ActionDefinition; schema: z.ZodType }[] = [];
 function add(type: string, label: string, category: string, description: string, safeToRetry: boolean, actionFields: ActionField[], defaults: Record<string, unknown>, schema: z.ZodType) {
   definitions.push({ metadata: { type, label, category, description, safeToRetry, fields: actionFields, defaults }, schema });
 }
-add('browser.start', '启动浏览器', '浏览器', '为当前任务建立独立浏览器会话。', false, [], {}, z.object({}));
+add('browser.start', '启动浏览器', '浏览器', '启动本机 Chrome 或 Edge，通过独立调试端口连接。', false,
+  [{ key: 'browserChannel', label: '浏览器', type: 'select', required: true, options: [{ label: '自动选择本机 Chrome / Edge', value: 'auto' }, { label: 'Google Chrome', value: 'chrome' }, { label: 'Microsoft Edge', value: 'msedge' }, { label: 'Chromium（测试用）', value: 'chromium' }] },
+    { key: 'debugPort', label: '调试端口（0 自动分配）', type: 'number', required: false, placeholder: '0' }],
+  { browserChannel: 'auto', debugPort: 0 }, z.object({ browserChannel: z.enum(['auto', 'chrome', 'msedge', 'chromium']).optional(), debugPort: z.number().int('调试端口必须为整数').refine(port => port === 0 || (port >= 1024 && port <= 65535), '调试端口必须为 0 或 1024–65535 的整数').optional() }));
 add('browser.open', '打开网页', '浏览器', '在当前任务的页面中打开网址。', false, [text('url', '网页地址', true, 'https://…'), page], { url: '', pageId: 'main' }, z.object({ url: z.string().url(), pageId: z.string().optional() }));
 add('browser.wait', '等待元素', '网页操作', '等待元素出现，支持元素库与 iframe 路径。', true, fields, { selector: '' }, targetSchema);
 add('browser.click', '点击元素', '网页操作', '重新定位并点击一个元素。', false, fields, { selector: '' }, targetSchema);

@@ -3,6 +3,10 @@ import type { DesktopApi, RunEvent } from '../../../packages/contracts/src/index
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke('rpa:bootstrap'),
   saveWorkflow: workflow => ipcRenderer.invoke('rpa:save', workflow),
+  deleteWorkflow: workflowId => ipcRenderer.invoke('rpa:delete-workflow', workflowId),
+  listSchedules: () => ipcRenderer.invoke('rpa:list-schedules'),
+  saveSchedule: schedule => ipcRenderer.invoke('rpa:save-schedule', schedule),
+  deleteSchedule: scheduleId => ipcRenderer.invoke('rpa:delete-schedule', scheduleId),
   runWorkflow: workflow => ipcRenderer.invoke('rpa:run', workflow),
   controlRun: (runId, command) => ipcRenderer.invoke('rpa:control', runId, command),
   chooseDirectory: () => ipcRenderer.invoke('rpa:directory'),

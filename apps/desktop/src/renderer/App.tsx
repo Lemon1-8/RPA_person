@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   Braces,
+  CalendarClock,
   Check,
   ChevronRight,
   Circle,
@@ -21,6 +22,12 @@ import {
   Loader2,
   MousePointer2,
   Pause,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  PanelBottomClose,
+  PanelBottomOpen,
   Play,
   Plus,
   Save,
@@ -41,7 +48,10 @@ import type {
   RunSnapshot,
   StepDefinition,
   WorkflowDefinition,
+  WorkflowSchedule,
 } from "../../../../packages/contracts/src/index.js";
+import { WorkflowsPage } from "./WorkflowsPage.js";
+import { SchedulesPage } from "./SchedulesPage.js";
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
 const terminalStatuses = new Set([
@@ -239,6 +249,7 @@ function JsonEditor({
     <label className="field">
       <span>{label}</span>
       <textarea
+        aria-label={label}
         spellCheck={false}
         disabled={disabled}
         className={`code-input${error ? " input-error" : ""}`}
@@ -280,6 +291,13 @@ function JsonEditor({
 }
 
 export function App() {
+  const [view, setView] = useState<"editor" | "workflows" | "schedules" | "settings">("editor");
+  const [schedules, setSchedules] = useState<WorkflowSchedule[]>([]);
+  const [openFlows, setOpenFlows] = useState<string[]>([]);
+  const [panels, setPanels] = useState(() => {
+    try { return { left: true, right: true, bottom: true, ...JSON.parse(localStorage.getItem("rpa.panels") ?? "{}") } as { left: boolean; right: boolean; bottom: boolean }; }
+    catch { return { left: true, right: true, bottom: true }; }
+  });
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [workflowId, setWorkflowId] = useState("");
   const [actions, setActions] = useState<ActionDefinition[]>([]);
@@ -372,6 +390,9 @@ export function App() {
       .then((state) => {
         if (!mounted) return;
         setWorkflows(state.workflows);
+        if (!state.workflows.length) setView("workflows");
+        setSchedules(state.schedules);
+        setOpenFlows(state.workflows[0] ? [state.workflows[0].workflowId] : []);
         setActions(state.actions);
         setRuns((previous) => [
           ...previous,
@@ -407,6 +428,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    localStorage.setItem("rpa.panels", JSON.stringify(panels));
+  }, [panels]);
+  useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 5000);
     return () => clearTimeout(timer);
@@ -414,7 +438,7 @@ export function App() {
   useEffect(() => {
     setInsertBranch("after");
     setInvalidFields({});
-  }, [selectedId, workflowId, inspector]);
+  }, [selectedId, workflowId, inspector, view]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: "nearest" });
   }, [visibleEvents.length, bottomTab]);
@@ -482,6 +506,7 @@ export function App() {
         );
         setRunId(snapshot.runId);
         setBottomTab("logs");
+        setPanels(previous => ({ ...previous, bottom: true }));
         setNotice(`已提交运行 · 修订 ${snapshot.revision}`);
       } else setNotice("流程已保存");
     } catch (cause) {
@@ -504,8 +529,8 @@ export function App() {
     }
   }
 
-  function addAction(action: ActionDefinition) {
-    if (!workflow) return;
+  function addAction(action: ActionDefinition, targetId = selectedId, branch = insertBranch) {
+    if (!workflow || busy) return;
     const step: StepDefinition = {
       stepId: uuid(),
       name: action.label,
@@ -517,21 +542,22 @@ export function App() {
     updateWorkflow((value) => ({
       ...value,
       steps:
-        selectedId && selected
-          ? insertBranch === "after"
-            ? changeSiblings(value.steps, selectedId, (siblings, index) => [
+        targetId && steps.some(item => item.step.stepId === targetId)
+          ? branch === "after"
+            ? changeSiblings(value.steps, targetId, (siblings, index) => [
                 ...siblings.slice(0, index + 1),
                 step,
                 ...siblings.slice(index + 1),
               ])
-            : replaceStep(value.steps, selectedId, (parent) => ({
+            : replaceStep(value.steps, targetId, (parent) => ({
                 ...parent,
-                [insertBranch]: [...(parent[insertBranch] ?? []), step],
+                [branch]: [...(parent[branch] ?? []), step],
               }))
           : [...value.steps, step],
     }));
     setSelectedId(step.stepId);
     setInspector("step");
+    setPanels(previous => ({ ...previous, right: true }));
   }
 
   function mutateStep(id: string, command: "up" | "down" | "copy" | "delete") {
@@ -569,8 +595,47 @@ export function App() {
     };
     setWorkflows((previous) => [...previous, created]);
     setWorkflowId(created.workflowId);
+    setOpenFlows(previous => [...previous, created.workflowId]);
     setSelectedId("");
-    setInspector("settings");
+    setView("settings");
+  }
+
+  function openWorkflow(id: string, destination: typeof view = "editor") {
+    const next = workflows.find(item => item.workflowId === id);
+    if (!next) return;
+    setWorkflowId(id);
+    setSelectedId(next.steps[0]?.stepId ?? "");
+    setOpenFlows(previous => previous.includes(id) ? previous : [...previous, id]);
+    setView(destination);
+    setInspector("step");
+  }
+
+  function duplicateWorkflow(source: WorkflowDefinition) {
+    const copied = { ...clone(source), workflowId: uuid(), name: `${source.name} 副本`, revision: 0, steps: source.steps.map(copyStep) };
+    delete copied.settings.profileId;
+    setWorkflows(previous => [...previous, copied]);
+    setWorkflowId(copied.workflowId); setSelectedId(copied.steps[0]?.stepId ?? "");
+    setOpenFlows(previous => [...previous, copied.workflowId]); setView("settings");
+    setNotice("已复制流程，保存后可运行");
+  }
+
+  async function deleteWorkflow(flow: WorkflowDefinition) {
+    if (!api || busy) return;
+    setBusy("delete"); setError("");
+    try {
+      if (flow.revision > 0) await api.deleteWorkflow(flow.workflowId);
+      setWorkflows(previous => previous.filter(item => item.workflowId !== flow.workflowId));
+      setOpenFlows(previous => previous.filter(id => id !== flow.workflowId));
+      setSchedules(previous => previous.filter(item => item.workflowId !== flow.workflowId));
+      if (workflowId === flow.workflowId) { const next = workflows.find(item => item.workflowId !== flow.workflowId); setWorkflowId(next?.workflowId ?? ""); setSelectedId(next?.steps[0]?.stepId ?? ""); }
+      setNotice("流程及关联定时任务已删除，运行历史已保留");
+    } catch (cause) { catchError(cause); } finally { setBusy(""); }
+  }
+
+  function dropAction(event: React.DragEvent, targetId: string) {
+    event.preventDefault();
+    const action = actions.find(item => item.type === event.dataTransfer.getData("application/x-rpa-action"));
+    if (action) addAction(action, targetId, "after");
   }
 
   const tabs: {
@@ -694,7 +759,188 @@ export function App() {
         </div>
       )}
 
-      <div className="workspace">
+      <nav className="workspace-nav" aria-label="工作空间导航">
+        <button aria-current={view === "workflows" ? "page" : undefined} onClick={() => setView("workflows")}><Layers size={16} />流程管理<span className="count">{workflows.length}</span></button>
+        <button aria-current={view === "editor" || view === "settings" ? "page" : undefined} disabled={!workflow} onClick={() => setView("editor")}><Workflow size={16} />流程编辑器</button>
+        <button aria-current={view === "schedules" ? "page" : undefined} onClick={() => setView("schedules")}><CalendarClock size={16} />定时运行</button>
+        <div className="panel-controls" aria-label="面板布局">
+          <button aria-label={panels.left ? "收起左侧栏" : "展开左侧栏"} title={panels.left ? "收起左侧栏" : "展开左侧栏"} aria-expanded={panels.left} onClick={() => setPanels(value => ({ ...value, left: !value.left }))}>{panels.left ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button>
+          <button aria-label={panels.right ? "收起右侧栏" : "展开右侧栏"} title={panels.right ? "收起右侧栏" : "展开右侧栏"} aria-expanded={panels.right} onClick={() => setPanels(value => ({ ...value, right: !value.right }))}>{panels.right ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
+          <button aria-label={panels.bottom ? "收起底部栏" : "展开底部栏"} title={panels.bottom ? "收起底部栏" : "展开底部栏"} aria-expanded={panels.bottom} onClick={() => setPanels(value => ({ ...value, bottom: !value.bottom }))}>{panels.bottom ? <PanelBottomClose size={17} /> : <PanelBottomOpen size={17} />}</button>
+        </div>
+      </nav>
+      {view === "workflows" && <WorkflowsPage workflows={workflows} saved={saved} busy={loading || !!busy || !api} onCreate={createWorkflow} onOpen={openWorkflow} onSettings={id => openWorkflow(id, "settings")} onCopy={duplicateWorkflow} onDelete={deleteWorkflow} />}
+      {view === "schedules" && api && <SchedulesPage api={api} workflows={workflows} runs={runs} initial={schedules} onError={catchError} />}
+                  {view === "settings" && workflow && (
+              <main className="management-page settings-page" aria-label="流程运行设置" key={workflowId}><div className="settings-content"><button className="text-button" onClick={() => setView("editor")}><ChevronRight size={15} />返回流程编辑器</button>
+                <h2 className="panel-title">运行设置</h2>
+                <p className="help-text">
+                  设置随流程保存，在下一次运行时生效。
+                </p>
+                <label className="field">
+                  <span>流程名称</span>
+                  <input
+                    value={workflow.name}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>下载目录</span>
+                  <div className="input-with-button">
+                    <input
+                      value={workflow.settings.downloadDir}
+                      disabled={!!busy}
+                      placeholder={downloadDir}
+                      onChange={(event) =>
+                        updateWorkflow((value) => ({
+                          ...value,
+                          settings: {
+                            ...value.settings,
+                            downloadDir: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                    <IconButton
+                      label="选择下载目录"
+                      disabled={!api || !!busy}
+                      onClick={() =>
+                        void api
+                          ?.chooseDirectory()
+                          .then((path) => {
+                            if (path)
+                              updateWorkflow((value) => ({
+                                ...value,
+                                settings: {
+                                  ...value.settings,
+                                  downloadDir: path,
+                                },
+                              }));
+                          })
+                          .catch(catchError)
+                      }
+                    >
+                      <FolderOpen size={17} />
+                    </IconButton>
+                  </div>
+                  <small>下载产物保留本次运行的独立归属。</small>
+                </label>
+                <label className="field">
+                  <span>浏览器运行方式</span>
+                  <select
+                    value={workflow.settings.headless ? "headless" : "headed"}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          headless: event.target.value === "headless",
+                        },
+                      }))
+                    }
+                  >
+                    <option value="headed">
+                      有界面 · 支持人工接管与最小化
+                    </option>
+                    <option value="headless">无头 · 不显示浏览器窗口</option>
+                  </select>
+                  <small>人工登录使用有界面模式；运行时不能切换模式。</small>
+                </label>
+                <label className="field">
+                  <span>流程结束后的浏览器</span>
+                  <select
+                    value={workflow.settings.keepBrowserOpen !== false ? "keep" : "close"}
+                    disabled={!!busy}
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          keepBrowserOpen: event.target.value === "keep",
+                        },
+                      }))
+                    }
+                  >
+                    <option value="keep">保留浏览器（默认）</option>
+                    <option value="close">自动关闭浏览器</option>
+                  </select>
+                  <small>
+                    保留后仍占用资源，可在运行记录中显示、最小化或手动关闭。停止任务会关闭浏览器。
+                  </small>
+                </label>
+                <label className="field">
+                  <span>浏览器配置名称</span>
+                  <input
+                    value={workflow.settings.profileId ?? ""}
+                    disabled={!!busy}
+                    placeholder="留空使用独立运行配置"
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          profileId: event.target.value || undefined,
+                        },
+                      }))
+                    }
+                  />
+                  <small>
+                    命名配置可保留登录。同一配置同时只供一个任务使用；再次使用前，请关闭保留的浏览器。
+                  </small>
+                </label>
+                <label className="field">
+                  <span>Python 可执行文件</span>
+                  <input
+                    value={workflow.settings.pythonExecutable ?? ""}
+                    disabled={!!busy}
+                    placeholder="python"
+                    onChange={(event) =>
+                      updateWorkflow((value) => ({
+                        ...value,
+                        settings: {
+                          ...value.settings,
+                          pythonExecutable: event.target.value || undefined,
+                        },
+                      }))
+                    }
+                  />
+                  <small>Python 步骤调用本地环境，不自动安装依赖。</small>
+                </label>
+                {dataDir && (
+                  <div className="environment-info">
+                    <span>本地数据目录</span>
+                    <code>{dataDir}</code>
+                    <button
+                      className="text-button"
+                      onClick={() =>
+                        void api?.openPath(dataDir).catch(catchError)
+                      }
+                    >
+                      <FolderOpen size={14} />
+                      打开目录
+                    </button>
+                  </div>
+                )}
+                {demoUrl && (
+                  <div className="environment-info">
+                    <span>受控演示页</span>
+                    <code>{demoUrl}</code>
+                    <small>
+                      示例用于验证自动化闭环，不代表真实站点已适配。
+                    </small>
+                  </div>
+                )}
+              <details className="advanced"><summary>流程默认变量与元素（供所有指令继承）</summary><p className="help-text">每条指令可在右侧配置自己的覆盖值。此处保留已有流程的默认配置。</p><JsonEditor label="流程默认变量 JSON" value={workflow.variables} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-variables", valid)} onChange={value => updateWorkflow(item => ({ ...item, variables: value as WorkflowDefinition["variables"] }))} /><JsonEditor label="流程默认元素 JSON" value={workflow.elements} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-elements", valid)} onChange={value => updateWorkflow(item => ({ ...item, elements: value as WorkflowDefinition["elements"] }))} /></details></div></main>
+            )}
+
+      <div className={`workspace${panels.left ? "" : " left-collapsed"}${panels.right ? "" : " right-collapsed"}`} hidden={view !== "editor"}>
         <aside className="library" aria-label="指令库">
           <div className="workflow-picker">
             <label htmlFor="workflow-picker">当前流程</label>
@@ -704,11 +950,7 @@ export function App() {
                 value={workflowId}
                 disabled={loading || !!busy}
                 onChange={(event) => {
-                  const next = workflows.find(
-                    (item) => item.workflowId === event.target.value,
-                  );
-                  setWorkflowId(event.target.value);
-                  setSelectedId(next?.steps[0]?.stepId ?? "");
+                  openWorkflow(event.target.value);
                 }}
               >
                 <option value="" disabled>
@@ -761,7 +1003,9 @@ export function App() {
                       className="library-action"
                       key={action.type}
                       disabled={!workflow || !!busy}
-                      title={action.description}
+                      title={`${action.description} · 插入到选中步骤之后（或拖拽到目标步骤）`}
+                      draggable={!busy}
+                      onDragStart={event => { event.dataTransfer.setData("application/x-rpa-action", action.type); event.dataTransfer.effectAllowed = "copy"; }}
                       onClick={() => addAction(action)}
                     >
                       <span className="action-icon">
@@ -786,6 +1030,7 @@ export function App() {
         </aside>
 
         <main className="editor">
+          <div className="workflow-tabs" aria-label="已打开流程">{openFlows.map(id => { const flow = workflows.find(item => item.workflowId === id); return flow && <div className={workflowId === id ? "active" : ""} key={id}><button aria-pressed={workflowId === id} onClick={() => openWorkflow(id)} title={flow.name}>{flow.name}{saved[id] !== JSON.stringify(flow) && <span className="draft-dot" />}</button><button aria-label={`关闭标签 ${flow.name}`} title="只关闭标签，草稿仍在流程管理中" onClick={() => { const remaining = openFlows.filter(item => item !== id); setOpenFlows(remaining); if (id === workflowId) { if (remaining[0]) openWorkflow(remaining[0]); else setView("workflows"); } }}><X size={12} /></button></div>; })}</div>
           <div className="editor-top">
             <div>
               <ListTree size={17} />
@@ -795,14 +1040,14 @@ export function App() {
             <button
               className="text-button"
               disabled={!workflow}
-              onClick={() => setInspector("settings")}
+              onClick={() => setView("settings")}
             >
               <Settings2 size={15} />
               运行设置
             </button>
           </div>
           <div className="editor-caption">
-            <span>点击左侧指令，添加到当前步骤之后</span>
+            <span>点击指令插入到选中步骤之后，也可拖拽到步骤上</span>
             {selected && (
               <select
                 className="insert-select"
@@ -822,7 +1067,7 @@ export function App() {
               </select>
             )}
           </div>
-          <div className="step-scroll">
+          <div className="step-scroll" onDragOver={event => { if (event.dataTransfer.types.includes("application/x-rpa-action")) event.preventDefault(); }} onDrop={event => dropAction(event, "")}>
             {loading ? (
               <div className="skeleton-steps" aria-label="正在加载流程">
                 {[1, 2, 3, 4].map((item) => (
@@ -870,6 +1115,9 @@ export function App() {
                           </div>
                         )}
                         <article
+                          onDragOver={event => { if (event.dataTransfer.types.includes("application/x-rpa-action")) { event.preventDefault(); event.currentTarget.classList.add("drop-target"); } }}
+                          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.classList.remove("drop-target"); }}
+                          onDrop={event => { event.stopPropagation(); event.currentTarget.classList.remove("drop-target"); dropAction(event, step.stepId); }}
                           className={`step-card${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
                         >
                           <button
@@ -990,7 +1238,8 @@ export function App() {
               </button>
             ))}
           </nav>
-          <div className="inspector-body">
+          <div className="inspector-context"><span>当前指令</span><strong>{selected?.step.name ?? "未选择"}</strong></div>
+          <div className="inspector-body" key={`${workflowId}:${selectedId}:${view}`}>
             {inspector === "step" &&
               (selected ? (
                 <>
@@ -1158,8 +1407,17 @@ export function App() {
                     />
                     <small>将动作结果写入指定变量。</small>
                   </label>
-                  <details className="advanced">
-                    <summary>超时与失败处理</summary>
+
+                </>
+              ) : (
+                <div className="panel-empty">
+                  <MousePointer2 size={26} />
+                  <h3>选择一个步骤</h3>
+                  <p>在中央列表中选择步骤，编辑动作参数和失败策略。</p>
+                </div>
+              ))}
+            {inspector === "settings" && selected && (<>                  <div className="step-settings">
+                    <h2 className="panel-title">指令设置</h2><p className="help-text">仅应用于当前选中的指令。</p>
                     <label className="field">
                       <span>步骤超时（毫秒）</span>
                       <input
@@ -1241,198 +1499,23 @@ export function App() {
                         />
                       </label>
                     )}
-                  </details>
-                </>
-              ) : (
-                <div className="panel-empty">
-                  <MousePointer2 size={26} />
-                  <h3>选择一个步骤</h3>
-                  <p>在中央列表中选择步骤，编辑动作参数和失败策略。</p>
-                </div>
-              ))}
-            {inspector === "settings" && workflow && (
+                  </div><label className="field"><span>指令下载目录</span><input value={selected.step.settings?.downloadDir ?? ""} placeholder={workflow?.settings.downloadDir} disabled={!!busy} onChange={event => updateSelected(step => ({ ...step, settings: { ...step.settings, downloadDir: event.target.value || undefined } }))} /><small>留空继承容器或流程默认目录。</small></label><label className="field"><span>指令 Python 可执行文件</span><input value={selected.step.settings?.pythonExecutable ?? ""} placeholder={workflow?.settings.pythonExecutable ?? "python"} disabled={!!busy} onChange={event => updateSelected(step => ({ ...step, settings: { ...step.settings, pythonExecutable: event.target.value || undefined } }))} /><small>仅影响本指令及其子步骤。</small></label></>)}
+            {inspector !== "step" && !selected && <div className="panel-empty"><MousePointer2 size={26} /><h3>先选择一个步骤</h3><p>每条指令拥有独立设置、变量和元素。</p></div>}
+            {inspector === "inputs" && selected && (
               <>
-                <h2 className="panel-title">运行设置</h2>
+                <h2 className="panel-title">指令变量</h2>
                 <p className="help-text">
-                  设置随流程保存，在下一次运行时生效。
-                </p>
-                <label className="field">
-                  <span>流程名称</span>
-                  <input
-                    value={workflow.name}
-                    disabled={!!busy}
-                    onChange={(event) =>
-                      updateWorkflow((value) => ({
-                        ...value,
-                        name: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label className="field">
-                  <span>下载目录</span>
-                  <div className="input-with-button">
-                    <input
-                      value={workflow.settings.downloadDir}
-                      disabled={!!busy}
-                      placeholder={downloadDir}
-                      onChange={(event) =>
-                        updateWorkflow((value) => ({
-                          ...value,
-                          settings: {
-                            ...value.settings,
-                            downloadDir: event.target.value,
-                          },
-                        }))
-                      }
-                    />
-                    <IconButton
-                      label="选择下载目录"
-                      disabled={!api || !!busy}
-                      onClick={() =>
-                        void api
-                          ?.chooseDirectory()
-                          .then((path) => {
-                            if (path)
-                              updateWorkflow((value) => ({
-                                ...value,
-                                settings: {
-                                  ...value.settings,
-                                  downloadDir: path,
-                                },
-                              }));
-                          })
-                          .catch(catchError)
-                      }
-                    >
-                      <FolderOpen size={17} />
-                    </IconButton>
-                  </div>
-                  <small>下载产物保留本次运行的独立归属。</small>
-                </label>
-                <label className="field">
-                  <span>浏览器运行方式</span>
-                  <select
-                    value={workflow.settings.headless ? "headless" : "headed"}
-                    disabled={!!busy}
-                    onChange={(event) =>
-                      updateWorkflow((value) => ({
-                        ...value,
-                        settings: {
-                          ...value.settings,
-                          headless: event.target.value === "headless",
-                        },
-                      }))
-                    }
-                  >
-                    <option value="headed">
-                      有界面 · 支持人工接管与最小化
-                    </option>
-                    <option value="headless">无头 · 不显示浏览器窗口</option>
-                  </select>
-                  <small>人工登录使用有界面模式；运行时不能切换模式。</small>
-                </label>
-                <label className="field">
-                  <span>流程结束后的浏览器</span>
-                  <select
-                    value={workflow.settings.keepBrowserOpen !== false ? "keep" : "close"}
-                    disabled={!!busy}
-                    onChange={(event) =>
-                      updateWorkflow((value) => ({
-                        ...value,
-                        settings: {
-                          ...value.settings,
-                          keepBrowserOpen: event.target.value === "keep",
-                        },
-                      }))
-                    }
-                  >
-                    <option value="keep">保留浏览器（默认）</option>
-                    <option value="close">自动关闭浏览器</option>
-                  </select>
-                  <small>
-                    保留后仍占用资源，可在运行记录中显示、最小化或手动关闭。停止任务会关闭浏览器。
-                  </small>
-                </label>
-                <label className="field">
-                  <span>浏览器配置名称</span>
-                  <input
-                    value={workflow.settings.profileId ?? ""}
-                    disabled={!!busy}
-                    placeholder="留空使用独立运行配置"
-                    onChange={(event) =>
-                      updateWorkflow((value) => ({
-                        ...value,
-                        settings: {
-                          ...value.settings,
-                          profileId: event.target.value || undefined,
-                        },
-                      }))
-                    }
-                  />
-                  <small>
-                    命名配置可保留登录。同一配置同时只供一个任务使用；再次使用前，请关闭保留的浏览器。
-                  </small>
-                </label>
-                <label className="field">
-                  <span>Python 可执行文件</span>
-                  <input
-                    value={workflow.settings.pythonExecutable ?? ""}
-                    disabled={!!busy}
-                    placeholder="python"
-                    onChange={(event) =>
-                      updateWorkflow((value) => ({
-                        ...value,
-                        settings: {
-                          ...value.settings,
-                          pythonExecutable: event.target.value || undefined,
-                        },
-                      }))
-                    }
-                  />
-                  <small>Python 步骤调用本地环境，不自动安装依赖。</small>
-                </label>
-                {dataDir && (
-                  <div className="environment-info">
-                    <span>本地数据目录</span>
-                    <code>{dataDir}</code>
-                    <button
-                      className="text-button"
-                      onClick={() =>
-                        void api?.openPath(dataDir).catch(catchError)
-                      }
-                    >
-                      <FolderOpen size={14} />
-                      打开目录
-                    </button>
-                  </div>
-                )}
-                {demoUrl && (
-                  <div className="environment-info">
-                    <span>受控演示页</span>
-                    <code>{demoUrl}</code>
-                    <small>
-                      示例用于验证自动化闭环，不代表真实站点已适配。
-                    </small>
-                  </div>
-                )}
-              </>
-            )}
-            {inspector === "inputs" && workflow && (
-              <>
-                <h2 className="panel-title">初始变量</h2>
-                <p className="help-text">
-                  变量随流程初始化；运行产生的当前值在下方「变量」中查看。
+                  仅在本指令及子步骤内生效，优先于流程默认值；输出变量可传递给后续步骤。
                 </p>
                 <JsonEditor
                   disabled={!!busy}
-                  key={workflowId + "-variables"}
+                  key={selectedId + "-variables"}
                   label="变量 JSON"
-                  value={workflow.variables}
+                  value={selected.step.variables ?? {}}
                   objectOnly
                   onValidity={(valid) => markValid("variables", valid)}
                   onChange={(value) =>
-                    updateWorkflow((item) => ({
+                    updateSelected((item) => ({
                       ...item,
                       variables: value as WorkflowDefinition["variables"],
                     }))
@@ -1441,21 +1524,21 @@ export function App() {
                 />
               </>
             )}
-            {inspector === "elements" && workflow && (
+            {inspector === "elements" && selected && (
               <>
                 <h2 className="panel-title">元素引用</h2>
                 <p className="help-text">
-                  使用已知定位信息定义元素，动作通过元素名称引用。元素拾取器将在后续阶段补齐。
+                  当前指令通过 @元素名 引用自己的元素；子步骤继承，其他指令不受影响。
                 </p>
                 <JsonEditor
                   disabled={!!busy}
-                  key={workflowId + "-elements"}
+                  key={selectedId + "-elements"}
                   label="元素库 JSON"
-                  value={workflow.elements}
+                  value={selected.step.elements ?? {}}
                   objectOnly
                   onValidity={(valid) => markValid("elements", valid)}
                   onChange={(value) =>
-                    updateWorkflow((item) => ({
+                    updateSelected((item) => ({
                       ...item,
                       elements: value as WorkflowDefinition["elements"],
                     }))
@@ -1472,7 +1555,7 @@ export function App() {
         </aside>
       </div>
 
-      <section className="console" aria-label="运行监控">
+      <section className="console" aria-label="运行监控" hidden={!panels.bottom || (view !== "editor" && view !== "settings")}>
         <div className="console-header">
           <div className="bottom-tabs" role="tablist" aria-label="运行信息">
             {tabs.map((tab, index) => (

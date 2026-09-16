@@ -15,7 +15,7 @@ async function main() {
   if (!['demo', 'run', 'list'].includes(command)) {
     console.log('用法：npm run rpa -- demo [--headless] [--close-browser] [--output 目录]\n      npm run rpa -- run 流程.json [--headless] [--close-browser] [--output 目录]\n      npm run rpa -- list\n可选 --data 指定运行数据目录；默认保留浏览器，--close-browser 选择结束后自动关闭。'); return;
   }
-  const manager = new RunManager({ dataDir: resolve(values.data ?? process.env.RPA_DATA_DIR ?? '.rpa'), maxConcurrent: 2 });
+  const manager = new RunManager({ dataDir: resolve(values.data ?? process.env.RPA_DATA_DIR ?? '.rpa'), maxConcurrent: 2, autoStartSchedules: false });
   let server: Awaited<ReturnType<typeof startFixtureServer>> | undefined;
   await manager.initialize();
   process.once('SIGINT', () => { manager.shutdown().catch(console.error); });

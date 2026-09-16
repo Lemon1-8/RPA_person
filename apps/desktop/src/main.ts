@@ -5,7 +5,8 @@ import { actionDefinitions } from '../../../packages/actions/src/index.js';
 import { RunManager } from '../../runner/src/manager.js';
 import { createDemoWorkflow } from '../../../examples/demo.js';
 import { startFixtureServer } from '../../../tests/fixtures/server.js';
-import type { RunCommand, RunEvent, WorkflowDefinition } from '../../../packages/contracts/src/index.js';
+import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
+import type { RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
 const root = process.env.RPA_ROOT ?? resolve(__dirname, '../..');
 process.env.RPA_ROOT = root;
@@ -29,21 +30,24 @@ else {
   app.whenReady().then(async () => {
     const dataDir = process.env.RPA_DATA_DIR ? resolve(process.env.RPA_DATA_DIR) : join(app.getPath('userData'), 'data');
     await mkdir(dataDir, { recursive: true });
-    manager = new RunManager({ dataDir, rootDir: root, maxConcurrent: Number(process.env.RPA_MAX_CONCURRENT ?? 2) }); await manager.initialize();
+    manager = new RunManager({ dataDir, rootDir: root, maxConcurrent: Number(process.env.RPA_MAX_CONCURRENT ?? 2), autoStartSchedules: false }); await manager.initialize();
     fixture = await startFixtureServer();
     const defaultDownloadDir = app.getPath('desktop');
-    const files = await manager.listWorkflows();
-    if (!files.length) await manager.saveWorkflow(createDemoWorkflow(fixture.url, defaultDownloadDir));
+    await seedDesktopWorkspace(manager, createDemoWorkflow(fixture.url, defaultDownloadDir));
+    await refreshDemoUrls(manager, fixture.url);
     const trusted = (event: Electron.IpcMainInvokeEvent) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('不受信任的调用来源');
     };
     ipcMain.handle('rpa:bootstrap', async event => {
       trusted(event);
       const workflows = await manager.listWorkflows();
-      for (const flow of workflows) if (typeof flow.variables.demoUrl === 'string') flow.variables.demoUrl = fixture!.url;
-      return { workflows, actions: actionDefinitions, runs: manager.listRuns(), demoUrl: fixture!.url, dataDir, defaultDownloadDir };
+      return { workflows, actions: actionDefinitions, runs: manager.listRuns(), schedules: manager.listSchedules(), demoUrl: fixture!.url, dataDir, defaultDownloadDir };
     });
     ipcMain.handle('rpa:save', (event, workflow: WorkflowDefinition) => { trusted(event); return manager.saveWorkflow(workflow); });
+    ipcMain.handle('rpa:delete-workflow', (event, workflowId: string) => { trusted(event); return manager.deleteWorkflow(workflowId); });
+    ipcMain.handle('rpa:list-schedules', event => { trusted(event); return manager.listSchedules(); });
+    ipcMain.handle('rpa:save-schedule', (event, schedule: WorkflowSchedule) => { trusted(event); return manager.saveSchedule(schedule); });
+    ipcMain.handle('rpa:delete-schedule', (event, scheduleId: string) => { trusted(event); return manager.deleteSchedule(scheduleId); });
     ipcMain.handle('rpa:run', (event, workflow: WorkflowDefinition) => { trusted(event); return manager.runWorkflow(workflow); });
     ipcMain.handle('rpa:control', async (event, runId: string, command: RunCommand) => {
       trusted(event);
@@ -66,6 +70,7 @@ else {
     });
     manager.on('event', (event: RunEvent) => { if (window && !window.isDestroyed()) window.webContents.send('rpa:event', event); });
     manager.on('storage-error', error => { console.error('运行记录保存失败', error); });
+    manager.startScheduling();
     window = new BrowserWindow({
       width: 1480, height: 940, minWidth: 1040, minHeight: 680, show: false, backgroundColor: '#f6f7f8',
       title: 'Personal RPA · 自动化工作台',
