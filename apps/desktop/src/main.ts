@@ -49,6 +49,12 @@ else {
     ipcMain.handle('rpa:save-schedule', (event, schedule: WorkflowSchedule) => { trusted(event); return manager.saveSchedule(schedule); });
     ipcMain.handle('rpa:delete-schedule', (event, scheduleId: string) => { trusted(event); return manager.deleteSchedule(scheduleId); });
     ipcMain.handle('rpa:run', (event, workflow: WorkflowDefinition) => { trusted(event); return manager.runWorkflow(workflow); });
+    ipcMain.handle('rpa:run-step', (event, workflow: WorkflowDefinition, stepId: string, browserRunId?: string) => {
+      trusted(event); return manager.runStep(workflow, stepId, browserRunId);
+    });
+    ipcMain.handle('rpa:list-browser-pages', (event, runId: string) => {
+      trusted(event); return manager.listBrowserPages(runId);
+    });
     ipcMain.handle('rpa:control', async (event, runId: string, command: RunCommand) => {
       trusted(event);
       if (typeof runId !== 'string' || !['pause', 'resume', 'stop', 'show', 'hide', 'closeBrowser'].includes(command)) throw new Error('无效的任务操作');

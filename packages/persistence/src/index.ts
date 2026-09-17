@@ -4,6 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { scheduleIdentifier, scheduleSchema, workflowSchema, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../contracts/src/index.js';
 import { validateActions } from '../../actions/src/index.js';
 
+export function normalizeWorkflowForStorage(input: WorkflowDefinition): WorkflowDefinition {
+  // IPC 会保留可选字段的 undefined，JSON 文件则会省略；先校验再统一为落盘形态。
+  const workflow = workflowSchema.parse(input);
+  return JSON.parse(JSON.stringify(workflow)) as WorkflowDefinition;
+}
+
 export async function writeJsonAtomic(path: string, value: unknown) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(value, null, 2), 'utf8');
@@ -22,7 +28,7 @@ export class FileStore {
     return Promise.all(files.map(async f => workflowSchema.parse(JSON.parse(await readFile(join(this.directory, 'workflows', f), 'utf8')))));
   }
   saveWorkflow(input: WorkflowDefinition): Promise<WorkflowDefinition> {
-    const workflow = workflowSchema.parse(input); validateActions(workflow);
+    const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
     const operation = this.queue.then(async () => {
       const path = join(this.directory, 'workflows', `${workflow.workflowId}.json`);
       let revision = 0;

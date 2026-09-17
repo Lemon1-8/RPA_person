@@ -15,7 +15,18 @@ export interface StepDefinition {
 export interface WorkflowDefinition {
   schemaVersion: 1; workflowId: string; name: string; revision: number;
   variables: Record<string, JsonValue>; elements: Record<string, ElementRef>; steps: StepDefinition[];
-  settings: { downloadDir: string; headless: boolean; keepBrowserOpen?: boolean; profileId?: string; pythonExecutable?: string };
+  settings: { downloadDir: string; headless: boolean; keepBrowserOpen?: boolean; profileId?: string; pythonExecutable?: string; popupPolicy?: 'off' | 'smart' | 'strict' };
+}
+export function findStepPath(workflow: WorkflowDefinition, stepId: string): StepDefinition[] | undefined {
+  const visit = (steps: StepDefinition[], ancestors: StepDefinition[]): StepDefinition[] | undefined => {
+    for (const step of steps) {
+      const path = [...ancestors, step];
+      if (step.stepId === stepId) return path;
+      const found = visit(step.children ?? [], path) ?? visit(step.elseSteps ?? [], path);
+      if (found) return found;
+    }
+  };
+  return visit(workflow.steps, []);
 }
 export interface ActionField {
   key: string; label: string; type: 'text' | 'textarea' | 'number' | 'boolean' | 'select' | 'json';
@@ -31,13 +42,16 @@ export interface RunSnapshot {
   runId: string; workflowId: string; workflowName: string; revision: number; status: RunStatus;
   startedAt: string; endedAt?: string; currentStepId?: string; variables: Record<string, unknown>;
   artifacts: Artifact[]; error?: string; browserOpen?: boolean;
-  scheduleId?: string; scheduledFor?: string;
+  scheduleId?: string; scheduledFor?: string; stepId?: string;
 }
 export interface RunEvent {
   type: 'run' | 'step' | 'log' | 'artifact'; runId: string; at: string; stepId?: string;
   status?: string; message?: string; data?: unknown; run?: RunSnapshot;
 }
 export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser';
+export interface BrowserPageInfo {
+  pageId: string; title: string; url: string; current: boolean; openerPageId?: string;
+}
 export interface BootstrapData {
   workflows: WorkflowDefinition[]; actions: ActionDefinition[]; runs: RunSnapshot[];
   schedules: WorkflowSchedule[];
@@ -51,6 +65,8 @@ export interface DesktopApi {
   saveSchedule(schedule: WorkflowSchedule): Promise<WorkflowSchedule>;
   deleteSchedule(scheduleId: string): Promise<void>;
   runWorkflow(workflow: WorkflowDefinition): Promise<RunSnapshot>;
+  runStep(workflow: WorkflowDefinition, stepId: string, browserRunId?: string): Promise<RunSnapshot>;
+  listBrowserPages(runId: string): Promise<BrowserPageInfo[]>;
   controlRun(runId: string, command: RunCommand): Promise<void>;
   chooseDirectory(): Promise<string | null>;
   openPath(path: string): Promise<void>;
@@ -67,18 +83,23 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
   stepId: identifier, name: z.string().min(1), actionType: z.string().min(1), params: z.record(safeKey, jsonValue),
   output: safeKey.optional(), timeoutMs: z.number().int().min(100).max(3_600_000).optional(),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(5), delayMs: z.number().int().min(0).max(60_000) }).optional(),
-  variables: z.record(safeKey.refine(key => !['runId', 'scheduledFor'].includes(key), '系统变量不可覆盖'), jsonValue).optional(),
+  variables: z.record(safeKey, jsonValue).optional(),
   elements: z.record(safeKey, elementSchema).optional(),
   settings: z.object({
     downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径').optional(),
     pythonExecutable: z.string().min(1).optional(),
   }).optional(),
   onError: z.enum(['fail', 'pause']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
+}).transform(step => {
+  if (step.actionType !== 'browser.click') return step;
+  // Retired click options must disappear before variable resolution and storage comparisons.
+  const { waitForNewPage: _waitForNewPage, newPageId: _newPageId, ...params } = step.params;
+  return { ...step, params };
 }));
 export const workflowSchema: z.ZodType<WorkflowDefinition> = z.object({
   schemaVersion: z.literal(1), workflowId: identifier, name: z.string().min(1).max(120), revision: z.number().int().nonnegative(),
   variables: z.record(safeKey, jsonValue), elements: z.record(safeKey, elementSchema), steps: z.array(stepSchema).max(1000),
-  settings: z.object({ downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径'), headless: z.boolean(), keepBrowserOpen: z.boolean().optional(), profileId: identifier.optional(), pythonExecutable: z.string().min(1).optional() }),
+  settings: z.object({ downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径'), headless: z.boolean(), keepBrowserOpen: z.boolean().optional(), profileId: identifier.optional(), pythonExecutable: z.string().min(1).optional(), popupPolicy: z.enum(['off', 'smart', 'strict']).optional() }),
 }).superRefine((flow, ctx) => {
   const ids = new Set<string>(); let count = 0;
   const visit = (steps: StepDefinition[], depth: number) => {

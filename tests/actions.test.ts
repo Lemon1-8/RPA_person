@@ -2,6 +2,31 @@ import { describe, expect, it } from 'vitest';
 import { validateActionParams } from '../packages/actions/src/index.js';
 
 describe('action parameter validation boundary', () => {
+  it('打开网页包含启动配置，校验端口和打开方式并保留旧启动动作', () => {
+    const params = { url: 'https://example.com', pageId: '订单页', openMode: 'new', browserChannel: 'chrome', debugPort: 9223 };
+    expect(validateActionParams('browser.open', params)).toEqual(params);
+    for (const invalid of [{ debugPort: -1 }, { debugPort: 9223.5 }, { debugPort: 65536 }, { browserChannel: 'unknown' }, { openMode: 'unknown' }]) {
+      expect(() => validateActionParams('browser.open', { ...params, ...invalid })).toThrow('参数错误');
+    }
+    expect(validateActionParams('browser.start', { browserChannel: 'auto', debugPort: 0 })).toEqual({ browserChannel: 'auto', debugPort: 0 });
+    expect(validateActionParams('browser.switchPage', { pageId: '订单页' })).toEqual({ pageId: '订单页' });
+    expect(validateActionParams('browser.switchPage', { pageId: '' })).toEqual({ pageId: '' });
+    expect(() => validateActionParams('browser.switchPage', { pageId: 42 })).toThrow('参数错误');
+    expect(validateActionParams('browser.closePage', {})).toEqual({});
+  });
+
+  it('旧点击动作的新网页选项不再参与校验或传给浏览器', () => {
+    for (const newPageId of ['main', '{{missing.pageId}}', { pageId: 'detail' }, null]) {
+      expect(validateActionParams('browser.click', { selector: '#open', pageId: 'main', waitForNewPage: true, newPageId }))
+        .toEqual({ selector: '#open', pageId: 'main' });
+    }
+  });
+
+  it('网页字段引用对象时指出具体字段和网页名称属性', () => {
+    expect(() => validateActionParams('browser.click', { selector: '#open', pageId: { pageId: 'detail', url: 'https://example.com' } }))
+      .toThrow('目标网页必须是文本，不能使用整个对象；请引用其中的网页名称，例如 {{变量.pageId}}');
+  });
+
   it('rejects invalid download destinations and names while preserving the inherited directory option', () => {
     for (const directory of [25, null, {}, [], false, 'relative/downloads', '   ', ...(process.platform === 'win32' ? ['/downloads', '\\downloads', 'C:downloads', '\\\\server'] : [])]) {
       expect(() => validateActionParams('browser.download', { selector: '#download', directory })).toThrow('参数错误');

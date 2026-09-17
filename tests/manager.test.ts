@@ -1,11 +1,19 @@
 import { afterEach, expect, it } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { RunManager } from '../apps/runner/src/manager.js';
 import type { RunEvent, WorkflowDefinition } from '../packages/contracts/src/index.js';
 const managers: RunManager[] = [];
-afterEach(async () => { await Promise.all(managers.splice(0).map(m => m.shutdown())); });
+const cleanupDirectories: string[] = [];
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map(m => m.shutdown()));
+  await Promise.all(cleanupDirectories.splice(0).map(async directory => {
+    const target = resolve(directory);
+    if (dirname(target) !== resolve(tmpdir()) || !basename(target).startsWith('rpa-manager-')) throw new Error('拒绝清理测试目录之外的路径');
+    await rm(target, { recursive: true, force: true });
+  }));
+});
 
 function nextEvent(manager: RunManager, predicate: (event: RunEvent) => boolean): Promise<RunEvent> {
   return new Promise((resolve, reject) => {
@@ -44,6 +52,83 @@ it('通过独立任务进程执行已保存版本，并在重启后读取运行�
   await manager.shutdown();
   const reopened = new RunManager({ dataDir }); managers.push(reopened); await reopened.initialize();
   expect(reopened.listRuns()[0].status).toBe('succeeded');
+});
+
+it('清空可选输出变量后保存，返回的已保存版本可直接运行', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'rpa-manager-saved-cleared-output-'));
+  cleanupDirectories.push(dataDir);
+  const manager = new RunManager({ dataDir, autoStartSchedules: false }); managers.push(manager);
+  await manager.initialize();
+  const definition: WorkflowDefinition = {
+    schemaVersion: 1, workflowId: 'saved-cleared-output', name: '保存后运行', revision: 0, variables: {}, elements: {},
+    settings: { downloadDir: dataDir, headless: true },
+    steps: [{ stepId: 'set', name: '设置', actionType: 'variables.set', params: { name: 'value', value: 42 }, output: undefined }],
+  };
+  const saved = await manager.saveWorkflow(definition);
+  const queued = await manager.runWorkflow(saved);
+  const result = await manager.waitForRun(queued.runId);
+  expect(result.status).toBe('succeeded');
+  expect(result.variables.value).toBe(42);
+  expect(result.revision).toBe(saved.revision);
+});
+
+it('运行请求仅多出空的可选属性时仍执行已保存内容', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'rpa-manager-optional-fields-'));
+  cleanupDirectories.push(dataDir);
+  const manager = new RunManager({ dataDir, autoStartSchedules: false }); managers.push(manager);
+  await manager.initialize();
+  const saved = await manager.saveWorkflow({
+    schemaVersion: 1, workflowId: 'optional-fields', name: '可选属性', revision: 0, variables: {}, elements: {},
+    settings: { downloadDir: dataDir, headless: true },
+    steps: [{ stepId: 'set', name: '设置', actionType: 'variables.set', params: { name: 'value', value: 42 } }],
+  });
+  const request = structuredClone(saved);
+  request.steps[0].output = undefined;
+  request.settings.profileId = undefined;
+  const queued = await manager.runWorkflow(request);
+  const result = await manager.waitForRun(queued.runId);
+  expect(result.status).toBe('succeeded');
+  expect(result.variables.value).toBe(42);
+});
+
+it('旧点击选项在已保存版本比较前清除，不会误报未保存', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'rpa-manager-retired-click-'));
+  cleanupDirectories.push(dataDir);
+  const manager = new RunManager({ dataDir, autoStartSchedules: false }); managers.push(manager);
+  await manager.initialize();
+  const saved = await manager.saveWorkflow({
+    schemaVersion: 1, workflowId: 'retired-click', name: '旧点击选项', revision: 0, variables: {}, elements: {},
+    settings: { downloadDir: dataDir, headless: true },
+    steps: [{ stepId: 'condition', name: '未执行分支', actionType: 'control.if', params: { left: false, operator: 'truthy' }, children: [
+      { stepId: 'click', name: '点击', actionType: 'browser.click', params: { selector: '#target', waitForNewPage: true, newPageId: '{{missing.pageId}}' } },
+    ] }],
+  });
+  expect(saved.steps[0].children?.[0].params).toEqual({ selector: '#target' });
+  const request = structuredClone(saved);
+  Object.assign(request.steps[0].children![0].params, { waitForNewPage: true, newPageId: { pageId: 'main' } });
+  const queued = await manager.runWorkflow(request);
+  const result = await manager.waitForRun(queued.runId);
+  expect(result.status, result.error).toBe('succeeded');
+  expect(result.revision).toBe(saved.revision);
+});
+
+it('忽略空可选属性后仍拒绝未保存的实际修改及旧修订版本', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'rpa-manager-saved-revision-'));
+  cleanupDirectories.push(dataDir);
+  const manager = new RunManager({ dataDir, autoStartSchedules: false }); managers.push(manager);
+  await manager.initialize();
+  const saved = await manager.saveWorkflow({
+    schemaVersion: 1, workflowId: 'saved-revision', name: '版本校验', revision: 0, variables: {}, elements: {},
+    settings: { downloadDir: dataDir, headless: true },
+    steps: [{ stepId: 'set', name: '设置', actionType: 'variables.set', params: { name: 'value', value: 42 } }],
+  });
+  const edited = structuredClone(saved);
+  edited.steps[0].output = undefined;
+  edited.steps[0].params.value = 99;
+  await expect(manager.runWorkflow(edited)).rejects.toThrow('请先保存当前流程');
+  const current = await manager.saveWorkflow(edited);
+  await expect(manager.runWorkflow({ ...current, revision: saved.revision })).rejects.toThrow('请先保存当前流程');
+  expect(manager.listRuns()).toHaveLength(0);
 });
 
 it('任务进程启动失败时保留父运行器并完成排队任务及退出清理', async () => {

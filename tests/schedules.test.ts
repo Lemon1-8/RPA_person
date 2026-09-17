@@ -7,6 +7,8 @@ import { nextScheduleTime } from '../apps/runner/src/schedule.js';
 import { FileStore } from '../packages/persistence/src/index.js';
 import { refreshDemoUrls, seedDesktopWorkspace } from '../apps/desktop/src/workspace.js';
 import { scheduleSchema, type WorkflowDefinition, type WorkflowSchedule } from '../packages/contracts/src/index.js';
+import { createDemoWorkflow } from '../examples/demo.js';
+import { startFixtureServer } from './fixtures/server.js';
 
 const managers: RunManager[] = [];
 const directories: string[] = [];
@@ -53,7 +55,7 @@ describe('定时运行', () => {
     expect(result.revision).toBe(2);
     expect(result.scheduleId).toBe(saved.scheduleId);
     expect(result.scheduledFor).toBe(state.schedule.at);
-    expect(result.variables).toMatchObject({ ran: true, scheduledFor: state.schedule.at });
+    expect(result.variables).toEqual({ ran: true });
     expect(state.manager.listSchedules()[0]).toMatchObject({ enabled: false, lastRunId: run.runId });
     await state.manager.shutdown();
     const restarted = await state.createManager();
@@ -166,17 +168,24 @@ describe('定时运行', () => {
     expect(await restarted.listWorkflows()).toHaveLength(0);
   });
 
-  it('启动时刷新示例地址并保存，让计划读取本次启动的端口', async () => {
+  it('启动时刷新示例动作地址并保存，让计划读取本次启动的端口', async () => {
     const state = await setup();
-    await state.manager.saveWorkflow({ ...state.workflow, variables: { demoUrl: 'http://127.0.0.1:1234' } });
-    await refreshDemoUrls(state.manager, 'http://127.0.0.1:4567');
-    expect((await state.manager.listWorkflows())[0]).toMatchObject({ revision: 3, variables: { demoUrl: 'http://127.0.0.1:4567' } });
-    await refreshDemoUrls(state.manager, 'http://127.0.0.1:4567');
-    expect((await state.manager.listWorkflows())[0].revision).toBe(3);
-    await state.manager.saveSchedule(state.schedule);
-    state.setTime('2030-01-01T00:01:00.000Z'); await state.manager.checkSchedules();
-    const run = await state.manager.waitForRun(state.manager.listRuns()[0].runId);
-    expect(run.variables.demoUrl).toBe('http://127.0.0.1:4567');
+    const fixture = await startFixtureServer();
+    try {
+      const demo = createDemoWorkflow('http://127.0.0.1:1234', state.dataDir, true);
+      demo.steps = demo.steps.slice(0, 1); demo.settings.keepBrowserOpen = false;
+      await state.manager.saveWorkflow(demo);
+      await refreshDemoUrls(state.manager, fixture.url);
+      const saved = (await state.manager.listWorkflows()).find(workflow => workflow.workflowId === demo.workflowId)!;
+      expect(saved).toMatchObject({ revision: 2, variables: {}, steps: [{ params: { url: fixture.url } }] });
+      await refreshDemoUrls(state.manager, fixture.url);
+      expect((await state.manager.listWorkflows()).find(workflow => workflow.workflowId === demo.workflowId)!.revision).toBe(2);
+      await state.manager.saveSchedule({ ...state.schedule, workflowId: demo.workflowId });
+      state.setTime('2030-01-01T00:01:00.000Z'); await state.manager.checkSchedules();
+      const run = await state.manager.waitForRun(state.manager.listRuns()[0].runId);
+      expect(run.status, run.error).toBe('succeeded');
+      expect(run.variables).toEqual({});
+    } finally { await fixture.close(); }
   });
 
   it('拒绝无效时间、间隔和路径标识，并在退出后禁止新触发', async () => {

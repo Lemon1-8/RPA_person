@@ -15,6 +15,13 @@ try {
   const page = await app.firstWindow();
   const pageErrors = []; page.on('pageerror', error => pageErrors.push(error.message));
   await page.getByRole('heading', { name: '订单采集与导出', exact: true }).waitFor();
+  await page.getByRole('button', { name: '步骤 1：打开订单演示页', exact: true }).click();
+  await page.getByRole('button', { name: '为网页地址插入变量', exact: true }).click();
+  const variables = page.getByRole('group', { name: '为网页地址插入变量列表', exact: true });
+  await variables.getByText('当前步骤还没有可用变量', { exact: true }).waitFor();
+  assert.equal(await variables.getByRole('button').count(), 0);
+  await page.screenshot({ path: join(qa, 'variables-empty.png'), fullPage: true });
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '运行设置', exact: true }).click();
   await page.getByLabel('流程名称', { exact: true }).fill('桌面验收 · 订单导出');
   await page.getByRole('textbox', { name: /^下载目录/ }).fill(output);
@@ -25,6 +32,7 @@ try {
   await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
   const before = await page.evaluate(() => window.rpa.bootstrap());
   assert.equal(before.workflows[0].name, '桌面验收 · 订单导出');
+  assert.deepEqual(before.workflows[0].variables, {}, '示例流程不应预置流程变量');
   await page.getByRole('button', { name: '运行', exact: true }).click();
   let after;
   const deadline = Date.now() + 45000;
@@ -35,6 +43,9 @@ try {
   } while (Date.now() < deadline);
   assert.equal(after.runs[0].status, 'succeeded', after.runs[0].error);
   assert.equal(after.runs[0].browserOpen, true);
+  for (const name of ['demoUrl', 'customer', 'runId', 'scheduledFor']) {
+    assert.equal(Object.hasOwn(after.runs[0].variables, name), false, `运行不应自动生成变量 ${name}`);
+  }
   const firstRunId = after.runs[0].runId;
   const file = after.runs[0].artifacts[0];
   assert.match(await readFile(file.path, 'utf8'), /跨语言订单/);

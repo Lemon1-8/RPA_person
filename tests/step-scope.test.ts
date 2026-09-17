@@ -133,9 +133,10 @@ describe('指令独立配置与作用域', () => {
     expect(result.variables).not.toHaveProperty('result');
   });
 
-  it('步骤配置校验拒绝覆盖系统变量及相对下载路径', () => {
+  it('步骤配置允许普通变量名，仍拒绝保留属性及相对下载路径', () => {
     const step = { stepId: 'invalid', name: '无效配置', actionType: 'core.assert', params: { actual: 1, expected: 1 } };
-    expect(workflowSchema.safeParse(workflow([{ ...step, variables: { runId: 'overridden' } }])).success).toBe(false);
+    expect(workflowSchema.safeParse(workflow([{ ...step, variables: { runId: 'local-id', scheduledFor: 'local-time' } }])).success).toBe(true);
+    expect(workflowSchema.safeParse(workflow([{ ...step, variables: { constructor: 'invalid' } }])).success).toBe(false);
     expect(workflowSchema.safeParse(workflow([{ ...step, settings: { downloadDir: 'relative' } }])).success).toBe(false);
     if (process.platform === 'win32') expect(workflowSchema.safeParse(workflow([{ ...step, settings: { downloadDir: '\\\\server\\share\\downloads' } }])).success).toBe(true);
   });
@@ -153,9 +154,34 @@ describe('指令独立配置与作用域', () => {
     expect(browser.starts).toHaveBeenCalledTimes(1);
   });
 
-  it('运行记录保留计划标识与计划触发时间，系统变量使用计划时间', async () => {
+  it('手动执行不自动注入变量', async () => {
+    const runner = await engine({ ...workflow([]), variables: {} });
+    expect(runner.getSnapshot().variables).toEqual({});
+    const result = await runner.run();
+    expect(result.status).toBe('succeeded');
+    expect(result.runId).toBe('scope-run');
+    expect(result.variables).toEqual({});
+  });
+
+  it('计划标识与触发时间只保存在运行记录中，不自动注入变量', async () => {
     const scheduledFor = '2026-09-16T04:00:00.000Z';
     const result = await (await engine(workflow([]), { scheduleId: 'daily', scheduledFor })).run();
-    expect(result).toMatchObject({ scheduleId: 'daily', scheduledFor, variables: { scheduledFor } });
+    expect(result).toMatchObject({ runId: 'scope-run', scheduleId: 'daily', scheduledFor });
+    expect(result.variables).toEqual({ value: 'global' });
+  });
+
+  it.each(['runId', 'scheduledFor'])('%s 可由用户声明、局部覆盖和写入，且不改变运行元数据', async name => {
+    const scheduledFor = '2026-09-16T04:00:00.000Z';
+    const flow = workflow([
+      { stepId: 'local', name: '局部值', actionType: 'core.assert', variables: { [name]: 'local' }, params: { actual: `{{${name}}}`, expected: 'local' } },
+      { stepId: 'restored', name: '恢复声明值', actionType: 'core.assert', params: { actual: `{{${name}}}`, expected: 'declared' } },
+      { stepId: 'set', name: '设置变量', actionType: 'variables.set', params: { name, value: 'assigned' } },
+      { stepId: 'script', name: '脚本读写', actionType: 'script.run', params: { language: 'javascript', code: `await rpa.set('${name}', (await rpa.get('${name}')) + '-script'); await rpa.output(await rpa.get('${name}'));` }, output: name },
+    ]);
+    flow.variables = { [name]: 'declared' };
+    const result = await (await engine(flow, { scheduleId: 'daily', scheduledFor })).run();
+    expect(result.status).toBe('succeeded');
+    expect(result.variables).toEqual({ [name]: 'assigned-script' });
+    expect(result).toMatchObject({ runId: 'scope-run', scheduleId: 'daily', scheduledFor });
   });
 });

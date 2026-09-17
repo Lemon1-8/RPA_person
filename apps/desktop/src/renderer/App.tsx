@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
-  ArrowDown,
-  ArrowUp,
   Braces,
   CalendarClock,
   Check,
   ChevronRight,
   Circle,
   Code2,
-  Copy,
   Download,
   Eye,
   EyeOff,
@@ -33,15 +30,16 @@ import {
   Save,
   Search,
   Settings2,
+  ShieldCheck,
   Square,
   Terminal,
-  Trash2,
   Workflow,
   X,
 } from "lucide-react";
 import type {
   ActionDefinition,
   Artifact,
+  BrowserPageInfo,
   DesktopApi,
   RunCommand,
   RunEvent,
@@ -52,6 +50,11 @@ import type {
 } from "../../../../packages/contracts/src/index.js";
 import { WorkflowsPage } from "./WorkflowsPage.js";
 import { SchedulesPage } from "./SchedulesPage.js";
+import { StepTree } from "./StepTree.js";
+import { ControlFlowFields } from "./ControlFlowFields.js";
+import { VariablePicker } from "./VariablePicker.js";
+import { BrowserOpenFields, PageTargetField } from "./BrowserFields.js";
+import { getBrowserPageErrors, getInheritedPageTarget } from "./page-options.js";
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
 const terminalStatuses = new Set([
@@ -158,6 +161,8 @@ function copyStep(step: StepDefinition): StepDefinition {
 }
 
 function ActionIcon({ type, size = 17 }: { type: string; size?: number }) {
+  if (type === "core.log") return <Terminal size={size} />;
+  if (type === "browser.popupGuard") return <ShieldCheck size={size} />;
   if (/script|python|javascript|typescript/.test(type))
     return <Code2 size={size} />;
   if (/download/.test(type)) return <Download size={size} />;
@@ -303,6 +308,8 @@ export function App() {
   const [actions, setActions] = useState<ActionDefinition[]>([]);
   const [runs, setRuns] = useState<RunSnapshot[]>([]);
   const [runId, setRunId] = useState("");
+  const [stepBrowserTargets, setStepBrowserTargets] = useState<Record<string, string>>({});
+  const [pageInventory, setPageInventory] = useState<{ runId: string; pages: BrowserPageInfo[]; error?: string }>({ runId: "", pages: [] });
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [query, setQuery] = useState("");
@@ -319,6 +326,7 @@ export function App() {
   const [invalidFields, setInvalidFields] = useState<Record<string, boolean>>(
     {},
   );
+  const [parameterEdits, setParameterEdits] = useState<Record<string, number>>({});
   const [insertBranch, setInsertBranch] = useState<
     "after" | "children" | "elseSteps"
   >("after");
@@ -333,15 +341,34 @@ export function App() {
   const selectedAction = actions.find(
     (action) => action.type === selected?.step.actionType,
   );
+  const availableActions = useMemo(() => actions.filter(action => !["browser.start", "browser.switchPage"].includes(action.type)), [actions]);
   const run = runs.find((item) => item.runId === runId);
   const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
-  const invalid = Object.values(invalidFields).some(Boolean);
+  const validationScope = `${workflowId}:${selectedId}:${inspector}:${view}:`;
+  const invalid = Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
+  const pageErrors = useMemo(() => workflow ? getBrowserPageErrors(workflow) : [], [workflow]);
+  const invalidWorkflow = invalid || pageErrors.length > 0;
   const activeRun = run && !terminalStatuses.has(run.status);
   const retainedBrowser = !!run?.browserOpen && !activeRun;
   const browserAvailable = !!activeRun || !!run?.browserOpen;
   const retainedBrowserCount = runs.filter(
     (item) => item.browserOpen && terminalStatuses.has(item.status),
   ).length;
+  const workflowRunning = runs.some(
+    (item) => item.workflowId === workflowId && !terminalStatuses.has(item.status),
+  );
+  const stepBrowsers = runs.filter(
+    (item) => item.workflowId === workflowId && item.browserOpen && terminalStatuses.has(item.status),
+  );
+  const stepBrowserTarget = stepBrowserTargets[workflowId] ?? "auto";
+  const targetBrowser = stepBrowserTarget === "auto"
+    ? stepBrowsers[0]
+    : stepBrowsers.find((item) => item.runId === stepBrowserTarget);
+  const missingStepBrowser = !["auto", "new"].includes(stepBrowserTarget) && !targetBrowser;
+  const pageBrowserId = stepBrowserTarget === "new" ? undefined : runs.find(item =>
+    item.workflowId === workflowId && item.browserOpen && (stepBrowserTarget === "auto" || item.runId === stepBrowserTarget))?.runId;
+  const browserPages = pageInventory.runId === pageBrowserId ? pageInventory.pages : [];
+  const cannotRunStep = !api || !workflow || !!busy || invalid || workflowRunning || missingStepBrowser;
   const visibleEvents = events.filter(
     (event) => event.runId === runId && event.message,
   );
@@ -353,7 +380,7 @@ export function App() {
   );
   const actionGroups = useMemo(() => {
     const groups = new Map<string, ActionDefinition[]>();
-    for (const action of actions.filter((item) =>
+    for (const action of availableActions.filter((item) =>
       `${item.label} ${item.type} ${item.description}`
         .toLowerCase()
         .includes(query.toLowerCase()),
@@ -363,7 +390,25 @@ export function App() {
       groups.set(action.category, group);
     }
     return [...groups.entries()];
-  }, [actions, query]);
+  }, [availableActions, query]);
+
+  useEffect(() => {
+    if (!api || !pageBrowserId || view !== "editor") return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const pages = await api.listBrowserPages(pageBrowserId);
+        if (!disposed) setPageInventory({ runId: pageBrowserId, pages });
+      } catch (cause) {
+        if (!disposed) setPageInventory({ runId: pageBrowserId, pages: [], error: cause instanceof Error ? cause.message : String(cause) });
+      } finally {
+        if (!disposed) timer = setTimeout(() => void refresh(), 1500);
+      }
+    };
+    void refresh();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [pageBrowserId, view]);
 
   useEffect(() => {
     if (!api) {
@@ -437,7 +482,9 @@ export function App() {
   }, [notice]);
   useEffect(() => {
     setInsertBranch("after");
-    setInvalidFields({});
+    // Child fields register their initial validity before this effect runs.
+    // Keep those entries while discarding drafts from the previous inspector.
+    setInvalidFields(previous => Object.fromEntries(Object.entries(previous).filter(([key]) => key.startsWith(validationScope))));
   }, [selectedId, workflowId, inspector, view]);
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: "nearest" });
@@ -455,7 +502,7 @@ export function App() {
 
   const markValid = (key: string, valid: boolean) =>
     setInvalidFields((previous) =>
-      previous[key] === !valid ? previous : { ...previous, [key]: !valid },
+      previous[`${validationScope}${key}`] === !valid ? previous : { ...previous, [`${validationScope}${key}`]: !valid },
     );
   const updateWorkflow = (
     update: (value: WorkflowDefinition) => WorkflowDefinition,
@@ -483,7 +530,7 @@ export function App() {
     setError(cause instanceof Error ? cause.message : String(cause));
 
   async function saveWorkflow(thenRun = false) {
-    if (!api || !workflow || busy || invalid) return;
+    if (!api || !workflow || busy || invalidWorkflow) return;
     setBusy(thenRun ? "run" : "save");
     setError("");
     try {
@@ -529,8 +576,37 @@ export function App() {
     }
   }
 
+  async function runSingleStep(stepId: string) {
+    if (!api || !workflow || cannotRunStep) return;
+    const step = steps.find((item) => item.step.stepId === stepId)?.step;
+    if (!step) return;
+    const pageError = getBrowserPageErrors({ ...workflow, steps: [step] })[0];
+    if (pageError) { setError(`“${pageError.stepName}”：${pageError.error}`); return; }
+    setBusy(`step:${stepId}`);
+    setError("");
+    try {
+      const snapshot = await api.runStep(workflow, stepId, targetBrowser?.runId);
+      // Events may arrive before this IPC response; do not replace their newer state.
+      setRuns((previous) => previous.some((item) => item.runId === snapshot.runId)
+        ? previous : [snapshot, ...previous]);
+      setRunId(snapshot.runId);
+      if (stepBrowserTarget === "new") setStepBrowserTargets((previous) => ({ ...previous, [workflowId]: "auto" }));
+      setSelectedId(stepId);
+      setBottomTab("logs");
+      setPanels((previous) => ({ ...previous, bottom: true }));
+      setNotice(`已提交单条运行：${step.name}`);
+    } catch (cause) {
+      catchError(cause);
+    } finally {
+      setBusy("");
+    }
+  }
+
   function addAction(action: ActionDefinition, targetId = selectedId, branch = insertBranch) {
-    if (!workflow || busy) return;
+    if (!workflow || busy || !availableActions.some(item => item.type === action.type)) return;
+    const parent = steps.find(item => item.step.stepId === targetId)?.step;
+    if (branch !== "after" && (!parent || !["control.if", "control.forEach"].includes(parent.actionType)
+      || (branch === "elseSteps" && parent.actionType !== "control.if"))) return;
     const step: StepDefinition = {
       stepId: uuid(),
       name: action.label,
@@ -538,6 +614,8 @@ export function App() {
       params: clone(action.defaults),
       timeoutMs: 30000,
       onError: "fail",
+      ...(["control.if", "control.forEach"].includes(action.type) ? { children: [] } : {}),
+      ...(action.type === "control.if" ? { elseSteps: [] } : {}),
     };
     updateWorkflow((value) => ({
       ...value,
@@ -578,7 +656,7 @@ export function App() {
         return items;
       }),
     }));
-    if (command === "delete" && selectedId === id) setSelectedId("");
+    if (command === "delete" && original && flatten([original]).some(item => item.step.stepId === selectedId)) setSelectedId("");
     if (copied) setSelectedId(copied.stepId);
   }
 
@@ -634,7 +712,7 @@ export function App() {
 
   function dropAction(event: React.DragEvent, targetId: string) {
     event.preventDefault();
-    const action = actions.find(item => item.type === event.dataTransfer.getData("application/x-rpa-action"));
+    const action = availableActions.find(item => item.type === event.dataTransfer.getData("application/x-rpa-action"));
     if (action) addAction(action, targetId, "after");
   }
 
@@ -682,7 +760,7 @@ export function App() {
         </div>
         <div className="toolbar">
           <button
-            disabled={!api || !workflow || !!busy || invalid}
+            disabled={!api || !workflow || !!busy || invalidWorkflow}
             onClick={() => void saveWorkflow()}
           >
             <Save size={16} />
@@ -691,7 +769,7 @@ export function App() {
           <button
             className="primary"
             disabled={
-              !api || !workflow || !!busy || invalid || !workflow.steps.length
+              !api || !workflow || !!busy || invalidWorkflow || !workflow.steps.length
             }
             title={
               !workflow?.steps.length
@@ -749,6 +827,13 @@ export function App() {
           </IconButton>
         </div>
       )}
+      {pageErrors[0] && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status">
+        <AlertCircle size={17} />
+        <span>“{pageErrors[0].stepName}”：{pageErrors[0].error}{pageErrors.length > 1 ? `（另有 ${pageErrors.length - 1} 项待完善）` : ""}</span>
+        <button className="text-button" onClick={() => {
+          setSelectedId(pageErrors[0].stepId); setInspector("step"); setView("editor"); setPanels(previous => ({ ...previous, right: true }));
+        }}>定位步骤</button>
+      </div>}
       {notice && (
         <div className="toast" role="status">
           <Check size={16} />
@@ -852,6 +937,24 @@ export function App() {
                     <option value="headless">无头 · 不显示浏览器窗口</option>
                   </select>
                   <small>人工登录使用有界面模式；运行时不能切换模式。</small>
+                </label>
+                <label className="field">
+                  <span>智能屏蔽弹窗</span>
+                  <select
+                    aria-label="智能屏蔽弹窗"
+                    value={workflow.settings.popupPolicy ?? "smart"}
+                    disabled={!!busy}
+                    onChange={(event) => updateWorkflow((value) => ({
+                      ...value,
+                      settings: { ...value.settings, popupPolicy: event.target.value as "off" | "smart" | "strict" },
+                    }))}
+                  >
+                    <option value="smart">智能屏蔽（默认）</option>
+                    <option value="strict">强力屏蔽</option>
+                    <option value="off">关闭屏蔽</option>
+                  </select>
+                  <small>智能模式处理广告、营销、Cookie 弹层和脚本弹窗，尽量保留登录及业务窗口。强力模式也屏蔽通用遮罩和额外弹出窗口。</small>
+                  <small>保存后下次运行生效；也可添加「智能屏蔽弹窗」指令，在当前浏览器中切换。被屏蔽的确认框会取消，不会自动确认业务操作。</small>
                 </label>
                 <label className="field">
                   <span>流程结束后的浏览器</span>
@@ -973,7 +1076,7 @@ export function App() {
           </div>
           <div className="section-heading">
             <h2>指令库</h2>
-            <span>{actions.length}</span>
+            <span>{availableActions.length}</span>
           </div>
           <label className="search">
             <Search size={16} />
@@ -1046,8 +1149,46 @@ export function App() {
               运行设置
             </button>
           </div>
+          {workflow && <div className="single-step-toolbar" aria-label="单条运行">
+            <div className="single-step-controls">
+              <label htmlFor="step-browser-target"><Globe size={15} />目标浏览器</label>
+              <select
+                id="step-browser-target"
+                aria-label="单条运行的目标浏览器"
+                value={stepBrowserTarget}
+                disabled={!!busy || workflowRunning}
+                onChange={(event) => setStepBrowserTargets((previous) => ({ ...previous, [workflowId]: event.target.value }))}
+              >
+                <option value="auto">{stepBrowsers[0] ? `当前流程 · ${stepBrowsers[0].runId.slice(0, 8)}` : "自动 · 首次打开时新建"}</option>
+                <option value="new">新建浏览器会话</option>
+                {stepBrowsers.map((item) => <option key={item.runId} value={item.runId}>
+                  {formatTime(item.startedAt)} · {item.runId.slice(0, 8)}
+                </option>)}
+                {missingStepBrowser && <option value={stepBrowserTarget}>所选浏览器不可用</option>}
+              </select>
+              <button
+                className="single-step-run"
+                disabled={cannotRunStep || !selected}
+                onClick={() => selected && void runSingleStep(selected.step.stepId)}
+              >
+                {busy.startsWith("step:") ? <Loader2 size={15} className="spin" /> : <Play size={15} />}
+                运行选中指令
+              </button>
+            </div>
+            <p role={missingStepBrowser ? "status" : undefined}>
+              {workflowRunning ? "当前流程正在执行，请等待完成或停止后再单条运行。"
+                : missingStepBrowser ? "所选浏览器已关闭或不可用，请重新选择目标。"
+                : selected?.step.actionType === "core.log" ? "使用当前参数；打印日志无需浏览器。引用循环当前项时，请运行整个循环。"
+                : "使用当前参数；网页指令先运行「打开网页」，后续复用浏览器。容器会执行其子步骤。"}
+            </p>
+            {pageBrowserId && <p className="browser-page-status" role="status">
+              {pageInventory.runId === pageBrowserId && pageInventory.error
+                ? `网页列表暂不可用：${pageInventory.error}`
+                : `已登记 ${browserPages.length} 个网页 · 当前：${browserPages.find(page => page.current)?.pageId ?? "尚未选定或已关闭"}`}
+            </p>}
+          </div>}
           <div className="editor-caption">
-            <span>点击指令插入到选中步骤之后，也可拖拽到步骤上</span>
+            <span>内部指令按层级缩进；点击分支内的 + 添加指令</span>
             {selected && (
               <select
                 className="insert-select"
@@ -1058,10 +1199,10 @@ export function App() {
                 }
               >
                 <option value="after">插入到选中步骤之后</option>
-                {/if|condition|loop|each/i.test(selected.step.actionType) && (
-                  <option value="children">添加到执行分支</option>
+                {["control.if", "control.forEach"].includes(selected.step.actionType) && (
+                  <option value="children">{selected.step.actionType === "control.forEach" ? "添加到循环体" : "添加到满足条件"}</option>
                 )}
-                {/if|condition/.test(selected.step.actionType) && (
+                {selected.step.actionType === "control.if" && (
                   <option value="elseSteps">添加到否则分支</option>
                 )}
               </select>
@@ -1080,107 +1221,24 @@ export function App() {
                   <span />
                   <span>开始</span>
                 </div>
-                {steps.map(
-                  ({ step, depth, index, siblings, branch }, flatIndex) => {
-                    const state =
-                      run?.workflowId === workflowId
-                        ? (stepStatuses.get(step.stepId) ??
-                          (run.currentStepId === step.stepId && activeRun
-                            ? run.status
-                            : undefined))
-                        : undefined;
-                    const action = actions.find(
-                      (item) => item.type === step.actionType,
-                    );
-                    const summary = Object.entries(step.params)
-                      .filter(
-                        ([key, value]) =>
-                          !/code|script|source/.test(key) &&
-                          value !== "" &&
-                          value !== undefined,
-                      )
-                      .slice(0, 2)
-                      .map(([key, value]) => `${key}: ${toText(value)}`)
-                      .join(" · ");
-                    return (
-                      <div
-                        key={step.stepId}
-                        className="step-wrapper"
-                        style={{ marginLeft: depth * 20 }}
-                      >
-                        {depth > 0 && index === 0 && (
-                          <div className="branch-label">
-                            <GitBranch size={12} />
-                            {branch === "elseSteps" ? "否则" : "执行分支"}
-                          </div>
-                        )}
-                        <article
-                          onDragOver={event => { if (event.dataTransfer.types.includes("application/x-rpa-action")) { event.preventDefault(); event.currentTarget.classList.add("drop-target"); } }}
-                          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.classList.remove("drop-target"); }}
-                          onDrop={event => { event.stopPropagation(); event.currentTarget.classList.remove("drop-target"); dropAction(event, step.stepId); }}
-                          className={`step-card${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
-                        >
-                          <button
-                            className="step-main"
-                            aria-label={`步骤 ${flatIndex + 1}：${step.name}`}
-                            aria-pressed={selectedId === step.stepId}
-                            onClick={() => {
-                              setSelectedId(step.stepId);
-                              setInspector("step");
-                            }}
-                          >
-                            <span className="step-number">
-                              {String(flatIndex + 1).padStart(2, "0")}
-                            </span>
-                            <span className="step-action-icon">
-                              <ActionIcon type={step.actionType} size={19} />
-                            </span>
-                            <span className="step-copy">
-                              <strong>{step.name}</strong>
-                              <span>
-                                {summary ||
-                                  action?.description ||
-                                  step.actionType}
-                              </span>
-                            </span>
-                            {state && <Status status={state} />}
-                          </button>
-                          <div className="step-actions">
-                            <IconButton
-                              label={`上移 ${step.name}`}
-                              disabled={index === 0 || !!busy}
-                              onClick={() => mutateStep(step.stepId, "up")}
-                            >
-                              <ArrowUp size={14} />
-                            </IconButton>
-                            <IconButton
-                              label={`下移 ${step.name}`}
-                              disabled={index === siblings.length - 1 || !!busy}
-                              onClick={() => mutateStep(step.stepId, "down")}
-                            >
-                              <ArrowDown size={14} />
-                            </IconButton>
-                            <IconButton
-                              label={`复制 ${step.name}`}
-                              disabled={!!busy}
-                              onClick={() => mutateStep(step.stepId, "copy")}
-                            >
-                              <Copy size={14} />
-                            </IconButton>
-                            <IconButton
-                              label={`删除 ${step.name}`}
-                              disabled={!!busy}
-                              danger
-                              onClick={() => mutateStep(step.stepId, "delete")}
-                            >
-                              <Trash2 size={14} />
-                            </IconButton>
-                          </div>
-                        </article>
-                      </div>
-                    );
-                  },
-                )}
+                <StepTree
+                  key={workflowId}
+                  steps={workflow?.steps ?? []}
+                  actions={availableActions}
+                  selectedId={selectedId}
+                  disabled={!!busy}
+                  cannotRun={cannotRunStep}
+                  statuses={run?.workflowId === workflowId ? new Map([
+                    ...stepStatuses,
+                    ...(run.currentStepId && activeRun ? [[run.currentStepId, run.status] as const] : []),
+                  ]) : new Map()}
+                  renderIcon={type => <ActionIcon type={type} size={19} />}
+                  renderStatus={status => <Status status={status} />}
+                  onSelect={id => { setSelectedId(id); setInspector("step"); setPanels(previous => ({ ...previous, right: true })); }}
+                  onRun={id => void runSingleStep(id)}
+                  onMutate={mutateStep}
+                  onAdd={addAction}
+                />
                 <div className="flow-terminal end">
                   <span />
                   <span>结束</span>
@@ -1215,7 +1273,7 @@ export function App() {
                   : "流程已保存"
                 : "等待桌面服务"}
             </span>
-            <span>执行时使用保存的固定版本</span>
+            <span>整流程使用保存版本 · 单条使用当前参数</span>
           </div>
         </main>
 
@@ -1271,10 +1329,27 @@ export function App() {
                       }
                     />
                   </label>
-                  {selectedAction?.fields.map((field) => (
+                  {workflow && ["control.if", "control.forEach"].includes(selected.step.actionType) ? (
+                    <ControlFlowFields
+                      key={selectedId}
+                      workflow={workflow}
+                      step={selected.step}
+                      disabled={!!busy}
+                      onChange={params => updateSelected(step => ({ ...step, params }))}
+                      onValidity={markValid}
+                    />
+                  ) : workflow && selected.step.actionType === "browser.open" ? (
+                    <BrowserOpenFields workflow={workflow} step={selected.step} pages={browserPages} disabled={!!busy}
+                      onChange={params => updateSelected(step => ({ ...step, params }))} onValidity={markValid} />
+                  ) : selectedAction?.fields.map((field) => (
                     <div key={`${selectedId}-${field.key}`}>
-                      {field.type === "json" ? (
+                      {field.key === "pageId" && workflow ? (
+                        <PageTargetField workflow={workflow} pages={browserPages} value={selected.step.params.pageId === undefined ? undefined : String(selected.step.params.pageId)} stepId={selectedId}
+                          inheritedTarget={getInheritedPageTarget(workflow, selectedId)}
+                          disabled={!!busy} onChange={value => setParam("pageId", value)} />
+                      ) : field.type === "json" ? (
                         <JsonEditor
+                          key={parameterEdits[field.key] ?? 0}
                           disabled={!!busy}
                           label={field.label}
                           value={
@@ -1334,6 +1409,7 @@ export function App() {
                             </select>
                           ) : field.type === "textarea" ? (
                             <textarea
+                              id={`param-${selectedId}-${field.key}`}
                               className={
                                 /code|script/.test(field.key)
                                   ? "code-input script-input"
@@ -1353,6 +1429,7 @@ export function App() {
                             />
                           ) : (
                             <input
+                              id={`param-${selectedId}-${field.key}`}
                               type={field.type === "number" ? "number" : "text"}
                               value={String(
                                 selected.step.params[field.key] ??
@@ -1374,6 +1451,29 @@ export function App() {
                             />
                           )}
                         </label>
+                      )}
+                      {workflow && ["text", "textarea", "json"].includes(field.type)
+                        && !["name", "code", "itemVariable", "pageId"].includes(field.key) && (
+                        <VariablePicker
+                          workflow={workflow}
+                          stepId={selectedId}
+                          disabled={!!busy}
+                          label={`为${field.label}插入变量`}
+                          onPick={reference => {
+                            if (field.type === "json") {
+                              setParam(field.key, reference);
+                              // Reset a malformed draft even when the chosen value equals its last valid value.
+                              setParameterEdits(previous => ({ ...previous, [field.key]: (previous[field.key] ?? 0) + 1 }));
+                              return;
+                            }
+                            const input = document.getElementById(`param-${selectedId}-${field.key}`) as HTMLInputElement | HTMLTextAreaElement | null;
+                            const value = String(selected.step.params[field.key] ?? "");
+                            const start = input?.selectionStart ?? value.length;
+                            const end = input?.selectionEnd ?? value.length;
+                            setParam(field.key, value.slice(0, start) + reference + value.slice(end));
+                            requestAnimationFrame(() => { input?.focus(); input?.setSelectionRange(start + reference.length, start + reference.length); });
+                          }}
+                        />
                       )}
                     </div>
                   ))}
@@ -1405,7 +1505,7 @@ export function App() {
                         }))
                       }
                     />
-                    <small>将动作结果写入指定变量。</small>
+                    <small>将动作结果写入变量；后续指令可点「插入变量」选择，或填写 {"{{变量名}}"}。</small>
                   </label>
 
                 </>
@@ -1605,7 +1705,7 @@ export function App() {
               <option value="">选择运行记录</option>
               {runs.map((item) => (
                 <option key={item.runId} value={item.runId}>
-                  {formatTime(item.startedAt)} · {item.workflowName}
+                  {formatTime(item.startedAt)} · {item.workflowName}{item.stepId ? " · 单条" : ""}
                 </option>
               ))}
             </select>
@@ -1848,7 +1948,7 @@ export function App() {
                             setBottomTab("logs");
                           }}
                         >
-                          <strong>{item.workflowName}</strong>
+                          <strong>{item.workflowName}{item.stepId ? " · 单条运行" : ""}</strong>
                           <code>{item.runId.slice(0, 12)}</code>
                         </button>
                       </td>

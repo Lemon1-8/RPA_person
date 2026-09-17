@@ -5,13 +5,12 @@ import { join } from 'node:path';
 import { BrowserSession, type BrowserSessionOptions } from '../../browser/src/index.js';
 import { runScript } from '../../scripts/src/index.js';
 import { actionDefinitions, getAction, validateActionParams, validateActions } from '../../actions/src/index.js';
-import { workflowSchema, type Artifact, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
+import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
 
 export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
 const reserved = new Set(['__proto__', 'prototype', 'constructor']);
-const systemVariables = new Set(['runId', 'scheduledFor']);
 function validateName(name: string) {
-  if (!name || reserved.has(name) || systemVariables.has(name)) throw new Error(`不可写入变量：${name}`);
+  if (!name || reserved.has(name)) throw new Error(`不可写入变量：${name}`);
 }
 function jsonClone(value: unknown): unknown {
   const serialized = JSON.stringify(value);
@@ -42,7 +41,7 @@ export function resolveValue(value: unknown, variables: Record<string, unknown>)
 }
 
 export class WorkflowEngine {
-  readonly workflow: WorkflowDefinition;
+  workflow: WorkflowDefinition;
   private snapshot: RunSnapshot;
   private browser?: BrowserSession;
   private stopped = false;
@@ -53,6 +52,7 @@ export class WorkflowEngine {
   private rpcQueue: Promise<unknown> = Promise.resolve();
   private consumed = false;
   private executionFinished = false;
+  private reuseBrowserOnly = false;
   private deadlines: { expiresAt: number; stepName: string }[] = [];
   private scopedElements: Record<string, ElementRef>;
   private scopedSettings: NonNullable<StepDefinition['settings']>;
@@ -65,10 +65,15 @@ export class WorkflowEngine {
       runId: options.runId, workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
       status: 'queued', startedAt: new Date().toISOString(), artifacts: [], browserOpen: false,
       scheduleId: options.scheduleId, scheduledFor: options.scheduledFor,
-      variables: { ...structuredClone(workflow.variables), runId: options.runId, scheduledFor: options.scheduledFor ?? new Date().toISOString() },
+      variables: structuredClone(workflow.variables),
     };
   }
   getSnapshot(): RunSnapshot { return structuredClone(this.snapshot); }
+  async listBrowserPages(): Promise<BrowserPageInfo[]> {
+    const browser = this.browser;
+    if (!browser?.isOpen()) return [];
+    return browser.listPages();
+  }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
     this.options.onEvent?.({ ...event, runId: this.snapshot.runId, at: new Date().toISOString() });
   }
@@ -142,11 +147,13 @@ export class WorkflowEngine {
   private async ensureBrowser(startParams: Record<string, unknown> = {}) {
     let browser = this.browser;
     if (!browser) {
+      if (this.reuseBrowserOnly) throw new Error('所选浏览器已关闭，请重新选择');
       browser = new BrowserSession({
         profileDir: join(this.options.dataDir, 'profiles', this.workflow.settings.profileId ?? this.workflow.workflowId),
         downloadDir: this.scopedSettings.downloadDir ?? this.workflow.settings.downloadDir, headless: this.workflow.settings.headless, runId: this.snapshot.runId,
         browserChannel: startParams.browserChannel as BrowserSessionOptions['browserChannel'],
         debugPort: startParams.debugPort as number | undefined,
+        popupPolicy: this.workflow.settings.popupPolicy ?? 'smart',
       });
       this.browser = browser;
       const session = browser;
@@ -176,7 +183,7 @@ export class WorkflowEngine {
     let abort: (() => void) | undefined;
     this.activeBrowserCalls++;
     const operation = (async () => {
-      const browser = await this.ensureBrowser(method === 'browser.start' ? params : {});
+      const browser = await this.ensureBrowser(['browser.start', 'browser.open'].includes(method) ? params : {});
       this.checkStop(); signal?.throwIfAborted();
       if (expired) throw new Error(`浏览器动作超时（${timeoutMs} ms）`);
       return method === 'browser.start' ? browser.getInfo() : browser.call(method, params);
@@ -202,6 +209,7 @@ export class WorkflowEngine {
   }
   private async dispatch(method: string, rawParams: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     this.checkStop(); signal?.throwIfAborted();
+    if (method === 'browser.listPages') return this.listBrowserPages();
     if (method === 'variables.get') {
       if (typeof rawParams.name !== 'string' || !rawParams.name) throw new Error('变量名称必须是非空文本');
       return jsonClone(readVariable(this.snapshot.variables, rawParams.name));
@@ -242,6 +250,11 @@ export class WorkflowEngine {
     const signal = this.stepAbort!.signal;
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
+    if (step.actionType === 'core.log') {
+      const message = typeof params.message === 'string' ? params.message : JSON.stringify(params.message);
+      this.emit({ type: 'log', stepId: step.stepId, message: message === '' ? '（空文本）' : message, data: { value: params.message } });
+      return params.message;
+    }
     if (step.actionType === 'core.assert') {
       if (!isDeepStrictEqual(params.actual, params.expected)) throw new Error(`结果校验失败：期望 ${JSON.stringify(params.expected)}，实际 ${JSON.stringify(params.actual)}`);
       return { ok: true };
@@ -359,14 +372,62 @@ export class WorkflowEngine {
       }
     }
   }
-  async run(): Promise<RunSnapshot> {
+  run(): Promise<RunSnapshot> {
     if (this.consumed) throw new Error('每个执行器只能运行一次');
     this.consumed = true;
+    return this.runExecution(() => this.executeSteps(this.workflow.steps), false);
+  }
+  runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow): Promise<RunSnapshot> {
+    const workflow = workflowSchema.parse(input);
+    validateActions(workflow);
+    const path = findStepPath(workflow, stepId);
+    if (!path) throw new Error('指令不存在，请重新选择');
+    const reusing = this.consumed;
+    const popupPolicyChanged = (workflow.settings.popupPolicy ?? 'smart') !== (this.workflow.settings.popupPolicy ?? 'smart');
+    if (this.consumed) {
+      if (!this.executionFinished) throw new Error('该浏览器正在执行任务，请等待完成或停止');
+      if (!this.browser?.isOpen()) throw new Error('所选浏览器已关闭，请新建单步运行');
+      if (workflow.workflowId !== this.workflow.workflowId) throw new Error('只能复用当前流程的浏览器');
+      if ((workflow.settings.profileId ?? workflow.workflowId) !== (this.workflow.settings.profileId ?? this.workflow.workflowId)
+        || workflow.settings.headless !== this.workflow.settings.headless) throw new Error('浏览器配置已改变，请关闭原浏览器后重新运行');
+      // Keep computed values; explicitly edited declarations take effect immediately.
+      for (const [name, value] of Object.entries(workflow.variables)) {
+        if (!Object.hasOwn(this.workflow.variables, name) || !isDeepStrictEqual(value, this.workflow.variables[name])) {
+          this.snapshot.variables[name] = structuredClone(value);
+        }
+      }
+      for (const [name, value] of Object.entries(this.workflow.variables)) {
+        if (!Object.hasOwn(workflow.variables, name) && isDeepStrictEqual(this.snapshot.variables[name], value)) delete this.snapshot.variables[name];
+      }
+    }
+    this.workflow = workflow;
+    this.reuseBrowserOnly = reusing;
+    this.scopedElements = workflow.elements;
+    this.scopedSettings = workflow.settings;
+    this.snapshot.workflowName = workflow.name;
+    this.snapshot.revision = workflow.revision;
+    this.snapshot.stepId = stepId;
+    this.consumed = true;
+    const executeAt = (index: number): Promise<void> => index === path.length - 1
+      ? this.executeSteps([path[index]])
+      : this.withinStepScope(path[index], () => executeAt(index + 1));
+    return this.runExecution(async () => {
+      if (this.browser && popupPolicyChanged) await this.browser.call('browser.popupGuard', { mode: workflow.settings.popupPolicy ?? 'smart' });
+      await executeAt(0);
+    }, true);
+  }
+  private async runExecution(execute: () => Promise<void>, keepBrowserOpen: boolean): Promise<RunSnapshot> {
+    this.executionFinished = false;
+    this.stopped = false;
+    this.pauseRequested = false;
+    delete this.snapshot.endedAt;
+    delete this.snapshot.error;
+    delete this.snapshot.currentStepId;
     this.state('running');
     let finalStatus: RunSnapshot['status'] = 'succeeded'; let finalError: string | undefined;
-    try { await this.executeSteps(this.workflow.steps); this.checkStop(); }
+    try { await execute(); this.checkStop(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError = error instanceof Error ? error.message : String(error); }
-    try { if (this.stopped || this.workflow.settings.keepBrowserOpen === false) await this.browser?.close(); }
+    try { if (this.stopped || (!keepBrowserOpen && this.workflow.settings.keepBrowserOpen === false)) await this.browser?.close(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError ??= `浏览器清理失败：${String(error)}`; }
     this.snapshot.browserOpen = this.browser?.isOpen() ?? false;
     this.executionFinished = true;

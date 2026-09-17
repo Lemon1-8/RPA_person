@@ -45,7 +45,7 @@ export async function assertDebugPortAvailable(port: number): Promise<void> {
   if (port === 0) return;
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
-    server.once('error', () => reject(new BrowserSessionError('DEBUG_PORT_IN_USE', `调试端口 ${port} 已被占用或无法监听，请选择其它端口或填写 0 自动分配。`)));
+    server.once('error', () => reject(new BrowserSessionError('DEBUG_PORT_IN_USE', `调试端口 ${port} 已被占用或无法监听，请选择其它端口或将浏览器端口分配改为“自动分配”。`)));
     server.listen({ host: '127.0.0.1', port, exclusive: true }, () => server.close(error => error ? reject(error) : resolve()));
   });
 }

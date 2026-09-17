@@ -1,12 +1,15 @@
-import { mkdir, open, readFile, realpath, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
+import type { BrowserPageInfo } from '../../contracts/src/index.js';
 import { assertDebugPortAvailable, BrowserSessionError, killNativeBrowser, launchNativeBrowser, resolveBrowser, type BrowserChannel, type NativeBrowser } from './native-browser.js';
 import { removeTemporaryDownloadHistory } from './download-history.js';
+import { PopupGuard, type PopupPolicy } from './popup-guard.js';
+import { acquireProfileLease, releaseProfileLease, type ProfileLease } from './profile-lease.js';
 
 export { BrowserSessionError } from './native-browser.js';
 export type { BrowserChannel } from './native-browser.js';
+export type { PopupPolicy } from './popup-guard.js';
 
 export interface BrowserSessionOptions {
   profileDir: string;
@@ -14,6 +17,7 @@ export interface BrowserSessionOptions {
   headless?: boolean;
   browserChannel?: BrowserChannel;
   debugPort?: number;
+  popupPolicy?: PopupPolicy;
   runId: string;
 }
 
@@ -41,11 +45,17 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
 export class BrowserSession {
   private context?: BrowserContext;
   private browser?: Browser;
+  private popupGuard?: PopupGuard;
   private native?: NativeBrowser;
   private stoppingNative?: Promise<void>;
   private readonly launchAbort = new AbortController();
   private connectionInfo?: { pageId: string; browserChannel: Exclude<BrowserChannel, 'auto'>; debugPort: number };
   private readonly pages = new Map<string, Page>();
+  private readonly pageIds = new WeakMap<Page, string>();
+  private readonly usedPageIds = new Set<string>();
+  private readonly reservedPageIds = new Set<string>();
+  private currentPageId = 'main';
+  private nextPageNumber = 2;
   private readonly temporaryDownloadPaths = new Set<string>();
   private starting?: Promise<void>;
   private closing?: Promise<void>;
@@ -53,7 +63,7 @@ export class BrowserSession {
   private readonly closeListeners = new Set<() => void>();
   private closed = false;
   private queue: Promise<unknown> = Promise.resolve();
-  private lease?: { path: string; token: string };
+  private lease?: ProfileLease;
 
   constructor(private readonly options: BrowserSessionOptions) {}
 
@@ -63,7 +73,57 @@ export class BrowserSession {
 
   getInfo(): { pageId: string; browserChannel: Exclude<BrowserChannel, 'auto'>; debugPort: number } {
     if (!this.connectionInfo || !this.isOpen()) throw new BrowserSessionError('BROWSER_CLOSED', '浏览器会话尚未启动或已经关闭');
-    return { ...this.connectionInfo };
+    return { ...this.connectionInfo, pageId: this.currentPageId };
+  }
+
+  /** Enumerating pages never starts a browser or changes the workflow's selected page. */
+  async listPages(): Promise<BrowserPageInfo[]> {
+    if (!this.isOpen()) return [];
+    const result = await Promise.all([...this.pages].map(async ([pageId, page]) => {
+      if (page.isClosed()) return undefined;
+      const [title, opener] = await Promise.all([
+        bounded(page.title(), 2_000).catch(() => ''),
+        bounded(page.opener(), 2_000).catch(() => null),
+      ]);
+      if (page.isClosed() || this.pages.get(pageId) !== page) return undefined;
+      const openerPageId = opener ? this.pageIds.get(opener) : undefined;
+      return { pageId, title, url: page.url(), current: pageId === this.currentPageId, ...(openerPageId ? { openerPageId } : {}) };
+    }));
+    return result.filter((page): page is BrowserPageInfo => !!page);
+  }
+
+  private readonly registerPage = (page: Page): string => {
+    const existing = this.pageIds.get(page);
+    if (existing) return existing;
+    let pageId = 'main';
+    if (this.usedPageIds.has(pageId) || this.reservedPageIds.has(pageId)) {
+      do { pageId = `page-${this.nextPageNumber++}`; }
+      while (this.usedPageIds.has(pageId) || this.reservedPageIds.has(pageId));
+    }
+    this.pages.set(pageId, page);
+    this.pageIds.set(page, pageId);
+    this.usedPageIds.add(pageId);
+    page.once('close', () => {
+      const id = this.pageIds.get(page);
+      if (id && this.pages.get(id) === page) this.pages.delete(id);
+      // Keep the current alias unchanged so the next implicit command reports its closure.
+    });
+    return pageId;
+  };
+
+  private assertAliasAvailable(pageId: string, page?: Page): void {
+    const existing = this.pages.get(pageId);
+    if (existing && !existing.isClosed() && existing !== page) throw new Error(`网页别名已被打开的标签页占用：${pageId}`);
+  }
+
+  private bindPage(page: Page, pageId: string): void {
+    if (page.isClosed()) throw new Error(`浏览器标签页不存在或已关闭：${pageId}`);
+    this.assertAliasAvailable(pageId, page);
+    const previous = this.registerPage(page);
+    if (previous !== pageId) this.pages.delete(previous);
+    this.pages.set(pageId, page);
+    this.pageIds.set(page, pageId);
+    this.usedPageIds.add(pageId);
   }
 
   /** Reports native closure after finishing profile cleanup and releasing its lease. */
@@ -82,24 +142,7 @@ export class BrowserSession {
     await mkdir(this.options.profileDir, { recursive: true });
     await mkdir(this.options.downloadDir, { recursive: true });
     const profileDir = await realpath(resolve(this.options.profileDir));
-    const leasePath = join(profileDir, '.rpa-profile.lock');
-    const token = randomUUID();
-    let handle;
-    try {
-      handle = await open(leasePath, 'wx');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      throw new BrowserSessionError('PROFILE_IN_USE', `配置目录正在使用：${profileDir}。租约文件：${leasePath}；异常退出后须确认原浏览器已退出再清理租约。`);
-    }
-    try {
-      await handle.writeFile(JSON.stringify({ token, pid: process.pid, runId: this.options.runId, createdAt: new Date().toISOString() }));
-      this.lease = { path: leasePath, token };
-    } catch (error) {
-      await handle.close();
-      await unlink(leasePath);
-      throw error;
-    }
-    await handle.close();
+    this.lease = await acquireProfileLease(profileDir, this.options.runId, this.launchAbort.signal);
     try {
       const installed = await resolveBrowser(this.options.browserChannel ?? 'auto', this.options.headless ?? false);
       await assertDebugPortAvailable(this.options.debugPort ?? 0);
@@ -113,7 +156,13 @@ export class BrowserSession {
       if (this.closed) throw new BrowserSessionError('BROWSER_START_CANCELLED', '浏览器启动已取消');
       this.context = this.browser.contexts()[0];
       if (!this.context) throw new BrowserSessionError('BROWSER_START_FAILED', '浏览器未提供默认页面上下文');
-      this.pages.set('main', this.context.pages()[0] ?? await this.context.newPage());
+      this.context.on('page', this.registerPage);
+      for (const page of this.context.pages()) this.registerPage(page);
+      // Chrome is launched with about:blank, but CDP can connect before its page
+      // event arrives. Creating a fallback here would produce a duplicate tab.
+      if (!this.pages.size) await this.waitForStartupPage();
+      this.popupGuard = new PopupGuard(this.context, this.options.popupPolicy ?? 'smart');
+      await this.popupGuard.start();
       this.connectionInfo = { pageId: 'main', browserChannel: installed.channel, debugPort: endpoint.port };
       if (!this.options.headless) await this.setWindowState('minimized', {});
     } catch (error) {
@@ -123,20 +172,38 @@ export class BrowserSession {
     }
   }
 
+  private waitForStartupPage(): Promise<void> {
+    const context = this.context!;
+    return new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        context.off('page', ready);
+        context.off('close', closed);
+        this.launchAbort.signal.removeEventListener('abort', aborted);
+        if (error) reject(error); else resolve();
+      };
+      const ready = (page: Page) => { this.registerPage(page); finish(); };
+      const aborted = () => finish(new BrowserSessionError('BROWSER_START_CANCELLED', '浏览器启动已取消'));
+      const closed = () => finish(new BrowserSessionError('BROWSER_CLOSED', '等待初始网页期间浏览器已关闭'));
+      const timer = setTimeout(() => finish(new BrowserSessionError('BROWSER_START_TIMEOUT', '浏览器在 30 秒内未提供初始网页')), 30_000);
+      context.on('page', ready);
+      context.on('close', closed);
+      this.launchAbort.signal.addEventListener('abort', aborted, { once: true });
+      // Register first, then re-check to cover a page/abort arriving at the boundary.
+      if (this.launchAbort.signal.aborted) aborted();
+      else if (this.pages.size) finish();
+    });
+  }
+
   private async releaseLease(): Promise<void> {
     const lease = this.lease;
     if (!lease) return;
-    // Only the successful owner may unlink. Failed/duplicate instances never get a token.
-    try {
-      const owner = JSON.parse(await readFile(lease.path, 'utf8')) as { token?: string };
-      if (owner.token === lease.token) await unlink(lease.path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    await releaseProfileLease(lease);
     this.lease = undefined;
   }
 
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if (method === 'browser.listPages') return this.listPages();
     const result = this.queue.then(async () => {
       await this.start();
       return this.execute(method, params);
@@ -147,7 +214,10 @@ export class BrowserSession {
 
   private page(params: Record<string, unknown>): Page {
     const element = params.element as { pageRef?: string } | undefined;
-    const id = typeof params.pageId === 'string' ? params.pageId : element?.pageRef ?? 'main';
+    const value = params.pageId !== undefined ? params.pageId : element?.pageRef;
+    if (value !== undefined && typeof value !== 'string') throw new Error('网页别名必须是文本');
+    const alias = typeof value === 'string' ? value.trim() : '';
+    const id = !alias || alias === '$current' ? this.currentPageId : alias;
     const page = this.pages.get(id);
     if (!page || page.isClosed()) throw new Error(`浏览器标签页不存在或已关闭：${id}`);
     return page;
@@ -172,15 +242,50 @@ export class BrowserSession {
   }
 
   private async execute(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (method === 'browser.popupGuard') {
+      if (params.mode !== 'off' && params.mode !== 'smart' && params.mode !== 'strict') throw new Error('弹窗屏蔽模式必须是 off、smart 或 strict');
+      return this.popupGuard!.setMode(params.mode);
+    }
     if (method === 'browser.show' || method === 'browser.hide') return this.setWindowState(method === 'browser.show' ? 'normal' : 'minimized', params);
+    if (method === 'browser.switchPage') {
+      const page = this.page(params);
+      await page.bringToFront();
+      this.currentPageId = this.pageIds.get(page)!;
+      return { pageId: this.currentPageId, url: page.url() };
+    }
+    if (method === 'browser.closePage') {
+      const page = this.page(params);
+      const pageId = this.pageIds.get(page)!;
+      await page.close();
+      return { ok: true, pageId };
+    }
     if (method === 'browser.open') {
-      const pageId = typeof params.pageId === 'string' ? params.pageId : 'main';
-      let page = this.pages.get(pageId);
-      if (!page || page.isClosed()) {
-        page = await this.context!.newPage();
-        this.pages.set(pageId, page);
+      const url = requiredString(params, 'url');
+      const milliseconds = timeout(params);
+      if (params.openMode !== undefined && params.openMode !== 'reuse' && params.openMode !== 'new') throw new Error('打开方式必须是 reuse 或 new');
+      if (params.pageId !== undefined && typeof params.pageId !== 'string') throw new Error('网页别名必须是文本');
+      const rawAlias = typeof params.pageId === 'string' ? params.pageId : '';
+      const alias = rawAlias.trim();
+      if (alias && (rawAlias !== alias || /[{}]/.test(alias))) throw new Error('网页别名不能包含首尾空格或花括号');
+      const explicitAlias = alias && alias !== '$current' ? alias : undefined;
+      const existing = explicitAlias ? this.pages.get(explicitAlias) : undefined;
+      let page: Page;
+      if (params.openMode !== 'new' && !explicitAlias) page = this.page(params);
+      else if (params.openMode !== 'new' && existing && !existing.isClosed()) page = existing;
+      else {
+        if (explicitAlias) {
+          this.assertAliasAvailable(explicitAlias);
+          this.reservedPageIds.add(explicitAlias);
+        }
+        try {
+          page = await this.context!.newPage();
+          this.registerPage(page);
+          if (explicitAlias) this.bindPage(page, explicitAlias);
+        } finally { if (explicitAlias) this.reservedPageIds.delete(explicitAlias); }
       }
-      await page.goto(requiredString(params, 'url'), { waitUntil: 'domcontentloaded', timeout: timeout(params) });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: milliseconds });
+      const pageId = this.pageIds.get(page)!;
+      this.currentPageId = pageId;
       return { pageId, url: page.url() };
     }
     if (method === 'browser.evaluate') {
@@ -236,7 +341,18 @@ export class BrowserSession {
 
   private async setWindowState(state: 'normal' | 'minimized', params: Record<string, unknown>): Promise<unknown> {
     if (this.options.headless) return { state, headless: true };
-    const session = await this.context!.newCDPSession(this.page(params));
+    let page: Page;
+    try { page = this.page(params); }
+    catch (error) {
+      const alias = typeof params.pageId === 'string' ? params.pageId.trim() : params.pageId;
+      if (alias !== undefined && alias !== '' && alias !== '$current') throw error;
+      const remaining = [...this.pages.values()].find(candidate => !candidate.isClosed());
+      if (!remaining) throw error;
+      // Showing the browser must still work after closing its selected tab; this
+      // window-only fallback never changes the workflow's current page target.
+      page = remaining;
+    }
+    const session = await this.context!.newCDPSession(page);
     try {
       const { windowId } = await bounded(session.send('Browser.getWindowForTarget'), timeout(params));
       await bounded(session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: state } }), timeout(params));
@@ -344,7 +460,7 @@ export class BrowserSession {
   }
 
   async screenshot(path: string): Promise<string | undefined> {
-    const page = this.pages.get('main');
+    const page = this.pages.get(this.currentPageId);
     if (!page || page.isClosed()) return undefined;
     const target = resolve(path);
     await mkdir(dirname(target), { recursive: true });
@@ -389,10 +505,15 @@ export class BrowserSession {
 
   private finishClose(): Promise<void> {
     this.closed = true;
+    this.context?.off('page', this.registerPage);
     this.context = undefined;
     this.pages.clear();
+    this.usedPageIds.clear();
+    this.reservedPageIds.clear();
     if (!this.finishingClose) this.finishingClose = Promise.resolve().then(async () => {
       try {
+        await this.popupGuard?.dispose();
+        this.popupGuard = undefined;
         if (this.lease) await removeTemporaryDownloadHistory(dirname(this.lease.path), this.temporaryDownloadPaths);
       } finally {
         try { await this.releaseLease(); }
