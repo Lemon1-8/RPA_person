@@ -37,12 +37,13 @@ add('browser.open', '打开网页', '浏览器', '首次自动启动浏览器，
   { url: '', openMode: 'reuse', pageId: '$current' }, z.object({ url: z.string().url(), pageId: z.string().optional(), openMode: z.enum(['reuse', 'new']).optional(), ...browserStartup }));
 add('browser.switchPage', '切换网页', '浏览器', '按网页别名切换后续指令的目标；不会重新加载页面。', true,
   [page], { pageId: 'main' }, z.object({ pageId: z.string().optional() }));
-add('browser.closePage', '关闭网页', '浏览器', '关闭指定标签页。后续步骤请选择仍打开的目标网页。', false,
-  [page], { pageId: '$current' }, z.object({ pageId: z.string().optional() }));
+add('browser.closePage', '关闭网页', '浏览器', '可关闭一个指定网页，也可关闭本次使用的自动化浏览器中的所有网页。\n\n选择“所有网页”时，会关闭该浏览器的全部标签页和窗口，结束这个浏览器会话；不会关闭其他任务的浏览器或你另外打开的浏览器。尚未打开浏览器时，会直接继续后续步骤。', false,
+  [{ key: 'closeMode', label: '关闭范围', type: 'select', required: true, options: [{ label: '指定网页', value: 'page' }, { label: '当前浏览器的所有网页', value: 'all' }] }, page],
+  { closeMode: 'page', pageId: '$current' }, z.union([z.object({ closeMode: z.literal('all') }), z.object({ closeMode: z.literal('page').optional(), pageId: z.string().optional() })]));
 add('browser.popupGuard', '智能屏蔽弹窗', '浏览器', '为当前浏览器持续屏蔽广告、营销、Cookie 弹层和意外新窗口；登录、支付及业务确认弹层保留。', true,
   [{ key: 'mode', label: '屏蔽模式', type: 'select', required: true, options: [{ label: '智能屏蔽（推荐）', value: 'smart' }, { label: '严格屏蔽', value: 'strict' }, { label: '关闭屏蔽', value: 'off' }] }],
   { mode: 'smart' }, z.object({ mode: z.enum(['off', 'smart', 'strict']) }));
-add('browser.wait', '等待元素', '网页操作', '等待元素出现，支持元素库与 iframe 路径。', true, fields, { selector: '' }, targetSchema);
+add('browser.wait', '等待元素', '网页操作', '流程执行到这一步时，会先等待指定的网页元素出现并显示出来，再继续执行后面的步骤。如果元素已经显示，就立即继续。\n\n例如：需要手动登录时，先等待登录后才出现的用户名显示，再执行后续操作。\n\n在“元素选择器”中填写要等待的目标。默认最多等待 30 秒，可在“设置”中的“步骤超时（毫秒）”修改；超时后按“失败后”的设置结束运行或暂停，等待人工处理。\n\n此指令只判断元素是否显示，不检查文字是否更新，也不代表整个网页已经加载完成。', true, fields, { selector: '' }, targetSchema);
 add('browser.click', '点击元素', '网页操作', '在当前或指定的目标网页点击元素。', false,
   fields, { selector: '' }, z.object(target).refine(p => p.selector || p.element, '请设置元素选择器'));
 add('browser.fill', '输入文本', '网页操作', '填写输入框，支持 {{变量}}。', false, [...fields, text('value', '输入内容')], { selector: '', value: '' }, z.object({ ...target, value: z.string() }).refine(p => p.selector || p.element, '请设置元素选择器'));
@@ -62,6 +63,12 @@ add('variables.set', '设置变量', '流程控制', '设置一个 JSON 变量�
 add('core.log', '打印日志', '流程控制', '将文字或变量值写入下方运行日志。放在循环体中可逐项查看当前值，无需打开浏览器。', true,
   [{ key: 'message', label: '日志内容', type: 'textarea', required: true, placeholder: '例如：当前项：{{item}}；也可点击下方「插入变量」' }],
   { message: '' }, z.object({ message: z.json() }));
+add('core.wait', '等待', '流程控制', '等待指定秒数后继续执行，默认 3 秒；支持小数和数字变量，范围为 0–3600 秒。\n\n等待期间可以停止运行；暂停请求会在当前等待完成后生效。默认按等待时长自动设置超时，也可在“设置”中指定步骤超时；所在容器的总超时仍然有效。', true,
+  [{ key: 'durationSeconds', label: '等待时长（秒）', type: 'number', required: true, placeholder: '3' }],
+  { durationSeconds: 3 }, z.object({ durationSeconds: z.number().min(0, '等待时长不能小于 0 秒').max(3600, '等待时长最多为 3600 秒') }));
+add('core.note', '备注', '流程控制', '为流程添加说明，支持多行文字和自定义颜色。备注不会执行操作，正文中的 {{变量}} 保持原文，也不会打印到运行日志。', true,
+  [{ key: 'text', label: '备注内容', type: 'textarea', required: false }, text('color', '备注颜色', false, '#FFE08A')],
+  { text: '', color: '#FFE08A' }, z.object({ text: z.string(), color: z.string().regex(/^#[0-9a-fA-F]{6}$/, '颜色必须为 #RRGGBB 格式').default('#FFE08A') }));
 add('core.assert', '校验结果', '校验', '比较两个 JSON 值是否相等。', true,
   [json('actual', '实际值（JSON）'), json('expected', '期望值（JSON）')], { actual: '{{result}}', expected: '' }, z.object({ actual: z.unknown(), expected: z.unknown() }));
 add('control.if', '条件分支', '流程控制', '满足条件执行子步骤，否则执行另一分支。', false,
@@ -69,6 +76,11 @@ add('control.if', '条件分支', '流程控制', '满足条件执行子步骤�
   { left: true, operator: 'truthy', right: null }, z.object({ left: z.unknown(), operator: z.enum(['equals', 'notEquals', 'truthy']), right: z.unknown().optional() }));
 add('control.forEach', '遍历列表', '流程控制', '逐项执行子步骤，循环结束恢复同名变量。最多 10000 项。', false,
   [json('items', '列表或变量引用（JSON）'), text('itemVariable', '当前项变量')], { items: [], itemVariable: 'item' }, z.object({ items: z.array(z.unknown()).max(10_000), itemVariable: z.string().min(1) }));
+add('control.tryCatch', 'Try / Catch', '流程控制', '先执行 Try 内的指令；成功时跳过 Catch，失败时跳过 Try 剩余指令并执行 Catch，处理完成后继续后续步骤。\n\nCatch 内可通过 {{error.message}}、{{error.stepId}}、{{error.stepName}} 和 {{error.actionType}} 读取异常。异常变量名可修改，仅在 Catch 内有效，结束后恢复原来的同名变量。\n\nTry 内的指令完成配置的重试后才进入 Catch，不会先按“失败后暂停”等待。Catch 自身失败会继续向外抛出；用户停止、本容器或祖先容器的总超时不能在本 Catch 中处理。', false,
+  [text('errorVariable', '异常变量', true, 'error')], { errorVariable: 'error' }, z.object({
+    errorVariable: z.string().min(1, '请填写异常变量名').refine(value => value.trim() === value && !/[{}]/.test(value), '变量名不能包含首尾空格或花括号')
+      .refine(value => !['__proto__', 'prototype', 'constructor'].includes(value), '该变量名为保留名称'),
+  }));
 
 export const actionDefinitions: ActionDefinition[] = definitions.map(d => d.metadata);
 export function getAction(type: string) {
@@ -101,7 +113,7 @@ export function validateActions(workflow: WorkflowDefinition) {
       const action = getAction(step.actionType);
       if (!action.metadata.safeToRetry && (step.retry?.maxAttempts ?? 1) > 1) throw new Error(`“${step.name}”有外部效果，当前版本不允许自动重试。`);
       if (!action.metadata.safeToRetry && step.onError === 'pause') throw new Error(`“${step.name}”有外部效果，当前版本仅支持读取和校验动作失败后暂停。`);
-      if (!['control.if', 'control.forEach'].includes(step.actionType) && ((step.children?.length ?? 0) || (step.elseSteps?.length ?? 0))) throw new Error(`“${step.name}”不是容器动作，不能包含子步骤。`);
+      if (!['control.if', 'control.forEach', 'control.tryCatch'].includes(step.actionType) && ((step.children?.length ?? 0) || (step.elseSteps?.length ?? 0))) throw new Error(`“${step.name}”不是容器动作，不能包含子步骤。`);
       if (step.actionType === 'control.forEach' && step.elseSteps?.length) throw new Error('循环不支持否则分支');
       visit(step.children ?? []); visit(step.elseSteps ?? []);
     }

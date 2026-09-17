@@ -167,6 +167,16 @@ describe('编辑器变量候选与执行作用域一致', () => {
     ]);
   });
 
+  it('关闭所有网页提供关闭名单，不误导用户引用单个网页名称', () => {
+    const options = byName(flow([
+      action('close-all', { actionType: 'browser.closePage', params: { closeMode: 'all' }, output: 'closed' }),
+      action('selected'),
+    ]), 'selected');
+    expect(options.has('closed.pageId')).toBe(false);
+    expect(options.has('closed.closedPageIds')).toBe(true);
+    expect(options.has('closed.ok')).toBe(true);
+  });
+
   it('与引擎一致优先匹配完整点号变量，不生成无法读取的点号根属性', () => {
     const workflow = flow([action('selected')], { order: { total: { nested: true }, id: 1 }, 'order.total': { exact: true } });
     const options = byName(workflow, 'selected');

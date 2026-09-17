@@ -28,6 +28,18 @@ function workspace(workflow: WorkflowDefinition) {
 }
 
 describe('内置示例默认值迁移', () => {
+  it('备注正文保持字面量，备注的输出配置不计为全局赋值', async () => {
+    const workflow = legacyDemo();
+    workflow.steps = [{
+      stepId: 'note', name: '备注', actionType: 'core.note',
+      params: { text: '输入 {{customer}}，访问 {{demoUrl}}', color: '#FFE08A' }, output: 'customer',
+    }];
+    const state = workspace(workflow);
+    await refreshDemoUrls(state.manager, currentUrl);
+    expect(state.workflow().variables).toEqual({});
+    expect(state.workflow().steps[0].params.text).toBe('输入 {{customer}}，访问 {{demoUrl}}');
+  });
+
   it('新示例把输入直接保存在动作参数中，不预置流程变量', () => {
     const workflow = createDemoWorkflow(currentUrl, tmpdir());
     expect(workflow.variables).toEqual({});
@@ -94,6 +106,27 @@ describe('内置示例默认值迁移', () => {
     const customState = workspace(customized);
     await refreshDemoUrls(customState.manager, currentUrl);
     expect(customState.saveWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('迁移默认值时保留 Catch 同名异常变量引用，且不把 Catch 写入视为全局赋值', async () => {
+    const workflow = legacyDemo();
+    workflow.elements = { target: { selector: '#{{customer}}' } };
+    workflow.steps = [{
+      stepId: 'try', name: '异常处理', actionType: 'control.tryCatch', params: { errorVariable: 'customer' },
+      children: [{ stepId: 'normal', name: '读取默认值', actionType: 'core.log', params: { message: '{{customer}}' } }],
+      elseSteps: [
+        { stepId: 'catch', name: '读取异常', actionType: 'core.log', params: { message: '{{customer}}' } },
+        { stepId: 'write', name: '局部写入', actionType: 'variables.set', params: { name: 'customer', value: '仅在 Catch' } },
+      ],
+    }, { stepId: 'after', name: '读取默认值', actionType: 'core.log', params: { message: '{{customer}}' } }];
+    const state = workspace(workflow);
+    await refreshDemoUrls(state.manager, currentUrl);
+    const saved = state.workflow();
+    expect(saved.variables).toEqual({});
+    expect(saved.steps[0].children![0].params.message).toBe('跨语言订单');
+    expect(saved.steps[0].elseSteps![0].params.message).toBe('{{customer}}');
+    expect(saved.steps[0].elseSteps![0].elements!.target.selector).toBe('#{{customer}}');
+    expect(saved.steps[1].params.message).toBe('跨语言订单');
   });
 
   it.each<StepDefinition>([

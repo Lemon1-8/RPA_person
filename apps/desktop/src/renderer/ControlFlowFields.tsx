@@ -71,6 +71,46 @@ export function parseControlValue(mode: ValueMode, text: string, listOnly = fals
   }
 }
 
+export function parseWaitDuration(mode: "number" | "variable", text: string): ParseResult {
+  const parsed = parseControlValue(mode, text);
+  if (parsed.error || mode === "variable") return parsed;
+  if (typeof parsed.value !== "number" || parsed.value < 0 || parsed.value > 3600) {
+    return { error: "等待时长必须在 0～3600 秒之间，可填写小数。" };
+  }
+  return parsed;
+}
+
+export function validateErrorVariable(name: string): string {
+  if (!name.trim()) return "请填写异常变量名，例如 error。";
+  if (name !== name.trim() || /[{}]/.test(name)) return "直接填写变量名，例如 error；不要包含首尾空格或花括号。";
+  if (reservedNames.has(name)) return "该名称不可用，请使用其他名称。";
+  return "";
+}
+
+function waitDurationError(value: unknown): string | undefined {
+  if (typeof value === "number") return parseWaitDuration("number", String(value)).error;
+  const reference = typeof value === "string" ? value.match(/^\{\{([\s\S]*)\}\}$/) : null;
+  if (reference) return parseWaitDuration("variable", reference[1]).error;
+  return parseWaitDuration("number", String(value ?? "")).error ?? "等待时长需要是数字；使用变量时请填写完整变量引用。";
+}
+
+export function getControlStepErrors(workflow: WorkflowDefinition): { stepId: string; stepName: string; error: string }[] {
+  const errors: { stepId: string; stepName: string; error: string }[] = [];
+  const visit = (steps: StepDefinition[]) => {
+    for (const step of steps) {
+      const error = step.actionType === "core.wait" ? waitDurationError(step.params.durationSeconds)
+        : step.actionType === "control.tryCatch" ? typeof step.params.errorVariable === "string"
+          ? validateErrorVariable(step.params.errorVariable) : "请填写文本类型的异常变量名。"
+          : undefined;
+      if (error) errors.push({ stepId: step.stepId, stepName: step.name, error });
+      visit(step.children ?? []);
+      visit(step.elseSteps ?? []);
+    }
+  };
+  visit(workflow.steps);
+  return errors;
+}
+
 function readable(value: unknown): string {
   if (typeof value === "string") {
     const reference = value.match(referencePattern);
@@ -92,6 +132,12 @@ export function summarizeControlStep(step: StepDefinition): string | undefined {
       ? `${params.items.length} 项列表`
       : readable(params.items);
     return `逐项遍历 ${list} · 当前项 ${String(params.itemVariable ?? "item")}`;
+  }
+  if (step.actionType === "core.wait") {
+    return `等待 ${typeof params.durationSeconds === "number" ? params.durationSeconds : readable(params.durationSeconds)} 秒`;
+  }
+  if (step.actionType === "control.tryCatch") {
+    return `Try 失败后执行 Catch · 异常变量 ${String(params.errorVariable ?? "error")}`;
   }
   return undefined;
 }
@@ -287,13 +333,50 @@ function Fields({ step, workflow, disabled, onChange, onValidity }: ControlFlowF
       ? "该名称不可用，请使用其他名称。"
       : "";
   const [itemTouched, setItemTouched] = useState(false);
+  const errorVariable = String(step.params.errorVariable ?? "");
+  const errorVariableError = typeof step.params.errorVariable === "string"
+    ? validateErrorVariable(errorVariable) : "请填写文本类型的异常变量名。";
+  const [errorVariableTouched, setErrorVariableTouched] = useState(false);
   const validity = useRef(onValidity);
   validity.current = onValidity;
   useEffect(() => {
     if (step.actionType === "control.forEach") validity.current("param:itemVariable", !itemError);
     return () => validity.current("param:itemVariable", true);
   }, [itemError, step.actionType]);
+  useEffect(() => {
+    if (step.actionType === "control.tryCatch") validity.current("param:errorVariable", !errorVariableError);
+    return () => validity.current("param:errorVariable", true);
+  }, [errorVariableError, step.actionType]);
   const common = { workflow, stepId: step.stepId, disabled, onValidity };
+  if (step.actionType === "core.wait") return <WaitFields step={step} workflow={workflow} disabled={disabled} onChange={onChange} onValidity={onValidity} />;
+  if (step.actionType === "control.tryCatch") {
+    return (
+      <div className="control-flow-fields">
+        <label className="field">
+          <span>异常变量</span>
+          <input
+            aria-label="异常变量"
+            value={errorVariable}
+            disabled={disabled}
+            placeholder="例如：error"
+            className={errorVariableTouched && errorVariableError ? "input-error" : ""}
+            aria-invalid={!!errorVariableError}
+            aria-describedby={`error-variable-${step.stepId}-hint`}
+            onBlur={() => setErrorVariableTouched(true)}
+            onChange={(event) => setParam("errorVariable", event.target.value)}
+          />
+          <small id={`error-variable-${step.stepId}-hint`}>仅在 Catch 内可用；用 <code>{`{{${errorVariable || "error"}.message}}`}</code> 读取错误信息，还可读取 stepId、stepName 和 actionType。</small>
+          {errorVariableTouched && errorVariableError && <span className="field-error" role="alert">{errorVariableError}</span>}
+        </label>
+        <div className="control-preview" aria-live="polite">
+          <span>异常处理</span>
+          <strong>{summarizeControlStep(step)}</strong>
+          <p>依次执行 Try 内的指令；出现错误时跳过 Try 剩余指令并执行 Catch。处理成功后继续下一步，结束时恢复原来的同名变量。</p>
+        </div>
+        <p className="help-text control-example">用户停止或本容器超时会直接退出；Catch 中的错误会继续向外抛出。</p>
+      </div>
+    );
+  }
   if (step.actionType === "control.if") {
     return (
       <div className="control-flow-fields">
@@ -350,6 +433,87 @@ function Fields({ step, workflow, disabled, onChange, onValidity }: ControlFlowF
         <span>循环内容</span>
         <strong>{summarizeControlStep(step)}</strong>
         <p>每一项都会执行缩进区域内的指令。遍历完成自动结束循环，继续后面的步骤，并恢复原来的同名变量。</p>
+      </div>
+    </div>
+  );
+}
+
+function WaitFields({ step, workflow, disabled, onChange, onValidity }: ControlFlowFieldsProps) {
+  const value = step.params.durationSeconds;
+  const reference = typeof value === "string" ? value.match(/^\{\{([\s\S]*)\}\}$/) : null;
+  const initial = { mode: reference ? "variable" as const : "number" as const, text: reference ? reference[1].trim() : String(value ?? "") };
+  const [draft, setDraft] = useState(initial);
+  const [touched, setTouched] = useState(false);
+  const drafts = useRef<Partial<Record<"number" | "variable", string>>>({ [initial.mode]: initial.text });
+  const ownValue = useRef(serialize(value));
+  const serialized = serialize(value);
+  const validity = useRef(onValidity);
+  validity.current = onValidity;
+  useEffect(() => {
+    if (serialized !== ownValue.current) {
+      setDraft(initial);
+      drafts.current = { [initial.mode]: initial.text };
+      ownValue.current = serialized;
+      setTouched(false);
+    }
+  }, [serialized]);
+  const parsed = parseWaitDuration(draft.mode, draft.text);
+  const error = parsed.error ?? waitDurationError(value);
+  useEffect(() => { validity.current("param:durationSeconds", !error); }, [error]);
+  useEffect(() => () => validity.current("param:durationSeconds", true), []);
+  const edit = (next: typeof draft) => {
+    drafts.current[next.mode] = next.text;
+    setDraft(next);
+    const result = parseWaitDuration(next.mode, next.text);
+    validity.current("param:durationSeconds", !result.error);
+    // Keep invalid drafts in the workflow so changing selection cannot silently discard them.
+    const durationSeconds = result.error ? next.mode === "variable" ? `{{${next.text}}}` : next.text : result.value;
+    ownValue.current = serialize(durationSeconds);
+    onChange({ ...step.params, durationSeconds });
+  };
+  const id = `wait-${step.stepId}-duration`;
+  return (
+    <div className="control-flow-fields">
+      <label className="field control-type-field">
+        <span>等待时长来源</span>
+        <select aria-label="等待时长来源" value={draft.mode} disabled={disabled} onChange={(event) => {
+          const mode = event.target.value as "number" | "variable";
+          setTouched(false);
+          edit({ mode, text: drafts.current[mode] ?? "" });
+        }}>
+          <option value="number">直接填写时长</option>
+          <option value="variable">使用变量</option>
+        </select>
+      </label>
+      <div className="field">
+        <label htmlFor={id}>等待时长（秒）</label>
+        <input
+          id={id}
+          aria-label="等待时长（秒）"
+          value={draft.text}
+          disabled={disabled}
+          inputMode={draft.mode === "number" ? "decimal" : undefined}
+          placeholder={draft.mode === "number" ? "例如：3 或 0.5" : "例如：delaySeconds"}
+          className={touched && error ? "input-error" : ""}
+          spellCheck={false}
+          aria-invalid={!!error}
+          aria-describedby={`${id}-hint`}
+          onBlur={() => setTouched(true)}
+          onChange={(event) => edit({ ...draft, text: event.target.value })}
+        />
+        <small id={`${id}-hint`}>{draft.mode === "number"
+          ? "支持 0～3600 秒，可填写 0.5 等小数；0 表示继续下一步。"
+          : "填写变量名或属性路径，无需双花括号；运行时必须得到 0～3600 之间的秒数。"}</small>
+        <VariablePicker workflow={workflow} stepId={step.stepId} disabled={disabled} label="为等待时长插入变量" onPick={(picked) => {
+          setTouched(false);
+          edit({ mode: "variable", text: picked.match(referencePattern)?.[1].trim() ?? picked });
+        }} />
+        {touched && error && <span className="field-error" role="alert">{error}</span>}
+      </div>
+      <div className="control-preview" aria-live="polite">
+        <span>等待设置</span>
+        <strong>{error ? "请填写有效的等待时长" : summarizeControlStep(step)}</strong>
+        <p>等待结束后继续下一步，可随时停止运行。步骤超时默认根据等待时长自动设置。</p>
       </div>
     </div>
   );

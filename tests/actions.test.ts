@@ -22,6 +22,18 @@ describe('action parameter validation boundary', () => {
     }
   });
 
+  it('关闭所有网页只接受明确的关闭范围，并保留旧单页关闭参数', () => {
+    expect(validateActionParams('browser.closePage', { pageId: 'detail' })).toEqual({ pageId: 'detail' });
+    expect(validateActionParams('browser.closePage', { closeMode: 'page', pageId: '$current' })).toEqual({ closeMode: 'page', pageId: '$current' });
+    for (const pageId of ['already-closed', '{{missing.pageId}}', { pageId: 'detail' }]) {
+      expect(validateActionParams('browser.closePage', { closeMode: 'all', pageId })).toEqual({ closeMode: 'all' });
+    }
+    for (const closeMode of ['', 'ALL', 'allBrowsers', true, null]) {
+      expect(() => validateActionParams('browser.closePage', { closeMode })).toThrow('参数错误');
+    }
+    expect(() => validateActionParams('browser.closePage', { closeMode: 'page', pageId: 42 })).toThrow('参数错误');
+  });
+
   it('网页字段引用对象时指出具体字段和网页名称属性', () => {
     expect(() => validateActionParams('browser.click', { selector: '#open', pageId: { pageId: 'detail', url: 'https://example.com' } }))
       .toThrow('目标网页必须是文本，不能使用整个对象；请引用其中的网页名称，例如 {{变量.pageId}}');

@@ -25,19 +25,22 @@ function visitSteps(steps: StepDefinition[], visit: (step: StepDefinition, scope
     const childrenScope = new Set(scoped);
     if (step.actionType === 'control.forEach' && typeof step.params.itemVariable === 'string') childrenScope.add(step.params.itemVariable);
     visitSteps(step.children ?? [], visit, childrenScope);
-    visitSteps(step.elseSteps ?? [], visit, scoped);
+    const catchScope = new Set(scoped);
+    if (step.actionType === 'control.tryCatch' && typeof step.params.errorVariable === 'string') catchScope.add(step.params.errorVariable);
+    visitSteps(step.elseSteps ?? [], visit, catchScope);
   }
 }
 
 function hasGlobalWrite(steps: StepDefinition[], name: string, inheritedShadow = false): boolean {
   return steps.some(step => {
+    if (step.actionType === 'core.note') return false;
     const shadow = inheritedShadow || Object.hasOwn(step.variables ?? {}, name);
     // Outputs are published after restoring the step's own local declarations.
     if (step.output === name && !inheritedShadow) return true;
     if (step.actionType === 'variables.set' && !shadow && (step.params.name === name
       || (typeof step.params.name === 'string' && /\{\{[^{}]+\}\}/.test(step.params.name)))) return true;
     return hasGlobalWrite(step.children ?? [], name, shadow || (step.actionType === 'control.forEach' && step.params.itemVariable === name))
-      || hasGlobalWrite(step.elseSteps ?? [], name, shadow);
+      || hasGlobalWrite(step.elseSteps ?? [], name, shadow || (step.actionType === 'control.tryCatch' && step.params.errorVariable === name));
   });
 }
 
@@ -64,7 +67,7 @@ function removeDemoDefault(workflow: WorkflowDefinition, name: 'demoUrl' | 'cust
       if (!shadow) {
         // Script source is literal code, never a template. Custom SDK reads must
         // supply their own variables after removal of these example declarations.
-        if (step.actionType !== 'script.run') step.params = replace(step.params);
+        if (!['script.run', 'core.note'].includes(step.actionType)) step.params = replace(step.params);
         if (step.elements) step.elements = replace(step.elements);
       } else {
         // The shared declaration was inlined outside this scope. Restore the
@@ -73,7 +76,7 @@ function removeDemoDefault(workflow: WorkflowDefinition, name: 'demoUrl' | 'cust
         if (Object.keys(inheritedTemplates).length) step.elements = { ...inheritedTemplates, ...originalOwnElements };
       }
       rewriteSteps(step.children ?? [], originalElements, shadow || (step.actionType === 'control.forEach' && step.params.itemVariable === name));
-      rewriteSteps(step.elseSteps ?? [], originalElements, shadow);
+      rewriteSteps(step.elseSteps ?? [], originalElements, shadow || (step.actionType === 'control.tryCatch' && step.params.errorVariable === name));
     }
   };
   const originalElements = workflow.elements;

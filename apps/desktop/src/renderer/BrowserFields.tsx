@@ -230,3 +230,32 @@ function OpenFields({ workflow, step, pages, disabled, onChange, onValidity }: B
 export function BrowserOpenFields(props: BrowserFieldsProps & { pages: BrowserPageInfo[] }) {
   return <OpenFields key={props.step.stepId} {...props} />;
 }
+
+export function BrowserCloseFields({ workflow, step, pages, disabled, onChange }: Omit<BrowserFieldsProps, 'onValidity'> & { pages: BrowserPageInfo[] }) {
+  const mode = step.params.closeMode === 'all' ? 'all' : 'page';
+  return (
+    <div className="browser-fields">
+      <label className="field">
+        <span>关闭范围</span>
+        <select aria-label="关闭范围" value={mode} disabled={disabled} onChange={event => {
+          const params: Record<string, unknown> = { ...step.params, closeMode: event.target.value };
+          if (event.target.value === 'all') delete params.pageId;
+          else params.pageId = '$current';
+          onChange(params);
+        }}>
+          <option value="page">指定网页</option>
+          <option value="all">当前浏览器的所有网页</option>
+        </select>
+      </label>
+      {mode === 'page'
+        ? <PageTargetField key={step.stepId} workflow={workflow} pages={pages} stepId={step.stepId}
+            value={typeof step.params.pageId === 'string' ? step.params.pageId : undefined} disabled={disabled}
+            onChange={value => {
+              const params = { ...step.params, pageId: value };
+              if (value === undefined) delete params.pageId;
+              onChange(params);
+            }} />
+        : <p className="help-text action-description">仅关闭本次使用的自动化浏览器中的所有网页，包括在这个浏览器里手动打开的网页。其他浏览器不受影响。单独运行时，以工作区上方“目标浏览器”的选择为准。</p>}
+    </div>
+  );
+}

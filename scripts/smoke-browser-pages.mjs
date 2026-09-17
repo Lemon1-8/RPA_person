@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { _electron as electron, chromium } from 'playwright';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -25,6 +25,7 @@ await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
 const manualPort = portProbe.address().port;
 await new Promise(resolve => portProbe.close(resolve));
 let app;
+let unrelatedBrowser;
 let page;
 let runId;
 const bootstrap = () => page.evaluate(() => window.rpa.bootstrap());
@@ -70,7 +71,7 @@ try {
       { stepId: 'read-current', name: '读取当前网页', actionType: 'browser.text', params: { selector: 'h1' }, output: 'currentText' },
       { stepId: 'read', name: '读取详情', actionType: 'browser.text', params: { selector: 'h1', pageId: 'orders' }, output: 'pageText' },
       { stepId: 'report', name: '打开报表页', actionType: 'browser.open', params: { url: `${origin}/report` } },
-      { stepId: 'close', name: '关闭详情页', actionType: 'browser.closePage', params: { pageId: 'orders' } },
+      { stepId: 'close', name: '关闭详情页', actionType: 'browser.closePage', params: { pageId: 'orders' }, output: 'closeResult' },
       { stepId: 'manual', name: '模拟手动新建标签页', actionType: 'script.run', params: { language: 'javascript', code: `await rpa.call('browser.evaluate', { pageId: 'orders', expression: ${JSON.stringify(`void window.open('${origin}/manual')`)} });` } },
       { stepId: 'inherited', name: '继承元素目标', actionType: 'browser.text', params: { selector: '@heading' }, output: 'inheritedText' },
       { stepId: 'dynamic-inherited', name: '动态元素目标', actionType: 'browser.text', params: { selector: '{{dynamicSelector}}' }, output: 'dynamicText' },
@@ -219,14 +220,61 @@ try {
   const failed = await runStep('读取详情', 'failed');
   assert.match(failed.error, /不存在|关闭/);
   assert.ok((await pageList()).some(item => item.pageId === 'reports' && item.current), '关闭其他网页或读取失败不得误切换目标');
+  await stepButton('关闭详情页').click();
+  const closeMode = inspector.getByLabel('关闭范围', { exact: true });
+  assert.equal(await closeMode.inputValue(), 'page', '旧关闭步骤默认保持关闭指定网页');
+  assert.equal(await target.count(), 1, '关闭单个网页时应显示目标网页');
+  await closeMode.selectOption('all');
+  assert.equal(await target.count(), 0, '关闭所有网页时不能选择单个目标网页');
+  await inspector.getByText(/仅关闭本次使用的自动化浏览器中的所有网页/).waitFor();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
+  const allSaved = (await bootstrap()).workflows[0].steps.find(step => step.stepId === 'close');
+  assert.equal(allSaved.params.closeMode, 'all');
+  assert.equal(Object.hasOwn(allSaved.params, 'pageId'), false, '关闭所有网页必须清除之前的单页目标');
+  await closeMode.selectOption('page');
+  assert.equal(await target.inputValue(), 'current', '切回单页关闭应使用当前网页');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
+  assert.equal((await bootstrap()).workflows[0].steps.find(step => step.stepId === 'close').params.pageId, '$current');
+  await closeMode.selectOption('all');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
+  await page.reload();
+  await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
+  await stepButton('关闭详情页').click();
+  assert.equal(await closeMode.inputValue(), 'all', '重新加载后应保留关闭所有网页模式');
+  assert.equal(await target.count(), 0);
+  const allStored = JSON.parse(await readFile(workflowPath, 'utf8')).steps.find(step => step.stepId === 'close');
+  assert.equal(allStored.params.closeMode, 'all');
+  assert.equal(Object.hasOwn(allStored.params, 'pageId'), false);
+  await page.evaluate(() => { window.pageSmokeEvents = []; window.rpa.onEvent(event => window.pageSmokeEvents.push(event)); });
+  const remainingPages = await pageList();
+  assert.ok(remainingPages.length >= 3, '关闭全部前应保留原网页、新建网页和手动弹出网页');
+  unrelatedBrowser = await chromium.launch({ headless: true });
+  const unrelatedPage = await unrelatedBrowser.newPage();
+  await unrelatedPage.goto(`${origin}/manual`);
+  const closedAll = await runStep('关闭详情页');
+  assert.deepEqual(closedAll.variables.closeResult, { ok: true, closedPageIds: remainingPages.map(item => item.pageId) });
+  assert.equal(closedAll.browserOpen, false, '关闭所有网页后不应继续保留浏览器');
+  assert.deepEqual(await pageList(), [], '本次任务所有网页应被清空');
+  assert.equal((await bootstrap()).runs.find(item => item.runId === runId).browserOpen, false);
+  assert.equal(unrelatedBrowser.isConnected(), true, '关闭本次浏览器不得关闭其他浏览器进程');
+  assert.equal(await unrelatedPage.title(), '手动新网页', '其他浏览器的网页必须仍可访问');
+  await unrelatedPage.locator('#mark-current').click();
+  assert.equal(await unrelatedPage.locator('h1').textContent(), '手动新网页 · 已点击', '其他浏览器应保持正常交互');
+  await page.screenshot({ path: join(qa, 'browser-close-all-success.png'), fullPage: true });
   assert.equal((await bootstrap()).runs.length, 1);
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ status: 'passed', mergedOpen: true, automaticAndManualPort: true, manualPortApplied: true, legacyClickFieldsRemoved: true, noSwitchCommand: true, popupKeepsCurrentPage: true, targetPickerClickAcrossPages: true, livePagePicker: true, manualPageRegistered: true, sameBrowser: true, closedTargetRejected: true, screenshot: join(qa, 'browser-pages-success.png') }, null, 2));
+  console.log(JSON.stringify({ status: 'passed', mergedOpen: true, automaticAndManualPort: true, manualPortApplied: true, legacyClickFieldsRemoved: true, noSwitchCommand: true, popupKeepsCurrentPage: true, targetPickerClickAcrossPages: true, livePagePicker: true, manualPageRegistered: true, sameBrowser: true, closedTargetRejected: true, closeAllPersists: true, closeAllClearsBrowser: true, unrelatedBrowserPreserved: true, screenshot: join(qa, 'browser-pages-success.png'), closeAllScreenshot: join(qa, 'browser-close-all-success.png') }, null, 2));
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: join(qa, 'browser-pages-failure.png'), fullPage: true }).catch(() => {});
   throw error;
 } finally {
-  try { if (app) await app.close(); }
+  try {
+    try { if (unrelatedBrowser) await unrelatedBrowser.close(); }
+    finally { if (app) await app.close(); }
+  }
   finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

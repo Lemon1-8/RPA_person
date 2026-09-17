@@ -183,7 +183,8 @@ export class RunManager extends EventEmitter {
     const selected = findStepPath(workflow, scheduleIdentifier.parse(stepId))?.at(-1);
     if (!selected) throw new Error('指令不存在，请重新选择');
     if (browserRunId !== undefined && (typeof browserRunId !== 'string' || !browserRunId)) throw new Error('浏览器运行标识无效');
-    if (!browserRunId && selected.actionType.startsWith('browser.') && !['browser.start', 'browser.open', 'browser.popupGuard'].includes(selected.actionType)) {
+    const closeAllPages = selected.actionType === 'browser.closePage' && selected.params.closeMode === 'all';
+    if (!browserRunId && !closeAllPages && selected.actionType.startsWith('browser.') && !['browser.start', 'browser.open', 'browser.popupGuard'].includes(selected.actionType)) {
       throw new Error('此指令需要已打开的浏览器，请先单独运行“打开网页”，再选择对应浏览器');
     }
     return this.serialize(async () => {

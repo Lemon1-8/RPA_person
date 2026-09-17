@@ -8,6 +8,20 @@ import { actionDefinitions, getAction, validateActionParams, validateActions } f
 import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
 
 export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
+interface ExecutionDeadline { expiresAt: number; stepName: string }
+class ContainerTimeoutError extends Error {
+  constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
+}
+class StepExecutionError extends Error {
+  readonly failure: { message: string; stepId: string; stepName: string; actionType: string };
+  readonly deadline?: ExecutionDeadline;
+  constructor(step: StepDefinition, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`步骤“${step.name}”失败：${message}`, { cause });
+    this.failure = cause instanceof StepExecutionError ? cause.failure : { message, stepId: step.stepId, stepName: step.name, actionType: step.actionType };
+    this.deadline = cause instanceof StepExecutionError || cause instanceof ContainerTimeoutError ? cause.deadline : undefined;
+  }
+}
 const reserved = new Set(['__proto__', 'prototype', 'constructor']);
 function validateName(name: string) {
   if (!name || reserved.has(name)) throw new Error(`不可写入变量：${name}`);
@@ -53,7 +67,8 @@ export class WorkflowEngine {
   private consumed = false;
   private executionFinished = false;
   private reuseBrowserOnly = false;
-  private deadlines: { expiresAt: number; stepName: string }[] = [];
+  private deadlines: ExecutionDeadline[] = [];
+  private errorBoundaryDepth = 0;
   private scopedElements: Record<string, ElementRef>;
   private scopedSettings: NonNullable<StepDefinition['settings']>;
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
@@ -104,9 +119,32 @@ export class WorkflowEngine {
   }
   private checkStop() { if (this.stopped) throw new Error('用户停止运行'); }
   private remainingTimeout(configured: number) {
-    const limit = Math.min(configured, ...this.deadlines.map(d => d.expiresAt - Date.now()));
-    if (limit <= 0) throw new Error(`容器步骤超时：${this.deadlines.find(d => d.expiresAt <= Date.now())?.stepName ?? '流程'}`);
-    return limit;
+    const now = Date.now();
+    const expired = this.deadlines.find(deadline => deadline.expiresAt <= now);
+    if (expired) throw new ContainerTimeoutError(expired);
+    return Math.min(configured, ...this.deadlines.map(deadline => deadline.expiresAt - now));
+  }
+  private checkDeadline(error?: unknown) {
+    const deadline = error instanceof StepExecutionError || error instanceof ContainerTimeoutError ? error.deadline : undefined;
+    if (deadline && this.deadlines.includes(deadline)) throw error;
+    this.remainingTimeout(30_000);
+  }
+  private async waitForDuration(durationMs: number, timeoutMs: number, signal: AbortSignal) {
+    const deadline = this.deadlines.reduce<ExecutionDeadline | undefined>((earliest, current) => !earliest || current.expiresAt < earliest.expiresAt ? current : earliest, undefined);
+    const containerLimited = deadline && deadline.expiresAt <= Date.now() + timeoutMs;
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: unknown) => {
+        clearTimeout(timer); signal.removeEventListener('abort', abort);
+        if (error !== undefined) reject(error); else resolve();
+      };
+      const abort = () => finish(signal.reason ?? new Error('等待已取消'));
+      const timer = setTimeout(() => {
+        if (durationMs > timeoutMs) finish(containerLimited ? new ContainerTimeoutError(deadline) : new Error(`等待超时（${timeoutMs / 1000} 秒）`));
+        else finish();
+      }, Math.min(durationMs, timeoutMs));
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
   }
   private async withinDeadline<T>(step: StepDefinition, run: () => Promise<T>): Promise<T> {
     const deadline = { expiresAt: Date.now() + (step.timeoutMs ?? 30_000), stepName: step.name };
@@ -183,9 +221,13 @@ export class WorkflowEngine {
     let abort: (() => void) | undefined;
     this.activeBrowserCalls++;
     const operation = (async () => {
-      const browser = await this.ensureBrowser(['browser.start', 'browser.open'].includes(method) ? params : {});
+      // Closing every page only targets the session already bound to this run.
+      // An empty or closed session must never cause a replacement browser to start.
+      const closeAllPages = method === 'browser.closePage' && params.closeMode === 'all';
+      const browser = closeAllPages ? this.browser : await this.ensureBrowser(['browser.start', 'browser.open'].includes(method) ? params : {});
       this.checkStop(); signal?.throwIfAborted();
       if (expired) throw new Error(`浏览器动作超时（${timeoutMs} ms）`);
+      if (!browser || (closeAllPages && !browser.isOpen())) return { ok: true, closedPageIds: [] };
       return method === 'browser.start' ? browser.getInfo() : browser.call(method, params);
     })();
     try {
@@ -246,10 +288,15 @@ export class WorkflowEngine {
     }
   }
   private async execute(step: StepDefinition, params: Record<string, unknown>): Promise<unknown> {
-    const timeout = this.remainingTimeout(step.timeoutMs ?? 30_000);
+    const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
+    if (step.actionType === 'core.note') return null;
+    if (step.actionType === 'core.wait') {
+      await this.waitForDuration(Number(params.durationSeconds) * 1000, timeout, signal);
+      return { durationSeconds: Number(params.durationSeconds) };
+    }
     if (step.actionType === 'core.log') {
       const message = typeof params.message === 'string' ? params.message : JSON.stringify(params.message);
       this.emit({ type: 'log', stepId: step.stepId, message: message === '' ? '（空文本）' : message, data: { value: params.message } });
@@ -290,6 +337,31 @@ export class WorkflowEngine {
       await this.withinDeadline(step, () => this.executeSteps(matches ? step.children ?? [] : step.elseSteps ?? []));
       return { matched: matches };
     }
+    if (step.actionType === 'control.tryCatch') {
+      const name = String(params.errorVariable); validateName(name);
+      return this.withinDeadline(step, async () => {
+        this.errorBoundaryDepth++;
+        try {
+          try {
+            await this.executeSteps(step.children ?? []);
+            return { caught: false };
+          } catch (error) {
+            this.checkStop(); this.checkDeadline(error);
+            const failure = error instanceof StepExecutionError ? error.failure : {
+              message: error instanceof Error ? error.message : String(error), stepId: step.stepId, stepName: step.name, actionType: step.actionType,
+            };
+            const had = Object.hasOwn(this.snapshot.variables, name); const previous = this.snapshot.variables[name];
+            this.setVariable(name, failure);
+            delete this.snapshot.error;
+            try { await this.executeSteps(step.elseSteps ?? []); }
+            finally {
+              if (had) this.snapshot.variables[name] = previous; else delete this.snapshot.variables[name];
+            }
+            return { caught: true };
+          }
+        } finally { this.errorBoundaryDepth--; }
+      });
+    }
     if (step.actionType === 'control.forEach') {
       const name = String(params.itemVariable); validateName(name);
       const had = Object.hasOwn(this.snapshot.variables, name); const previous = this.snapshot.variables[name];
@@ -328,27 +400,28 @@ export class WorkflowEngine {
           try {
             const result = await this.withinStepScope(step, async () => {
               this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: { attempt } });
-              // Script source is literal code; it uses the SDK for variable access.
-              const raw = step.actionType === 'script.run' ? { ...step.params } : resolveValue(step.params, this.snapshot.variables) as Record<string, unknown>;
+              const input = { ...step.params };
+              if (step.actionType === 'browser.closePage' && input.closeMode === 'all') delete input.pageId;
+              // Scripts use the SDK for variables; notes preserve all text literally.
+              const raw = ['script.run', 'core.note'].includes(step.actionType) ? input : resolveValue(input, this.snapshot.variables) as Record<string, unknown>;
               const params = validateActionParams(step.actionType, raw);
               return this.execute(step, params);
             });
             this.checkStop();
             // Publish only after restoring local declarations, including same-name outputs.
-            if (step.output) this.setVariable(step.output, result ?? null);
+            if (step.output && step.actionType !== 'core.note') this.setVariable(step.output, result ?? null);
             this.snapshot.currentStepId = step.stepId;
             this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: step.name, data: { durationMs: Date.now() - started, result } });
             this.state('running'); completed = true; break;
           } catch (caught) {
             error = caught; this.checkStop();
+            try { this.checkDeadline(caught); }
+            catch (expired) { error = expired; break; }
             if (attempt < attempts) {
               this.emit({ type: 'log', stepId: step.stepId, message: `步骤失败，准备第 ${attempt + 1} 次尝试：${String(caught)}` });
-              await new Promise<void>(resolve => {
-                const signal = attemptAbort.signal;
-                const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
-                const timer = setTimeout(done, step.retry?.delayMs ?? 500); signal.addEventListener('abort', done, { once: true });
-                if (signal.aborted) done();
-              });
+              const delay = step.retry?.delayMs ?? 500;
+              try { await this.waitForDuration(delay, this.remainingTimeout(delay + 1), attemptAbort.signal); }
+              catch (expired) { error = expired; this.checkStop(); break; }
             }
           } finally {
             this.stepAbort = parentAbort;
@@ -366,8 +439,10 @@ export class WorkflowEngine {
               if (path) this.emit({ type: 'log', stepId: step.stepId, message: '已保存失败截图', data: { path } });
             } catch { /* Capture failure must not replace the action error. */ }
           }
-          if (step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry) await this.waitForResume(true);
-          else throw new Error(`步骤“${step.name}”失败：${message}`);
+          if (!this.errorBoundaryDepth && step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry) {
+            this.checkDeadline(error);
+            await this.waitForResume(true);
+          } else throw new StepExecutionError(step, error);
         }
       }
     }

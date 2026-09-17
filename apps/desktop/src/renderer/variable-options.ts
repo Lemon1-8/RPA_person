@@ -115,11 +115,54 @@ function loopItem(environment: Environment, step: StepDefinition): Environment {
   return scoped;
 }
 
+function catchError(environment: Environment, step: StepDefinition): Environment {
+  const scoped = new Map(environment);
+  const name = step.params.errorVariable;
+  if (usableName(name)) scoped.set(name, {
+    source: `「${step.name}」的 Catch 异常`, conditional: false,
+    shape: shapeOf({ message: "", stepId: "", stepName: "", actionType: "" }, environment, false),
+  });
+  return scoped;
+}
+
+function restoreCatchError(environment: Environment, previous: Environment, step: StepDefinition): Environment {
+  const name = step.params.errorVariable;
+  return restoreNames(environment, previous, usableName(name) ? [name] : []);
+}
+
+// A failure can occur after any completed prefix, including inside a nested container.
+function interruptedSteps(environment: Environment, steps: StepDefinition[]): Environment {
+  let possible = environment;
+  for (const step of steps) {
+    let inside = declareLocals(possible, step);
+    if (step.actionType === "control.if") {
+      inside = mergeEnvironments(interruptedSteps(inside, step.children ?? []), interruptedSteps(inside, step.elseSteps ?? []));
+    } else if (step.actionType === "control.forEach") {
+      const body = interruptedSteps(loopItem(inside, step), step.children ?? []);
+      inside = restoreNames(body, inside, usableName(step.params.itemVariable) ? [step.params.itemVariable] : []);
+    } else if (step.actionType === "control.tryCatch") {
+      const interrupted = interruptedSteps(inside, step.children ?? []);
+      const handled = interruptedSteps(catchError(interrupted, step), step.elseSteps ?? []);
+      inside = mergeEnvironments(interrupted, restoreCatchError(handled, interrupted, step));
+    } else {
+      possible = mergeEnvironments(possible, completeStep(possible, step));
+      continue;
+    }
+    inside = restoreNames(inside, possible, Object.keys(step.variables ?? {}));
+    // Publish the container's result shape without traversing the same nested bodies again.
+    const completed = completeStep(possible, { ...step, children: [], elseSteps: [] });
+    if (usableName(step.output)) inside.set(step.output, completed.get(step.output)!);
+    possible = mergeEnvironments(possible, inside);
+  }
+  return possible;
+}
+
 function completeSteps(environment: Environment, steps: StepDefinition[]): Environment {
   return steps.reduce((current, step) => completeStep(current, step), environment);
 }
 
 function completeStep(environment: Environment, step: StepDefinition): Environment {
+  if (step.actionType === "core.note") return environment;
   let scoped = declareLocals(environment, step);
   let outputShape = unknownShape();
   if (step.actionType === "variables.set") {
@@ -136,6 +179,14 @@ function completeStep(environment: Environment, step: StepDefinition): Environme
     // The list can be empty, so a body assignment may not have happened.
     scoped = mergeEnvironments(scoped, restored);
     outputShape = shapeOf({ count: 0 }, scoped, false);
+  } else if (step.actionType === "control.tryCatch") {
+    const succeeded = completeSteps(scoped, step.children ?? []);
+    const interrupted = interruptedSteps(scoped, step.children ?? []);
+    const handled = completeSteps(catchError(interrupted, step), step.elseSteps ?? []);
+    scoped = mergeEnvironments(succeeded, restoreCatchError(handled, interrupted, step));
+    outputShape = shapeOf({ caught: false }, scoped, false);
+  } else if (step.actionType === "core.wait") {
+    outputShape = shapeOf({ durationSeconds: 0 }, scoped, false);
   } else if (step.actionType === "core.assert") {
     outputShape = shapeOf({ ok: true }, scoped, false);
   } else if (step.actionType === "core.log") {
@@ -145,7 +196,7 @@ function completeStep(environment: Environment, step: StepDefinition): Environme
   } else if (step.actionType === "browser.open" || step.actionType === "browser.switchPage") {
     outputShape = shapeOf({ pageId: "", url: "" }, scoped, false);
   } else if (step.actionType === "browser.closePage") {
-    outputShape = shapeOf({ ok: true, pageId: "" }, scoped, false);
+    outputShape = shapeOf(step.params.closeMode === "all" ? { ok: true, closedPageIds: [] } : { ok: true, pageId: "" }, scoped, false);
   } else if (step.actionType === "browser.click") {
     outputShape = shapeOf({ ok: true }, scoped, false);
   }
@@ -179,6 +230,9 @@ export function getVariableOptions(workflow: WorkflowDefinition, stepId: string)
     environment = declareLocals(environment, step);
     if (index < path.length - 1) {
       if (step.actionType === "control.forEach") environment = loopItem(environment, step);
+      if (step.actionType === "control.tryCatch" && step.elseSteps?.includes(path[index + 1])) {
+        environment = catchError(interruptedSteps(environment, step.children ?? []), step);
+      }
       siblings = step.children?.includes(path[index + 1]) ? step.children : step.elseSteps ?? [];
     }
   }

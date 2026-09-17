@@ -27,7 +27,7 @@ await browser.close();
 | --- | --- | --- |
 | `browser.open` | `url`, `pageId?`, `openMode?: reuse / new` | `{ pageId, url }` |
 | `browser.switchPage` | `pageId?` | `{ pageId, url }` |
-| `browser.closePage` | `pageId?` | `{ ok: true, pageId }` |
+| `browser.closePage` | `closeMode?: page / all`, `pageId?` | 单页：`{ ok: true, pageId }`；全部：`{ ok: true, closedPageIds }` |
 | `browser.listPages` / `listPages()` | 无；不会启动浏览器 | `[{ pageId, title, url, current, openerPageId? }]` |
 | `browser.popupGuard` | `mode`: `off` / `smart` / `strict` | `{ mode }` |
 | `browser.click` | 元素参数 | `{ ok: true }` |
@@ -60,6 +60,10 @@ await browser.close();
 - `browser.evaluate` 面向用户自己的本地脚本，不构成运行不可信脚本的安全沙箱。任意页面表达式超时后关闭并废弃整个会话，以阻止晚到的脚本继续影响后续步骤。
 
 ## 标签页与别名
+
+“关闭网页”中的“关闭范围”默认是“指定网页”，旧流程省略 `closeMode` 时仍按 `pageId` 关闭一个网页。选择“当前浏览器的所有网页”（`closeMode: 'all'`）时，关闭当前任务所使用的整个浏览器会话，包括其所有标签页、窗口以及在该会话中手动打开的网页。操作只使用当前会话持有的连接和子进程，不枚举或关闭其他流程的浏览器，也不关闭用户另外启动的浏览器。单独运行指令时，范围由工作区“目标浏览器”的选择决定。
+
+全部关闭无需填写 `pageId`，切换到全部模式时界面清除该参数；当前网页已经关闭也不影响执行。当前任务没有打开浏览器时直接返回空的 `closedPageIds`，不会为了关闭而启动新浏览器。完成后释放会话并更新浏览器状态，后续非浏览器步骤仍可继续；完整流程后续执行“打开网页”时可以重新启动浏览器。流程 JSON 仍为版本 1。
 
 监听浏览器上下文的新页事件，启动时登记已有页面，首个为 `main`，其余自动分配不重复的 `page-N`。页面导航、标题变化与前台焦点变化不会更换别名；列表每次读取实时标题和网址，关闭页面立即移除。自动编号不在同一会话中复用，避免旧目标误指向另一网页。
 

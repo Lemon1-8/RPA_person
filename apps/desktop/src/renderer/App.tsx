@@ -6,6 +6,7 @@ import {
   Check,
   ChevronRight,
   Circle,
+  Clock3,
   Code2,
   Download,
   Eye,
@@ -32,6 +33,7 @@ import {
   Settings2,
   ShieldCheck,
   Square,
+  StickyNote,
   Terminal,
   Workflow,
   X,
@@ -51,9 +53,10 @@ import type {
 import { WorkflowsPage } from "./WorkflowsPage.js";
 import { SchedulesPage } from "./SchedulesPage.js";
 import { StepTree } from "./StepTree.js";
-import { ControlFlowFields } from "./ControlFlowFields.js";
+import { ControlFlowFields, getControlStepErrors } from "./ControlFlowFields.js";
+import { NoteFields, getNoteStepErrors } from "./NoteFields.js";
 import { VariablePicker } from "./VariablePicker.js";
-import { BrowserOpenFields, PageTargetField } from "./BrowserFields.js";
+import { BrowserCloseFields, BrowserOpenFields, PageTargetField } from "./BrowserFields.js";
 import { getBrowserPageErrors, getInheritedPageTarget } from "./page-options.js";
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
@@ -162,6 +165,9 @@ function copyStep(step: StepDefinition): StepDefinition {
 
 function ActionIcon({ type, size = 17 }: { type: string; size?: number }) {
   if (type === "core.log") return <Terminal size={size} />;
+  if (type === "core.wait") return <Clock3 size={size} />;
+  if (type === "core.note") return <StickyNote size={size} />;
+  if (type === "control.tryCatch") return <ShieldCheck size={size} />;
   if (type === "browser.popupGuard") return <ShieldCheck size={size} />;
   if (/script|python|javascript|typescript/.test(type))
     return <Code2 size={size} />;
@@ -338,16 +344,33 @@ export function App() {
     [workflow?.steps],
   );
   const selected = steps.find((item) => item.step.stepId === selectedId);
+  const selectedCatch = useMemo(() => {
+    let current = selected;
+    while (current?.parentId) {
+      const parent = steps.find(item => item.step.stepId === current!.parentId);
+      if (current.branch === "elseSteps" && parent?.step.actionType === "control.tryCatch") return parent.step;
+      current = parent;
+    }
+  }, [selected, steps]);
   const selectedAction = actions.find(
     (action) => action.type === selected?.step.actionType,
   );
-  const availableActions = useMemo(() => actions.filter(action => !["browser.start", "browser.switchPage"].includes(action.type)), [actions]);
+  const availableActions = useMemo(() => actions.filter(action => ![
+    "browser.start",
+    "browser.switchPage",
+    "core.assert",
+    "browser.assertText",
+    "browser.table",
+    "browser.text",
+    "browser.response",
+    "browser.select",
+  ].includes(action.type)), [actions]);
   const run = runs.find((item) => item.runId === runId);
   const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
   const validationScope = `${workflowId}:${selectedId}:${inspector}:${view}:`;
   const invalid = Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
-  const pageErrors = useMemo(() => workflow ? getBrowserPageErrors(workflow) : [], [workflow]);
-  const invalidWorkflow = invalid || pageErrors.length > 0;
+  const workflowErrors = useMemo(() => workflow ? [...getBrowserPageErrors(workflow), ...getControlStepErrors(workflow), ...getNoteStepErrors(workflow)] : [], [workflow]);
+  const invalidWorkflow = invalid || workflowErrors.length > 0;
   const activeRun = run && !terminalStatuses.has(run.status);
   const retainedBrowser = !!run?.browserOpen && !activeRun;
   const browserAvailable = !!activeRun || !!run?.browserOpen;
@@ -579,9 +602,10 @@ export function App() {
   async function runSingleStep(stepId: string) {
     if (!api || !workflow || cannotRunStep) return;
     const step = steps.find((item) => item.step.stepId === stepId)?.step;
-    if (!step) return;
-    const pageError = getBrowserPageErrors({ ...workflow, steps: [step] })[0];
-    if (pageError) { setError(`“${pageError.stepName}”：${pageError.error}`); return; }
+    if (!step || step.actionType === "core.note") return;
+    const stepWorkflow = { ...workflow, steps: [step] };
+    const stepError = [...getBrowserPageErrors(stepWorkflow), ...getControlStepErrors(stepWorkflow), ...getNoteStepErrors(stepWorkflow)][0];
+    if (stepError) { setError(`“${stepError.stepName}”：${stepError.error}`); return; }
     setBusy(`step:${stepId}`);
     setError("");
     try {
@@ -605,17 +629,17 @@ export function App() {
   function addAction(action: ActionDefinition, targetId = selectedId, branch = insertBranch) {
     if (!workflow || busy || !availableActions.some(item => item.type === action.type)) return;
     const parent = steps.find(item => item.step.stepId === targetId)?.step;
-    if (branch !== "after" && (!parent || !["control.if", "control.forEach"].includes(parent.actionType)
-      || (branch === "elseSteps" && parent.actionType !== "control.if"))) return;
+    if (branch !== "after" && (!parent || !["control.if", "control.forEach", "control.tryCatch"].includes(parent.actionType)
+      || (branch === "elseSteps" && !["control.if", "control.tryCatch"].includes(parent.actionType)))) return;
     const step: StepDefinition = {
       stepId: uuid(),
       name: action.label,
       actionType: action.type,
       params: clone(action.defaults),
-      timeoutMs: 30000,
-      onError: "fail",
-      ...(["control.if", "control.forEach"].includes(action.type) ? { children: [] } : {}),
-      ...(action.type === "control.if" ? { elseSteps: [] } : {}),
+      ...(["core.wait", "core.note"].includes(action.type) ? {} : { timeoutMs: 30000 }),
+      ...(action.type === "core.note" ? {} : { onError: "fail" as const }),
+      ...(["control.if", "control.forEach", "control.tryCatch"].includes(action.type) ? { children: [] } : {}),
+      ...(["control.if", "control.tryCatch"].includes(action.type) ? { elseSteps: [] } : {}),
     };
     updateWorkflow((value) => ({
       ...value,
@@ -827,11 +851,11 @@ export function App() {
           </IconButton>
         </div>
       )}
-      {pageErrors[0] && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status">
+      {workflowErrors[0] && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status">
         <AlertCircle size={17} />
-        <span>“{pageErrors[0].stepName}”：{pageErrors[0].error}{pageErrors.length > 1 ? `（另有 ${pageErrors.length - 1} 项待完善）` : ""}</span>
+        <span>“{workflowErrors[0].stepName}”：{workflowErrors[0].error}{workflowErrors.length > 1 ? `（另有 ${workflowErrors.length - 1} 项待完善）` : ""}</span>
         <button className="text-button" onClick={() => {
-          setSelectedId(pageErrors[0].stepId); setInspector("step"); setView("editor"); setPanels(previous => ({ ...previous, right: true }));
+          setSelectedId(workflowErrors[0].stepId); setInspector("step"); setView("editor"); setPanels(previous => ({ ...previous, right: true }));
         }}>定位步骤</button>
       </div>}
       {notice && (
@@ -1106,7 +1130,7 @@ export function App() {
                       className="library-action"
                       key={action.type}
                       disabled={!workflow || !!busy}
-                      title={`${action.description} · 插入到选中步骤之后（或拖拽到目标步骤）`}
+                      title={`${action.description}\n\n点击添加到选中步骤之后，也可以拖拽到目标步骤。`}
                       draggable={!busy}
                       onDragStart={event => { event.dataTransfer.setData("application/x-rpa-action", action.type); event.dataTransfer.effectAllowed = "copy"; }}
                       onClick={() => addAction(action)}
@@ -1149,7 +1173,9 @@ export function App() {
               运行设置
             </button>
           </div>
-          {workflow && <div className="single-step-toolbar" aria-label="单条运行">
+          {workflow && (selected?.step.actionType === "core.note" ? <div className="single-step-toolbar" aria-label="备注说明">
+            <p>备注用于说明流程，运行时会直接跳过，不操作浏览器，也不会产生输出变量。</p>
+          </div> : <div className="single-step-toolbar" aria-label="单条运行">
             <div className="single-step-controls">
               <label htmlFor="step-browser-target"><Globe size={15} />目标浏览器</label>
               <select
@@ -1178,6 +1204,9 @@ export function App() {
             <p role={missingStepBrowser ? "status" : undefined}>
               {workflowRunning ? "当前流程正在执行，请等待完成或停止后再单条运行。"
                 : missingStepBrowser ? "所选浏览器已关闭或不可用，请重新选择目标。"
+                : selectedCatch ? `此指令位于「${selectedCatch.name}」的 Catch 内；单独运行不会生成异常变量，引用异常信息时请运行所在的 Try / Catch。`
+                : selected?.step.actionType === "core.wait" ? "等待无需浏览器；等待结束后继续下一步，可随时停止运行。"
+                : selected?.step.actionType === "control.tryCatch" ? "运行整个 Try / Catch；Try 出错后执行 Catch，异常变量仅在 Catch 执行期间可用。"
                 : selected?.step.actionType === "core.log" ? "使用当前参数；打印日志无需浏览器。引用循环当前项时，请运行整个循环。"
                 : "使用当前参数；网页指令先运行「打开网页」，后续复用浏览器。容器会执行其子步骤。"}
             </p>
@@ -1186,7 +1215,7 @@ export function App() {
                 ? `网页列表暂不可用：${pageInventory.error}`
                 : `已登记 ${browserPages.length} 个网页 · 当前：${browserPages.find(page => page.current)?.pageId ?? "尚未选定或已关闭"}`}
             </p>}
-          </div>}
+          </div>)}
           <div className="editor-caption">
             <span>内部指令按层级缩进；点击分支内的 + 添加指令</span>
             {selected && (
@@ -1199,11 +1228,11 @@ export function App() {
                 }
               >
                 <option value="after">插入到选中步骤之后</option>
-                {["control.if", "control.forEach"].includes(selected.step.actionType) && (
-                  <option value="children">{selected.step.actionType === "control.forEach" ? "添加到循环体" : "添加到满足条件"}</option>
+                {["control.if", "control.forEach", "control.tryCatch"].includes(selected.step.actionType) && (
+                  <option value="children">{selected.step.actionType === "control.forEach" ? "添加到循环体" : selected.step.actionType === "control.tryCatch" ? "添加到 Try 执行区" : "添加到满足条件"}</option>
                 )}
-                {selected.step.actionType === "control.if" && (
-                  <option value="elseSteps">添加到否则分支</option>
+                {["control.if", "control.tryCatch"].includes(selected.step.actionType) && (
+                  <option value="elseSteps">{selected.step.actionType === "control.tryCatch" ? "添加到 Catch 异常区" : "添加到否则分支"}</option>
                 )}
               </select>
             )}
@@ -1312,7 +1341,7 @@ export function App() {
                       <span>{selected.step.actionType}</span>
                     </div>
                   </div>
-                  <p className="help-text">
+                  <p className="help-text action-description">
                     {selectedAction?.description ??
                       "此动作没有可用的参数定义，可在下方编辑原始 JSON 参数。"}
                   </p>
@@ -1329,7 +1358,7 @@ export function App() {
                       }
                     />
                   </label>
-                  {workflow && ["control.if", "control.forEach"].includes(selected.step.actionType) ? (
+                  {workflow && ["control.if", "control.forEach", "control.tryCatch", "core.wait"].includes(selected.step.actionType) ? (
                     <ControlFlowFields
                       key={selectedId}
                       workflow={workflow}
@@ -1338,9 +1367,14 @@ export function App() {
                       onChange={params => updateSelected(step => ({ ...step, params }))}
                       onValidity={markValid}
                     />
+                  ) : selected.step.actionType === "core.note" ? (
+                    <NoteFields step={selected.step} disabled={!!busy} onChange={params => updateSelected(step => ({ ...step, params }))} onValidity={markValid} />
                   ) : workflow && selected.step.actionType === "browser.open" ? (
                     <BrowserOpenFields workflow={workflow} step={selected.step} pages={browserPages} disabled={!!busy}
                       onChange={params => updateSelected(step => ({ ...step, params }))} onValidity={markValid} />
+                  ) : workflow && selected.step.actionType === "browser.closePage" ? (
+                    <BrowserCloseFields workflow={workflow} step={selected.step} pages={browserPages} disabled={!!busy}
+                      onChange={params => updateSelected(step => ({ ...step, params }))} />
                   ) : selectedAction?.fields.map((field) => (
                     <div key={`${selectedId}-${field.key}`}>
                       {field.key === "pageId" && workflow ? (
@@ -1492,7 +1526,7 @@ export function App() {
                       }
                     />
                   )}
-                  <label className="field">
+                  {selected.step.actionType !== "core.note" && <label className="field">
                     <span>输出变量</span>
                     <input
                       value={selected.step.output ?? ""}
@@ -1506,7 +1540,7 @@ export function App() {
                       }
                     />
                     <small>将动作结果写入变量；后续指令可点「插入变量」选择，或填写 {"{{变量名}}"}。</small>
-                  </label>
+                  </label>}
 
                 </>
               ) : (
@@ -1516,23 +1550,29 @@ export function App() {
                   <p>在中央列表中选择步骤，编辑动作参数和失败策略。</p>
                 </div>
               ))}
-            {inspector === "settings" && selected && (<>                  <div className="step-settings">
+            {inspector !== "step" && selected?.step.actionType === "core.note" && <div className="panel-empty">
+              <StickyNote size={26} /><h3>备注仅用于说明</h3><p>在“步骤参数”中编辑文字和底色。备注不执行操作，无需配置超时、重试、变量或网页元素。</p>
+            </div>}
+            {inspector === "settings" && selected && selected.step.actionType !== "core.note" && (<>                  <div className="step-settings">
                     <h2 className="panel-title">指令设置</h2><p className="help-text">仅应用于当前选中的指令。</p>
                     <label className="field">
-                      <span>步骤超时（毫秒）</span>
+                      <span>{selected.step.actionType === "core.wait" ? "步骤超时（秒）" : "步骤超时（毫秒）"}</span>
                       <input
                         type="number"
-                        min={100}
-                        max={3600000}
-                        value={selected.step.timeoutMs ?? 30000}
+                        min={selected.step.actionType === "core.wait" ? 0.1 : 100}
+                        max={selected.step.actionType === "core.wait" ? 3600 : 3600000}
+                        step={selected.step.actionType === "core.wait" ? 0.001 : 1}
+                        value={selected.step.actionType === "core.wait" ? selected.step.timeoutMs === undefined ? "" : selected.step.timeoutMs / 1000 : selected.step.timeoutMs ?? 30000}
+                        placeholder={selected.step.actionType === "core.wait" ? "自动：等待时长 + 1 秒" : undefined}
                         disabled={!!busy}
                         onChange={(event) =>
                           updateSelected((step) => ({
                             ...step,
-                            timeoutMs: Number(event.target.value),
+                            timeoutMs: step.actionType === "core.wait" ? event.target.value === "" ? undefined : Math.round(Number(event.target.value) * 1000) : Number(event.target.value),
                           }))
                         }
                       />
+                      {selected.step.actionType === "core.wait" && <small>留空按等待时长自动设置超时；填写数字可覆盖。容器中的等待仍受容器总超时限制。</small>}
                     </label>
                     <label className="field">
                       <span>失败后</span>
@@ -1581,18 +1621,20 @@ export function App() {
                     </label>
                     {(selected.step.retry?.maxAttempts ?? 1) > 1 && (
                       <label className="field">
-                        <span>重试间隔（毫秒）</span>
+                        <span>{selected.step.actionType === "core.wait" ? "重试间隔（秒）" : "重试间隔（毫秒）"}</span>
                         <input
                           type="number"
                           min={0}
-                          value={selected.step.retry?.delayMs ?? 1000}
+                          max={selected.step.actionType === "core.wait" ? 60 : undefined}
+                          step={selected.step.actionType === "core.wait" ? 0.001 : 1}
+                          value={selected.step.actionType === "core.wait" ? (selected.step.retry?.delayMs ?? 1000) / 1000 : selected.step.retry?.delayMs ?? 1000}
                           disabled={!!busy}
                           onChange={(event) =>
                             updateSelected((step) => ({
                               ...step,
                               retry: {
                                 maxAttempts: step.retry?.maxAttempts ?? 1,
-                                delayMs: Number(event.target.value),
+                                delayMs: step.actionType === "core.wait" ? Math.round(Number(event.target.value) * 1000) : Number(event.target.value),
                               },
                             }))
                           }
@@ -1601,7 +1643,7 @@ export function App() {
                     )}
                   </div><label className="field"><span>指令下载目录</span><input value={selected.step.settings?.downloadDir ?? ""} placeholder={workflow?.settings.downloadDir} disabled={!!busy} onChange={event => updateSelected(step => ({ ...step, settings: { ...step.settings, downloadDir: event.target.value || undefined } }))} /><small>留空继承容器或流程默认目录。</small></label><label className="field"><span>指令 Python 可执行文件</span><input value={selected.step.settings?.pythonExecutable ?? ""} placeholder={workflow?.settings.pythonExecutable ?? "python"} disabled={!!busy} onChange={event => updateSelected(step => ({ ...step, settings: { ...step.settings, pythonExecutable: event.target.value || undefined } }))} /><small>仅影响本指令及其子步骤。</small></label></>)}
             {inspector !== "step" && !selected && <div className="panel-empty"><MousePointer2 size={26} /><h3>先选择一个步骤</h3><p>每条指令拥有独立设置、变量和元素。</p></div>}
-            {inspector === "inputs" && selected && (
+            {inspector === "inputs" && selected && selected.step.actionType !== "core.note" && (
               <>
                 <h2 className="panel-title">指令变量</h2>
                 <p className="help-text">
@@ -1624,7 +1666,7 @@ export function App() {
                 />
               </>
             )}
-            {inspector === "elements" && selected && (
+            {inspector === "elements" && selected && selected.step.actionType !== "core.note" && (
               <>
                 <h2 className="panel-title">元素引用</h2>
                 <p className="help-text">
@@ -1648,7 +1690,7 @@ export function App() {
             )}
             {invalid && (
               <p className="field-error" role="alert">
-                请修正 JSON 格式后保存或运行。
+                请修正参数错误后保存或运行。
               </p>
             )}
           </div>

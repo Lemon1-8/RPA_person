@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "rea
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, CornerDownRight, Play, Plus, Search, Trash2, X } from "lucide-react";
 import type { ActionDefinition, StepDefinition } from "../../../../packages/contracts/src/index.js";
 import { summarizeControlStep } from "./ControlFlowFields.js";
+import { noteStyle } from "./NoteFields.js";
 
 type Branch = "children" | "elseSteps";
 type Props = {
@@ -95,8 +96,9 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
 
   function renderBranch(step: StepDefinition, branch: Branch, depth: number) {
     const isLoop = step.actionType === "control.forEach";
-    const label = isLoop ? "循环体" : branch === "children" ? "满足条件" : "否则";
-    const addLabel = isLoop ? "添加到循环体" : branch === "children" ? "添加到满足条件" : "添加到否则分支";
+    const isTry = step.actionType === "control.tryCatch";
+    const label = isTry ? branch === "children" ? "Try 执行区" : "Catch 异常区" : isLoop ? "循环体" : branch === "children" ? "满足条件" : "否则";
+    const addLabel = isTry ? `添加到 ${label}` : isLoop ? "添加到循环体" : branch === "children" ? "添加到满足条件" : "添加到否则分支";
     const children = step[branch] ?? [];
     const choosing = picker?.id === step.stepId && picker.branch === branch;
     const matches = actions.filter(action => `${action.label} ${action.type} ${action.description}`.toLowerCase().includes(query.toLowerCase()));
@@ -134,7 +136,8 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
 
   function renderSteps(items: StepDefinition[], depth: number): ReactNode {
     return items.map((step, index) => {
-      const container = step.actionType === "control.if" || step.actionType === "control.forEach";
+      const container = ["control.if", "control.forEach", "control.tryCatch"].includes(step.actionType);
+      const note = step.actionType === "core.note";
       const folded = collapsed.has(step.stepId);
       const state = statuses.get(step.stepId);
       const number = numbers.get(step.stepId)!;
@@ -150,17 +153,19 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
               setCollapsed(previous => { const next = new Set(previous); if (folded) next.delete(step.stepId); else next.add(step.stepId); return next; });
               setPicker(undefined);
             }}>{folded ? <ChevronRight size={16} /> : <ChevronDown size={16} />}</button>}
-          <article className={`step-card${container ? " control-card" : ""}${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
+          <article className={`step-card${container ? " control-card" : ""}${note ? " note-card" : ""}${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
+            style={note ? noteStyle(step.params.color) : undefined}
             onDragOver={dragOver} onDragLeave={dragLeave} onDrop={event => drop(event, step.stepId, "after")}>
             <button type="button" className="step-main" aria-label={`步骤 ${number}：${step.name}`} aria-pressed={selectedId === step.stepId} onClick={() => onSelect(step.stepId)}>
               <span className="step-number">{String(number).padStart(2, "0")}</span>
               <span className="step-action-icon">{renderIcon(step.actionType)}</span>
-              <span className="step-copy"><strong>{container && <span className="control-keyword">{step.actionType === "control.if" ? "IF" : "FOR"}</span>}{step.name}</strong>
-                <span title={summary}>{summary || action?.description || step.actionType}</span>
+              <span className="step-copy"><strong>{note && <span className="note-tag">备注</span>}{container && <span className="control-keyword">{step.actionType === "control.if" ? "IF" : step.actionType === "control.tryCatch" ? "TRY" : "FOR"}</span>}{note && step.name === "备注" ? "" : step.name}</strong>
+                {note ? <span className="note-content">{typeof step.params.text === "string" && step.params.text ? step.params.text : "在右侧填写备注内容"}</span>
+                  : <span title={summary}>{summary || action?.description || step.actionType}</span>}
               </span>
-              {state && renderStatus(state)}
+              {!note && state && renderStatus(state)}
             </button>
-            <div className="step-run-action"><button type="button" className="icon-button" aria-label={`单独运行 ${step.name}`} title={`单独运行 ${step.name}`} disabled={cannotRun} onClick={() => onRun(step.stepId)}><Play size={14} /></button></div>
+            {!note && <div className="step-run-action"><button type="button" className="icon-button" aria-label={`单独运行 ${step.name}`} title={`单独运行 ${step.name}`} disabled={cannotRun} onClick={() => onRun(step.stepId)}><Play size={14} /></button></div>}
             <div className="step-actions">
               <button type="button" className="icon-button" aria-label={`上移 ${step.name}`} title={`上移 ${step.name}`} disabled={disabled || index === 0} onClick={() => onMutate(step.stepId, "up")}><ArrowUp size={14} /></button>
               <button type="button" className="icon-button" aria-label={`下移 ${step.name}`} title={`下移 ${step.name}`} disabled={disabled || index === items.length - 1} onClick={() => onMutate(step.stepId, "down")}><ArrowDown size={14} /></button>
@@ -172,12 +177,12 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
         {container && <>
           <div id={`body-${step.stepId}`} className="control-body" hidden={folded}>
             {renderBranch(step, "children", depth)}
-            {step.actionType === "control.if" && renderBranch(step, "elseSteps", depth)}
+            {["control.if", "control.tryCatch"].includes(step.actionType) && renderBranch(step, "elseSteps", depth)}
           </div>
           {folded && <button className="control-folded" type="button" onClick={() => setCollapsed(previous => { const next = new Set(previous); next.delete(step.stepId); return next; })}>
             已折叠 {countSteps([...(step.children ?? []), ...(step.elseSteps ?? [])])} 条内部指令，点击展开
           </button>}
-          <div className="control-end"><CornerDownRight size={14} /><span>{step.actionType === "control.if" ? "结束条件" : "结束循环"}</span><small>自动闭合</small></div>
+          <div className="control-end"><CornerDownRight size={14} /><span>{step.actionType === "control.if" ? "结束条件" : step.actionType === "control.tryCatch" ? "结束 Try / Catch" : "结束循环"}</span><small>自动闭合</small></div>
         </>}
       </div>;
     });

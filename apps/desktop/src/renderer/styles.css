@@ -681,6 +681,110 @@ small {
 .step-failed {
   border-color: #cf767c;
 }
+.step-card.note-card,
+.step-card.note-card:hover,
+.step-card.note-card.selected,
+.step-card.note-card.drop-target {
+  background: var(--note-background);
+  color: var(--note-foreground);
+  border-color: color-mix(in srgb, var(--note-foreground) 22%, transparent);
+}
+.step-card.note-card.selected {
+  box-shadow: 0 0 0 2px var(--teal);
+}
+.step-card.note-card.selected:before {
+  background: var(--note-foreground);
+}
+.note-card .step-main,
+.note-card .step-main:hover:not(:disabled) {
+  color: inherit;
+  background: transparent;
+  align-items: flex-start;
+  min-height: 108px;
+  padding-bottom: 40px;
+}
+.note-card .step-number,
+.note-card .step-copy > strong,
+.note-card .step-copy > span,
+.note-card .step-action-icon {
+  color: inherit;
+}
+.note-card .step-number {
+  align-self: flex-start;
+  margin-top: 8px;
+}
+.note-card .step-action-icon {
+  background: transparent;
+}
+.note-card .step-copy > strong {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.note-tag {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+.note-card .step-copy > .note-content {
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+.note-card .step-actions {
+  background: var(--note-background);
+}
+.note-card .step-actions .icon-button,
+.note-card .step-actions .icon-button:hover:not(:disabled) {
+  color: var(--note-foreground);
+  background: transparent;
+}
+.note-card .step-actions .icon-button:hover:not(:disabled) {
+  outline: 1px solid currentColor;
+}
+.note-text-input {
+  min-height: 140px;
+  resize: vertical;
+  line-height: 1.7;
+}
+.note-color-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.note-color-presets button,
+.note-color-presets button:hover:not(:disabled) {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--note-foreground);
+  background: var(--note-background);
+  border: 1px solid color-mix(in srgb, var(--note-foreground) 25%, transparent);
+  border-radius: 7px;
+  font-size: 18px;
+}
+.note-color-presets button[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px white, 0 0 0 4px var(--teal);
+}
+.note-custom-color {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 12px;
+}
+.note-custom-color input[type="color"] {
+  width: 100%;
+  height: 36px;
+  padding: 3px;
+  cursor: pointer;
+}
+.note-custom-color .field {
+  margin-bottom: 8px;
+}
 .step-running {
   border-color: #67aaa5;
 }
@@ -1039,6 +1143,11 @@ small {
   line-height: 1.8;
   color: #8b969d;
   margin-bottom: 20px;
+}
+.action-description {
+  white-space: pre-line;
+  font-size: 13px;
+  color: #52656d;
 }
 .field {
   display: flex;

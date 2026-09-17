@@ -204,7 +204,17 @@ export class BrowserSession {
 
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     if (method === 'browser.listPages') return this.listPages();
+    if (method === 'browser.closePage' && params.closeMode !== undefined && params.closeMode !== 'page' && params.closeMode !== 'all') {
+      throw new Error('关闭范围必须是 page 或 all');
+    }
     const result = this.queue.then(async () => {
+      if (method === 'browser.closePage' && params.closeMode === 'all') {
+        const closedPageIds = [...this.pages].filter(([, page]) => !page.isClosed()).map(([pageId]) => pageId);
+        // Close only this session's owned native browser, without launching one or
+        // resolving its selected tab. close() does not wait for this action queue.
+        await this.close();
+        return { ok: true, closedPageIds };
+      }
       await this.start();
       return this.execute(method, params);
     });
