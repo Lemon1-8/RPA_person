@@ -50,7 +50,7 @@ try {
   const file = after.runs[0].artifacts[0];
   assert.match(await readFile(file.path, 'utf8'), /跨语言订单/);
   await page.getByRole('tab', { name: /下载|产物/ }).click();
-  await page.getByText(file.name, { exact: true }).waitFor();
+  await page.getByRole('tabpanel', { name: '下载产物' }).getByText(file.name, { exact: true }).waitFor();
   await page.screenshot({ path: join(qa, 'desktop-success.png'), fullPage: true });
   assert.equal(await page.getByRole('button', { name: '显示所选运行浏览器', exact: true }).isEnabled(), true);
   await page.getByRole('button', { name: '显示所选运行浏览器', exact: true }).click();

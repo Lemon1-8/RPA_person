@@ -34,6 +34,7 @@ export function getNoteStepErrors(workflow: WorkflowDefinition): { stepId: strin
   const errors: { stepId: string; stepName: string; error: string }[] = [];
   const visit = (steps: StepDefinition[]) => {
     for (const step of steps) {
+      if (step.disabled) continue;
       const error = step.actionType === "core.note" ? validateNoteParams(step.params) : undefined;
       if (error) errors.push({ stepId: step.stepId, stepName: step.name, error });
       visit(step.children ?? []);

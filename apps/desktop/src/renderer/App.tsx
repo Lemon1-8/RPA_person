@@ -344,6 +344,16 @@ export function App() {
     [workflow?.steps],
   );
   const selected = steps.find((item) => item.step.stepId === selectedId);
+  const isCommented = (id: string) => {
+    let current = steps.find(item => item.step.stepId === id);
+    while (current) {
+      if (current.step.disabled) return true;
+      const parentId = current.parentId;
+      current = parentId ? steps.find(item => item.step.stepId === parentId) : undefined;
+    }
+    return false;
+  };
+  const selectedCommented = isCommented(selectedId);
   const selectedCatch = useMemo(() => {
     let current = selected;
     while (current?.parentId) {
@@ -368,7 +378,7 @@ export function App() {
   const run = runs.find((item) => item.runId === runId);
   const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
   const validationScope = `${workflowId}:${selectedId}:${inspector}:${view}:`;
-  const invalid = Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
+  const invalid = !(inspector === "step" && selectedCommented) && Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
   const workflowErrors = useMemo(() => workflow ? [...getBrowserPageErrors(workflow), ...getControlStepErrors(workflow), ...getNoteStepErrors(workflow)] : [], [workflow]);
   const invalidWorkflow = invalid || workflowErrors.length > 0;
   const activeRun = run && !terminalStatuses.has(run.status);
@@ -542,6 +552,21 @@ export function App() {
       ...value,
       steps: replaceStep(value.steps, selectedId, update),
     }));
+  const toggleComments = (ids: string[]) => {
+    if (busy || !workflow) return;
+    const targets = new Set(ids);
+    const selectedSteps = steps.filter(item => targets.has(item.step.stepId));
+    if (!selectedSteps.length) return;
+    const disabled = !selectedSteps.every(item => item.step.disabled);
+    const apply = (items: StepDefinition[]): StepDefinition[] => items.map(step => ({
+      ...step,
+      ...(targets.has(step.stepId) ? { disabled } : {}),
+      ...(step.children ? { children: apply(step.children) } : {}),
+      ...(step.elseSteps ? { elseSteps: apply(step.elseSteps) } : {}),
+    }));
+    updateWorkflow(value => ({ ...value, steps: apply(value.steps) }));
+    setNotice(`${disabled ? "已注释" : "已取消注释"} ${selectedSteps.length} 条指令${disabled ? "，运行时将跳过" : ""}`);
+  };
   const setParam = (key: string, value: unknown) =>
     updateSelected((step) => {
       const params = { ...step.params };
@@ -602,7 +627,7 @@ export function App() {
   async function runSingleStep(stepId: string) {
     if (!api || !workflow || cannotRunStep) return;
     const step = steps.find((item) => item.step.stepId === stepId)?.step;
-    if (!step || step.actionType === "core.note") return;
+    if (!step || step.actionType === "core.note" || isCommented(stepId)) return;
     const stepWorkflow = { ...workflow, steps: [step] };
     const stepError = [...getBrowserPageErrors(stepWorkflow), ...getControlStepErrors(stepWorkflow), ...getNoteStepErrors(stepWorkflow)][0];
     if (stepError) { setError(`“${stepError.stepName}”：${stepError.error}`); return; }
@@ -1194,7 +1219,7 @@ export function App() {
               </select>
               <button
                 className="single-step-run"
-                disabled={cannotRunStep || !selected}
+                disabled={cannotRunStep || !selected || selectedCommented}
                 onClick={() => selected && void runSingleStep(selected.step.stepId)}
               >
                 {busy.startsWith("step:") ? <Loader2 size={15} className="spin" /> : <Play size={15} />}
@@ -1202,7 +1227,8 @@ export function App() {
               </button>
             </div>
             <p role={missingStepBrowser ? "status" : undefined}>
-              {workflowRunning ? "当前流程正在执行，请等待完成或停止后再单条运行。"
+              {selectedCommented ? "此指令已注释或位于已注释的容器中，取消注释后可运行。"
+                : workflowRunning ? "当前流程正在执行，请等待完成或停止后再单条运行。"
                 : missingStepBrowser ? "所选浏览器已关闭或不可用，请重新选择目标。"
                 : selectedCatch ? `此指令位于「${selectedCatch.name}」的 Catch 内；单独运行不会生成异常变量，引用异常信息时请运行所在的 Try / Catch。`
                 : selected?.step.actionType === "core.wait" ? "等待无需浏览器；等待结束后继续下一步，可随时停止运行。"
@@ -1265,6 +1291,7 @@ export function App() {
                   renderStatus={status => <Status status={status} />}
                   onSelect={id => { setSelectedId(id); setInspector("step"); setPanels(previous => ({ ...previous, right: true })); }}
                   onRun={id => void runSingleStep(id)}
+                  onToggleComment={toggleComments}
                   onMutate={mutateStep}
                   onAdd={addAction}
                 />

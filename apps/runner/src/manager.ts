@@ -180,8 +180,10 @@ export class RunManager extends EventEmitter {
   }
   runStep(input: WorkflowDefinition, stepId: string, browserRunId?: string): Promise<RunSnapshot> {
     const workflow = workflowSchema.parse(input); validateActions(workflow);
-    const selected = findStepPath(workflow, scheduleIdentifier.parse(stepId))?.at(-1);
+    const path = findStepPath(workflow, scheduleIdentifier.parse(stepId));
+    const selected = path?.at(-1);
     if (!selected) throw new Error('指令不存在，请重新选择');
+    if (path?.some(step => step.disabled)) throw new Error('指令或所属容器已注释，请取消注释后再运行');
     if (browserRunId !== undefined && (typeof browserRunId !== 'string' || !browserRunId)) throw new Error('浏览器运行标识无效');
     const closeAllPages = selected.actionType === 'browser.closePage' && selected.params.closeMode === 'all';
     if (!browserRunId && !closeAllPages && selected.actionType.startsWith('browser.') && !['browser.start', 'browser.open', 'browser.popupGuard'].includes(selected.actionType)) {

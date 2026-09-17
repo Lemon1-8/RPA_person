@@ -85,7 +85,7 @@ describe("等待与 Try / Catch 参数编辑", () => {
         elseSteps: [action("loop", { actionType: "control.forEach", params: { items: [], itemVariable: "item" }, children: [] })],
       })],
       actions: [], selectedId: "try", disabled: false, cannotRun: false, statuses: new Map(),
-      renderIcon: () => null, renderStatus: () => null, onSelect: () => {}, onRun: () => {}, onMutate: () => {}, onAdd: () => {},
+      renderIcon: () => null, renderStatus: () => null, onSelect: () => {}, onRun: () => {}, onToggleComment: () => {}, onMutate: () => {}, onAdd: () => {},
     }));
     for (const label of ["添加到 Try 执行区", "添加到 Catch 异常区", "结束 Try / Catch", "添加到满足条件", "添加到否则分支", "结束条件", "添加到循环体", "结束循环"]) {
       expect(html).toContain(label);

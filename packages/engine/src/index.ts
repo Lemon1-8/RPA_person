@@ -386,6 +386,10 @@ export class WorkflowEngine {
       await yieldLoop();
       this.checkStop(); await this.waitForResume();
       this.remainingTimeout(30_000);
+      if (step.disabled) {
+        this.emit({ type: 'step', stepId: step.stepId, status: 'skipped', message: `已注释：${step.name}` });
+        continue;
+      }
       let completed = false;
       while (!completed) {
         const attempts = step.retry?.maxAttempts ?? 1;
@@ -457,6 +461,7 @@ export class WorkflowEngine {
     validateActions(workflow);
     const path = findStepPath(workflow, stepId);
     if (!path) throw new Error('指令不存在，请重新选择');
+    if (path.some(step => step.disabled)) throw new Error('指令或所属容器已注释，请取消注释后再运行');
     const reusing = this.consumed;
     const popupPolicyChanged = (workflow.settings.popupPolicy ?? 'smart') !== (this.workflow.settings.popupPolicy ?? 'smart');
     if (this.consumed) {

@@ -17,7 +17,7 @@
     "test:integration": "vitest run tests/integration",
     "browser:install": "playwright install chromium",
     "setup": "node node_modules/electron/install.js && playwright install chromium",
-    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-workspace.mjs && node scripts/smoke-save-run.mjs && node scripts/smoke-single-step.mjs && node scripts/smoke-control-flow.mjs && node scripts/smoke-wait-try-catch.mjs && node scripts/smoke-note.mjs && node scripts/smoke-logging.mjs && node scripts/smoke-browser-pages.mjs && node scripts/smoke-responsive-workspace.mjs",
+    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-workspace.mjs && node scripts/smoke-save-run.mjs && node scripts/smoke-single-step.mjs && node scripts/smoke-control-flow.mjs && node scripts/smoke-wait-try-catch.mjs && node scripts/smoke-note.mjs && node scripts/smoke-logging.mjs && node scripts/smoke-browser-pages.mjs && node scripts/smoke-responsive-workspace.mjs && node scripts/smoke-step-comments.mjs",
     "demo": "tsx apps/runner/src/cli.ts demo",
     "rpa": "tsx apps/runner/src/cli.ts",
     "check": "npm run typecheck && npm test && npm run build"

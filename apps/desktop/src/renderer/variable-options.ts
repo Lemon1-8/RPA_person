@@ -134,6 +134,7 @@ function restoreCatchError(environment: Environment, previous: Environment, step
 function interruptedSteps(environment: Environment, steps: StepDefinition[]): Environment {
   let possible = environment;
   for (const step of steps) {
+    if (step.disabled) continue;
     let inside = declareLocals(possible, step);
     if (step.actionType === "control.if") {
       inside = mergeEnvironments(interruptedSteps(inside, step.children ?? []), interruptedSteps(inside, step.elseSteps ?? []));
@@ -162,7 +163,7 @@ function completeSteps(environment: Environment, steps: StepDefinition[]): Envir
 }
 
 function completeStep(environment: Environment, step: StepDefinition): Environment {
-  if (step.actionType === "core.note") return environment;
+  if (step.disabled || step.actionType === "core.note") return environment;
   let scoped = declareLocals(environment, step);
   let outputShape = unknownShape();
   if (step.actionType === "variables.set") {

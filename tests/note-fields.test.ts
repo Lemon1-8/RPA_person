@@ -46,7 +46,7 @@ describe("流程备注编辑", () => {
     const html = renderToStaticMarkup(createElement(StepTree, {
       steps: [note({ text: "第一行\n{{literal}} <b>原文</b>", color: "#253858" })], actions: [], selectedId: "note",
       disabled: false, cannotRun: false, statuses: new Map([["note", "succeeded"]]), renderIcon: () => null,
-      renderStatus: () => "运行状态", onSelect: () => {}, onRun: () => {}, onMutate: () => {}, onAdd: () => {},
+      renderStatus: () => "运行状态", onSelect: () => {}, onRun: () => {}, onToggleComment: () => {}, onMutate: () => {}, onAdd: () => {},
     }));
     expect(html).toContain('class="step-card note-card selected step-succeeded"');
     expect(html).toContain("--note-background:#253858;--note-foreground:#FFFFFF");

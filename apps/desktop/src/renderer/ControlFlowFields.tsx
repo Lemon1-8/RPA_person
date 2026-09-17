@@ -98,6 +98,7 @@ export function getControlStepErrors(workflow: WorkflowDefinition): { stepId: st
   const errors: { stepId: string; stepName: string; error: string }[] = [];
   const visit = (steps: StepDefinition[]) => {
     for (const step of steps) {
+      if (step.disabled) continue;
       const error = step.actionType === "core.wait" ? waitDurationError(step.params.durationSeconds)
         : step.actionType === "control.tryCatch" ? typeof step.params.errorVariable === "string"
           ? validateErrorVariable(step.params.errorVariable) : "请填写文本类型的异常变量名。"

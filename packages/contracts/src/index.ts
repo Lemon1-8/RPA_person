@@ -7,6 +7,7 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [key:
 export interface ElementRef { pageRef?: string; framePath?: string[]; selector: string; expectedCount?: number }
 export interface StepDefinition {
   stepId: string; name: string; actionType: string; params: Record<string, unknown>; output?: string;
+  disabled?: boolean;
   timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause';
   variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
   settings?: { downloadDir?: string; pythonExecutable?: string };
@@ -81,6 +82,7 @@ const jsonValue: z.ZodType<JsonValue> = z.lazy(() => z.union([
 const elementSchema = z.object({ pageRef: z.string().optional(), framePath: z.array(z.string().min(1)).optional(), selector: z.string().min(1), expectedCount: z.number().int().positive().optional() });
 const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
   stepId: identifier, name: z.string().min(1), actionType: z.string().min(1), params: z.record(safeKey, jsonValue),
+  disabled: z.boolean().optional(),
   output: safeKey.optional(), timeoutMs: z.number().int().min(100).max(3_600_000).optional(),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(5), delayMs: z.number().int().min(0).max(60_000) }).optional(),
   variables: z.record(safeKey, jsonValue).optional(),

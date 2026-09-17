@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, CornerDownRight, Play, Plus, Search, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, CornerDownRight, Play, Plus, Search, Slash, Trash2, X } from "lucide-react";
 import type { ActionDefinition, StepDefinition } from "../../../../packages/contracts/src/index.js";
-import { summarizeControlStep } from "./ControlFlowFields.js";
+import { getStepCategory, getStepDetails } from "./step-summary.js";
 import { noteStyle } from "./NoteFields.js";
 
 type Branch = "children" | "elseSteps";
@@ -16,6 +16,7 @@ type Props = {
   renderStatus: (status: string) => ReactNode;
   onSelect: (id: string) => void;
   onRun: (id: string) => void;
+  onToggleComment: (ids: string[]) => void;
   onMutate: (id: string, command: "up" | "down" | "copy" | "delete") => void;
   onAdd: (action: ActionDefinition, targetId: string, branch: "after" | Branch) => void;
 };
@@ -24,21 +25,49 @@ function contains(steps: StepDefinition[], id: string): boolean {
   return steps.some(step => step.stepId === id || contains(step.children ?? [], id) || contains(step.elseSteps ?? [], id));
 }
 
-export function StepTree({ steps, actions, selectedId, disabled, cannotRun, statuses, renderIcon, renderStatus, onSelect, onRun, onMutate, onAdd }: Props) {
+export function StepTree({ steps, actions, selectedId, disabled, cannotRun, statuses, renderIcon, renderStatus, onSelect, onRun, onToggleComment, onMutate, onAdd }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [picker, setPicker] = useState<{ id: string; branch: Branch }>();
   const [query, setQuery] = useState("");
   const pickerRef = useRef<HTMLDivElement>(null);
   const previousSelection = useRef(selectedId);
+  const [selectedIds, setSelectedIds] = useState<string[]>(selectedId ? [selectedId] : []);
+  const anchor = useRef(selectedId);
   const numbers = new Map<string, number>();
-  const numberSteps = (items: StepDefinition[]) => {
+  const visibleIds: string[] = [];
+  const commentedIds = new Set<string>();
+  const numberSteps = (items: StepDefinition[], visible = true, inheritedComment = false) => {
     for (const step of items) {
       numbers.set(step.stepId, numbers.size + 1);
-      numberSteps(step.children ?? []);
-      numberSteps(step.elseSteps ?? []);
+      if (visible) visibleIds.push(step.stepId);
+      const commented = inheritedComment || !!step.disabled;
+      if (commented) commentedIds.add(step.stepId);
+      numberSteps(step.children ?? [], visible && !collapsed.has(step.stepId), commented);
+      numberSteps(step.elseSteps ?? [], visible && !collapsed.has(step.stepId), commented);
     }
   };
   numberSteps(steps);
+  const currentIds = previousSelection.current === selectedId ? selectedIds : selectedId ? [selectedId] : [];
+  const selection = currentIds.filter(id => visibleIds.includes(id));
+
+  const select = (id: string, event?: MouseEvent) => {
+    let next: string[];
+    const additive = event?.ctrlKey || event?.metaKey;
+    if (event?.shiftKey) {
+      const from = visibleIds.indexOf(visibleIds.includes(anchor.current) ? anchor.current : selectedId);
+      const to = visibleIds.indexOf(id);
+      const range = visibleIds.slice(Math.min(from < 0 ? to : from, to), Math.max(from < 0 ? to : from, to) + 1);
+      next = additive ? [...new Set([...selection, ...range])] : range;
+    } else {
+      next = additive ? selection.includes(id) ? selection.filter(item => item !== id) : [...selection, id] : [id];
+      anchor.current = id;
+    }
+    const primary = next.includes(id) ? id : next.at(-1) ?? "";
+    setSelectedIds(next);
+    previousSelection.current = primary;
+    setPicker(undefined);
+    onSelect(primary);
+  };
 
   useEffect(() => {
     // A step selected outside the canvas must remain reachable, even inside a folded block.
@@ -54,7 +83,11 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
       visit(steps);
       return next.size === previous.size ? previous : next;
     });
-    if (previousSelection.current !== selectedId) setPicker(undefined);
+    if (previousSelection.current !== selectedId) {
+      setPicker(undefined);
+      setSelectedIds(selectedId ? [selectedId] : []);
+      anchor.current = selectedId;
+    }
     previousSelection.current = selectedId;
   }, [selectedId, steps]);
 
@@ -142,31 +175,44 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
       const state = statuses.get(step.stepId);
       const number = numbers.get(step.stepId)!;
       const action = actions.find(item => item.type === step.actionType);
-      const summary = summarizeControlStep(step) ?? Object.entries(step.params)
-        .filter(([key, value]) => !/code|script|source/.test(key) && value !== "" && value !== undefined)
-        .slice(0, 2).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join(" · ");
-      return <div key={step.stepId} className={`step-node${container ? " control-node" : ""}`} data-step-id={step.stepId} data-depth={depth}>
+      const details = getStepDetails(step, action);
+      const category = getStepCategory(step.actionType);
+      const commented = commentedIds.has(step.stepId);
+      const chosen = selection.includes(step.stepId);
+      return <div key={step.stepId} className={`step-node${container ? " control-node" : ""}${commented ? " is-disabled" : ""}`} data-step-id={step.stepId} data-depth={depth}>
         <div className="step-node-heading">
           {container && <button type="button" className="control-toggle" aria-label={`${folded ? "展开" : "折叠"} ${step.name}`}
             aria-expanded={!folded} aria-controls={`body-${step.stepId}`} onClick={() => {
-              if (!folded && contains([...(step.children ?? []), ...(step.elseSteps ?? [])], selectedId)) onSelect(step.stepId);
+              if (!folded) {
+                const descendants = [...(step.children ?? []), ...(step.elseSteps ?? [])];
+                if (contains(descendants, selectedId)) select(step.stepId);
+                else setSelectedIds(previous => previous.filter(id => !contains(descendants, id)));
+              }
               setCollapsed(previous => { const next = new Set(previous); if (folded) next.delete(step.stepId); else next.add(step.stepId); return next; });
               setPicker(undefined);
             }}>{folded ? <ChevronRight size={16} /> : <ChevronDown size={16} />}</button>}
-          <article className={`step-card${container ? " control-card" : ""}${note ? " note-card" : ""}${selectedId === step.stepId ? " selected" : ""}${state ? ` step-${state}` : ""}`}
+          <article className={`step-card${container ? " control-card" : ""}${note ? " note-card" : ""}${chosen ? " selected" : ""}${commented ? " step-disabled" : ""}${state ? ` step-${state}` : ""}`}
+            data-category={category.id}
             style={note ? noteStyle(step.params.color) : undefined}
             onDragOver={dragOver} onDragLeave={dragLeave} onDrop={event => drop(event, step.stepId, "after")}>
-            <button type="button" className="step-main" aria-label={`步骤 ${number}：${step.name}`} aria-pressed={selectedId === step.stepId} onClick={() => onSelect(step.stepId)}>
+            <button type="button" className="step-main" aria-label={`步骤 ${number}：${step.name}`} aria-pressed={chosen} aria-keyshortcuts="Control+/ Meta+/" onClick={event => select(step.stepId, event)}>
               <span className="step-number">{String(number).padStart(2, "0")}</span>
               <span className="step-action-icon">{renderIcon(step.actionType)}</span>
-              <span className="step-copy"><strong>{note && <span className="note-tag">备注</span>}{container && <span className="control-keyword">{step.actionType === "control.if" ? "IF" : step.actionType === "control.tryCatch" ? "TRY" : "FOR"}</span>}{note && step.name === "备注" ? "" : step.name}</strong>
+              <span className="step-copy"><span className="step-title-row"><strong>{note && <span className="note-tag">备注</span>}{note && step.name === "备注" ? "" : step.name}</strong>
+                {!note && <span className="step-category">{container ? step.actionType === "control.if" ? "条件" : step.actionType === "control.tryCatch" ? "异常处理" : "循环" : category.label}</span>}
+                {commented && <span className="step-comment-tag">{step.disabled ? "已注释" : "随容器跳过"}</span>}
+                {!note && state && renderStatus(state)}
+                </span>
                 {note ? <span className="note-content">{typeof step.params.text === "string" && step.params.text ? step.params.text : "在右侧填写备注内容"}</span>
-                  : <span title={summary}>{summary || action?.description || step.actionType}</span>}
+                  : <span className="step-details">{details.map((detail, index) => <span className="step-detail" key={`${detail.label}-${index}`}>
+                    <span className="step-detail-label">{detail.label}</span><span className="step-detail-value" title={detail.value}>{detail.value}</span>
+                  </span>)}{!details.length && <span className="step-description">{action?.description ?? "在右侧配置指令参数"}</span>}</span>}
+                {!note && step.output && <span className="step-output"><span className="step-detail-label">输出到</span><span className="step-detail-value" title={step.output}>{step.output}</span></span>}
               </span>
-              {!note && state && renderStatus(state)}
             </button>
-            {!note && <div className="step-run-action"><button type="button" className="icon-button" aria-label={`单独运行 ${step.name}`} title={`单独运行 ${step.name}`} disabled={cannotRun} onClick={() => onRun(step.stepId)}><Play size={14} /></button></div>}
+            {!note && <div className="step-run-action"><button type="button" className="icon-button" aria-label={`单独运行 ${step.name}`} title={commented ? "已注释的指令不会执行" : `单独运行 ${step.name}`} disabled={cannotRun || commented} onClick={() => onRun(step.stepId)}><Play size={14} /></button></div>}
             <div className="step-actions">
+              <button type="button" className="icon-button" aria-label={`${step.disabled ? "取消注释" : "注释"} ${step.name}`} title={`${step.disabled ? "取消注释" : "注释"} · Ctrl+/`} disabled={disabled} onClick={() => onToggleComment([step.stepId])}><Slash size={14} /></button>
               <button type="button" className="icon-button" aria-label={`上移 ${step.name}`} title={`上移 ${step.name}`} disabled={disabled || index === 0} onClick={() => onMutate(step.stepId, "up")}><ArrowUp size={14} /></button>
               <button type="button" className="icon-button" aria-label={`下移 ${step.name}`} title={`下移 ${step.name}`} disabled={disabled || index === items.length - 1} onClick={() => onMutate(step.stepId, "down")}><ArrowDown size={14} /></button>
               <button type="button" className="icon-button" aria-label={`复制 ${step.name}`} title={`复制 ${step.name}`} disabled={disabled} onClick={() => onMutate(step.stepId, "copy")}><Copy size={14} /></button>
@@ -188,7 +234,16 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
     });
   }
 
-  return <div className="step-tree">{renderSteps(steps, 0)}</div>;
+  return <div className="step-tree-root" onKeyDown={event => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || (event.key !== "/" && event.code !== "Slash")) return;
+    if ((event.target as HTMLElement).closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox']")) return;
+    if (event.repeat || event.nativeEvent.isComposing || disabled || !selection.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onToggleComment(selection);
+  }}>
+    <div className="step-tree">{renderSteps(steps, 0)}</div>
+  </div>;
 }
 
 function countSteps(steps: StepDefinition[]): number {

@@ -94,6 +94,7 @@ export function getBrowserPageErrors(workflow: WorkflowDefinition): BrowserPageE
     ? getPageAliasError(value ?? '') : '网页别名必须是文本。';
   const visit = (steps: StepDefinition[]) => {
     for (const step of steps) {
+      if (step.disabled) continue;
       const add = (error: string | undefined) => { if (error) errors.push({ stepId: step.stepId, stepName: step.name, error }); };
       if (step.actionType === 'browser.open') {
         if (typeof step.params.url !== 'string' || !step.params.url.trim()) add('请填写网页地址。');
@@ -117,6 +118,7 @@ export function getDeclaredPageAliases(workflow: WorkflowDefinition): string[] {
   };
   const visit = (steps: StepDefinition[]) => {
     for (const step of steps) {
+      if (step.disabled) continue;
       if (step.actionType === 'browser.open') add(step.params.pageId);
       visit(step.children ?? []);
       visit(step.elseSteps ?? []);
