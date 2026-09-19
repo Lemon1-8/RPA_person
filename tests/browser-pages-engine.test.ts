@@ -69,6 +69,17 @@ describe('网页列表执行器接口', () => {
     await runner.control('closeBrowser');
   });
 
+  it('浏览器动作保持步骤配置的超时时长', async () => {
+    browser.call.mockResolvedValue({ ok: true });
+    const runner = await engine([
+      { stepId: 'click', name: '点击元素', actionType: 'browser.click', timeoutMs: 30_000, params: { selector: '#open' } },
+    ]);
+    const result = await runner.run();
+    expect(result.status, result.error).toBe('succeeded');
+    expect(browser.call).toHaveBeenCalledWith('browser.click', expect.objectContaining({ selector: '#open', timeoutMs: 30_000 }));
+    await runner.control('closeBrowser');
+  });
+
   it('网页输出的 pageId 属性引用保留文本类型并传给后续动作', async () => {
     browser.call.mockImplementation(async (method: string) => method === 'browser.open'
       ? { pageId: 'orders', url: 'https://example.test/orders' }

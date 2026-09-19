@@ -39,6 +39,29 @@ describe('BrowserSession public browser boundary', () => {
     });
   });
 
+  it('runs low-level mouse and keyboard actions inside the selected browser page', async () => {
+    const { browser, fixture } = await setup();
+    await browser.call('browser.open', { url: fixture.url });
+    await browser.call('browser.evaluate', { expression: `
+      document.body.style.minHeight = '2200px';
+      document.body.insertAdjacentHTML('afterbegin', '<button id="raw-click" style="position:fixed;left:20px;top:20px;width:100px;height:40px;z-index:9999">raw</button><input id="raw-input" style="position:fixed;left:20px;top:80px;width:180px;height:32px;z-index:9999">');
+      document.querySelector('#raw-click').addEventListener('click', () => { document.body.dataset.clicked = 'yes'; });
+      document.addEventListener('mousemove', event => { if (event.clientX === 50 && event.clientY === 60) document.body.dataset.moved = 'yes'; });
+      null;
+    ` });
+    await browser.call('browser.mouseMove', { x: 50, y: 60, steps: 2 });
+    await browser.call('browser.mouseClick', { x: 30, y: 30, button: 'left', clickCount: 1 });
+    expect(await browser.call('browser.evaluate', { expression: '({ clicked: document.body.dataset.clicked, moved: document.body.dataset.moved })' }))
+      .toEqual({ clicked: 'yes', moved: 'yes' });
+    await browser.call('browser.mouseClick', { x: 30, y: 90 });
+    await browser.call('browser.keyboardType', { text: 'Alice' });
+    await browser.call('browser.keyPress', { key: 'ControlOrMeta+A' });
+    await browser.call('browser.keyboardType', { text: 'Bob' });
+    expect(await browser.call('browser.evaluate', { expression: 'document.querySelector("#raw-input").value' })).toBe('Bob');
+    await browser.call('browser.mouseWheel', { deltaX: 0, deltaY: 600 });
+    await expect.poll(async () => browser.call('browser.evaluate', { expression: 'window.scrollY' }), { timeout: 3_000 }).toBeGreaterThan(0);
+  });
+
   it('isolates two browser profiles and refuses a leased profile across processes', async () => {
     const { browser, directory, fixture } = await setup();
     const other = new BrowserSession({ profileDir: join(directory, 'other-profile'), downloadDir: join(directory, 'downloads'), headless: true, runId: 'other' });
@@ -89,6 +112,28 @@ describe('BrowserSession public browser boundary', () => {
     await browser.call('browser.wait', { selector: '#orders tbody tr' });
     expect(await browser.call('browser.table', { selector: '#orders' })).toEqual({ headers: ['订单号', '客户', '金额', '状态'], rows: [['ORD-1002', 'Bob', '256', 'pending']] });
     expect(await browser.call('browser.evaluate', { expression: '({ customer: document.querySelector("#customer").value, count: document.querySelectorAll("#orders tbody tr").length })' })).toEqual({ customer: 'Bob', count: 1 });
+  });
+
+  it('can DOM-click an XPath target that is present but not pointer-clickable', async () => {
+    const { browser, fixture } = await setup();
+    await browser.call('browser.open', { url: fixture.url });
+    await browser.call('browser.evaluate', { expression: `
+      document.body.insertAdjacentHTML('afterbegin', '<button id="blocked-click" style="pointer-events:none"><span>月</span></button>');
+      document.querySelector('#blocked-click').addEventListener('click', () => { document.body.dataset.domClicked = 'yes'; });
+      null;
+    ` });
+
+    await expect(browser.call('browser.click', { selector: '//*[@id="blocked-click"]/span', timeoutMs: 300 }))
+      .rejects.toThrow(/元素已定位|Timeout/);
+    expect(await browser.call('browser.evaluate', { expression: 'document.body.dataset.domClicked ?? null' })).toBeNull();
+    await expect(browser.call('browser.click', { selector: '//*[@id="blocked-click"]/span', clickMode: 'dom', timeoutMs: 300 }))
+      .resolves.toEqual({ ok: true });
+    expect(await browser.call('browser.evaluate', { expression: 'document.body.dataset.domClicked' })).toBe('yes');
+
+    await browser.call('browser.evaluate', { expression: 'delete document.body.dataset.domClicked' });
+    await expect(browser.call('browser.click', { selector: '/html/body/button[@id="blocked-click"]/span', clickMode: 'dom', timeoutMs: 300 }))
+      .resolves.toEqual({ ok: true });
+    expect(await browser.call('browser.evaluate', { expression: 'document.body.dataset.domClicked' })).toBe('yes');
   });
 
   it('captures the triggered response instead of an older matching request already in flight', async () => {

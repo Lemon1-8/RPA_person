@@ -1,11 +1,15 @@
 import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
-import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, stat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import xlsx from 'xlsx';
 import { BrowserSession, type BrowserSessionOptions } from '../../browser/src/index.js';
 import { runScript } from '../../scripts/src/index.js';
 import { actionDefinitions, getAction, validateActionParams, validateActions } from '../../actions/src/index.js';
 import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
+
+const { readFile: readWorkbook, utils: xlsxUtils, writeFile: writeWorkbook } = xlsx;
+const browserTimeoutErrorGraceMs = 1_000;
 
 export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
@@ -71,9 +75,11 @@ export class WorkflowEngine {
   private errorBoundaryDepth = 0;
   private scopedElements: Record<string, ElementRef>;
   private scopedSettings: NonNullable<StepDefinition['settings']>;
+  private stepNumbers = new Map<string, number>();
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
     this.workflow = workflowSchema.parse(workflow);
     validateActions(this.workflow);
+    this.rebuildStepNumbers();
     this.scopedElements = this.workflow.elements;
     this.scopedSettings = this.workflow.settings;
     this.snapshot = {
@@ -91,6 +97,24 @@ export class WorkflowEngine {
   }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
     this.options.onEvent?.({ ...event, runId: this.snapshot.runId, at: new Date().toISOString() });
+  }
+  private rebuildStepNumbers() {
+    const numbers = new Map<string, number>();
+    const visit = (steps: StepDefinition[]) => {
+      for (const step of steps) {
+        numbers.set(step.stepId, numbers.size + 1);
+        visit(step.children ?? []);
+        visit(step.elseSteps ?? []);
+      }
+    };
+    visit(this.workflow.steps);
+    this.stepNumbers = numbers;
+  }
+  private stepData(step: StepDefinition, data?: unknown): unknown {
+    const stepNumber = this.stepNumbers.get(step.stepId);
+    return data && typeof data === 'object' && !Array.isArray(data)
+      ? { ...(data as Record<string, unknown>), stepNumber }
+      : { stepNumber, ...(data === undefined ? {} : { value: data }) };
   }
   private state(status: RunSnapshot['status'], error?: string) {
     this.snapshot.status = status;
@@ -218,34 +242,56 @@ export class WorkflowEngine {
   private async callBrowser(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     let expired = false;
     let timer: NodeJS.Timeout | undefined;
+    let graceTimer: NodeJS.Timeout | undefined;
     let abort: (() => void) | undefined;
     this.activeBrowserCalls++;
+    const closeAllPages = method === 'browser.closePage' && params.closeMode === 'all';
+    const timeoutError = () => new Error(`浏览器动作超时（${timeoutMs} ms）`);
     const operation = (async () => {
       // Closing every page only targets the session already bound to this run.
       // An empty or closed session must never cause a replacement browser to start.
-      const closeAllPages = method === 'browser.closePage' && params.closeMode === 'all';
       const browser = closeAllPages ? this.browser : await this.ensureBrowser(['browser.start', 'browser.open'].includes(method) ? params : {});
       this.checkStop(); signal?.throwIfAborted();
-      if (expired) throw new Error(`浏览器动作超时（${timeoutMs} ms）`);
+      if (expired) throw timeoutError();
       if (!browser || (closeAllPages && !browser.isOpen())) return { ok: true, closedPageIds: [] };
       return method === 'browser.start' ? browser.getInfo() : browser.call(method, params);
     })();
     try {
-      return await Promise.race([operation, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { expired = true; reject(new Error(`浏览器动作超时（${timeoutMs} ms）`)); }, timeoutMs);
-        abort = () => reject(signal?.reason ?? new Error('浏览器动作已取消'));
+      return await new Promise<unknown>((resolve, reject) => {
+        let finished = false;
+        const finish = (callback: () => void) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer); clearTimeout(graceTimer);
+          if (abort) signal?.removeEventListener('abort', abort);
+          callback();
+        };
+        operation.then(
+          value => finish(() => expired ? reject(timeoutError()) : resolve(value)),
+          error => finish(() => reject(error)),
+        );
+        timer = setTimeout(() => {
+          expired = true;
+          graceTimer = setTimeout(() => finish(() => reject(timeoutError())), browserTimeoutErrorGraceMs);
+        }, timeoutMs);
+        abort = () => finish(() => reject(signal?.reason ?? new Error('浏览器动作已取消')));
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted) abort();
-      })]);
+      });
     } catch (error) {
       if (expired || signal?.aborted) {
-        // End the real browser operation before a later step may start.
-        if (signal?.aborted || !actionDefinitions.find(action => action.type === method)?.safeToRetry) await this.browser?.close();
-        await operation.catch(() => {});
+        // User stops and explicit "close all" actions must terminate the owned session.
+        // Ordinary action timeouts keep the browser visible so the failed page state can be inspected or reused.
+        if (signal?.aborted || closeAllPages) {
+          await this.browser?.close();
+          await operation.catch(() => {});
+        } else {
+          void operation.catch(() => {});
+        }
       }
       throw error;
     } finally {
-      clearTimeout(timer); if (abort) signal?.removeEventListener('abort', abort);
+      clearTimeout(timer); clearTimeout(graceTimer); if (abort) signal?.removeEventListener('abort', abort);
       this.activeBrowserCalls--;
     }
   }
@@ -301,6 +347,30 @@ export class WorkflowEngine {
       const message = typeof params.message === 'string' ? params.message : JSON.stringify(params.message);
       this.emit({ type: 'log', stepId: step.stepId, message: message === '' ? '（空文本）' : message, data: { value: params.message } });
       return params.message;
+    }
+    if (step.actionType === 'file.xlsxRead') {
+      const workbook = readWorkbook(String(params.path));
+      const requested = typeof params.sheetName === 'string' && params.sheetName.trim() ? params.sheetName : undefined;
+      const sheetName = requested ?? workbook.SheetNames[0];
+      const sheet = sheetName ? workbook.Sheets[sheetName] : undefined;
+      if (!sheetName || !sheet) throw new Error(requested ? `工作表不存在：${requested}` : 'XLSX 文件没有可读取的工作表');
+      const rows = xlsxUtils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+      return jsonClone({ sheetName, rows });
+    }
+    if (step.actionType === 'file.xlsxWrite') {
+      const target = String(params.path);
+      const sheetName = typeof params.sheetName === 'string' && params.sheetName.trim() ? params.sheetName : 'Sheet1';
+      const rows = params.rows as Record<string, unknown>[];
+      await mkdir(dirname(target), { recursive: true });
+      const worksheet = xlsxUtils.json_to_sheet(rows);
+      const workbook = xlsxUtils.book_new();
+      xlsxUtils.book_append_sheet(workbook, worksheet, sheetName);
+      writeWorkbook(workbook, target, { compression: true });
+      const file = await stat(target);
+      const artifact: Artifact = { path: target, name: basename(target), size: file.size, stepId: this.snapshot.currentStepId };
+      this.snapshot.artifacts.push(artifact);
+      this.emit({ type: 'artifact', stepId: this.snapshot.currentStepId, data: artifact });
+      return artifact;
     }
     if (step.actionType === 'core.assert') {
       if (!isDeepStrictEqual(params.actual, params.expected)) throw new Error(`结果校验失败：期望 ${JSON.stringify(params.expected)}，实际 ${JSON.stringify(params.actual)}`);
@@ -387,7 +457,7 @@ export class WorkflowEngine {
       this.checkStop(); await this.waitForResume();
       this.remainingTimeout(30_000);
       if (step.disabled) {
-        this.emit({ type: 'step', stepId: step.stepId, status: 'skipped', message: `已注释：${step.name}` });
+        this.emit({ type: 'step', stepId: step.stepId, status: 'skipped', message: `已注释：${step.name}`, data: this.stepData(step) });
         continue;
       }
       let completed = false;
@@ -403,7 +473,7 @@ export class WorkflowEngine {
           const started = Date.now();
           try {
             const result = await this.withinStepScope(step, async () => {
-              this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: { attempt } });
+              this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: this.stepData(step, { attempt }) });
               const input = { ...step.params };
               if (step.actionType === 'browser.closePage' && input.closeMode === 'all') delete input.pageId;
               // Scripts use the SDK for variables; notes preserve all text literally.
@@ -415,7 +485,7 @@ export class WorkflowEngine {
             // Publish only after restoring local declarations, including same-name outputs.
             if (step.output && step.actionType !== 'core.note') this.setVariable(step.output, result ?? null);
             this.snapshot.currentStepId = step.stepId;
-            this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: step.name, data: { durationMs: Date.now() - started, result } });
+            this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: step.name, data: this.stepData(step, { durationMs: Date.now() - started, result }) });
             this.state('running'); completed = true; break;
           } catch (caught) {
             error = caught; this.checkStop();
@@ -434,7 +504,7 @@ export class WorkflowEngine {
         if (!completed) {
           const message = error instanceof Error ? error.message : String(error);
           this.snapshot.error = message;
-          this.emit({ type: 'step', stepId: step.stepId, status: 'failed', message });
+          this.emit({ type: 'step', stepId: step.stepId, status: 'failed', message, data: this.stepData(step) });
           const screenshotPath = join(this.options.dataDir, 'runs', this.snapshot.runId, `${step.stepId}.png`);
           if (this.browser) {
             await mkdir(join(this.options.dataDir, 'runs', this.snapshot.runId), { recursive: true });
@@ -442,6 +512,13 @@ export class WorkflowEngine {
               const path = await this.browser.screenshot(screenshotPath);
               if (path) this.emit({ type: 'log', stepId: step.stepId, message: '已保存失败截图', data: { path } });
             } catch { /* Capture failure must not replace the action error. */ }
+          }
+          if (step.onError === 'continue') {
+            this.emit({ type: 'log', stepId: step.stepId, message: '已忽略失败，继续执行后续指令。', data: this.stepData(step) });
+            delete this.snapshot.error;
+            this.state('running');
+            completed = true;
+            break;
           }
           if (!this.errorBoundaryDepth && step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry) {
             this.checkDeadline(error);
@@ -481,6 +558,7 @@ export class WorkflowEngine {
       }
     }
     this.workflow = workflow;
+    this.rebuildStepNumbers();
     this.reuseBrowserOnly = reusing;
     this.scopedElements = workflow.elements;
     this.scopedSettings = workflow.settings;
@@ -507,7 +585,7 @@ export class WorkflowEngine {
     let finalStatus: RunSnapshot['status'] = 'succeeded'; let finalError: string | undefined;
     try { await execute(); this.checkStop(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError = error instanceof Error ? error.message : String(error); }
-    try { if (this.stopped || (!keepBrowserOpen && this.workflow.settings.keepBrowserOpen === false)) await this.browser?.close(); }
+    try { if (this.stopped || (finalStatus === 'succeeded' && !keepBrowserOpen && this.workflow.settings.keepBrowserOpen === false)) await this.browser?.close(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError ??= `浏览器清理失败：${String(error)}`; }
     this.snapshot.browserOpen = this.browser?.isOpen() ?? false;
     this.executionFinished = true;

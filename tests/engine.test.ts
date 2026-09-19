@@ -41,4 +41,28 @@ describe('流程公共执行接口', () => {
     const engine = new WorkflowEngine(workflow, { dataDir: await mkdtemp(join(tmpdir(), 'rpa-variable-')), runId: 'variable-run' });
     expect((await engine.run()).status).toBe('succeeded');
   });
+  it('指令可忽略失败并继续执行，失败不会进入 Try/Catch', async () => {
+    const events: Array<{ stepId?: string; status?: string; data?: unknown }> = [];
+    const workflow = makeWorkflow([
+      { stepId: 'try', name: '异常容器', actionType: 'control.tryCatch', params: { errorVariable: 'error' }, children: [
+        { stepId: 'optional', name: '可忽略校验', actionType: 'core.assert', params: { actual: 1, expected: 2 }, onError: 'continue' },
+      ], elseSteps: [
+        { stepId: 'catch', name: '不应执行', actionType: 'variables.set', params: { name: 'caught', value: true } },
+      ] },
+      { stepId: 'after', name: '继续', actionType: 'variables.set', params: { name: 'continued', value: true } },
+    ]);
+    const runner = new WorkflowEngine(workflow, {
+      dataDir: await mkdtemp(join(tmpdir(), 'rpa-continue-')),
+      runId: 'continue-run',
+      onEvent: event => { if (event.type === 'step') events.push({ stepId: event.stepId, status: event.status, data: event.data }); },
+    });
+    const result = await runner.run();
+    expect(result.status, result.error).toBe('succeeded');
+    expect(result.variables).toMatchObject({ continued: true });
+    expect(result.variables).not.toHaveProperty('caught');
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'optional', status: 'failed', data: expect.objectContaining({ stepNumber: 2 }) }),
+      expect.objectContaining({ stepId: 'after', status: 'succeeded', data: expect.objectContaining({ stepNumber: 4 }) }),
+    ]));
+  });
 });

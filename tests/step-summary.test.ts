@@ -16,6 +16,7 @@ describe("工作流指令摘要", () => {
     expect(getStepCategory("browser.table").id).toBe("data");
     expect(getStepCategory("variables.set").id).toBe("data");
     expect(getStepCategory("browser.download").id).toBe("file");
+    expect(getStepCategory("file.xlsxRead").id).toBe("file");
     expect(getStepCategory("control.if").id).toBe("control");
     expect(getStepCategory("script.run").id).toBe("script");
     expect(getStepCategory("core.note").id).toBe("note");
@@ -38,6 +39,15 @@ describe("工作流指令摘要", () => {
     expect(details("browser.start", { browserChannel: "auto", debugPort: 0 })[1].value).toBe("自动分配");
     expect(details("browser.click", { selector: "#save", pageId: "$current" })[1]).toEqual({ label: "目标网页", value: "当前网页" });
     expect(details("browser.closePage", { closeMode: "all", pageId: "unused" })).toEqual([{ label: "关闭范围", value: "当前浏览器的所有网页" }]);
+    expect(details("browser.mouseClick", { x: 12, y: 34, button: "right", clickCount: 2 })).toEqual([
+      { label: "横坐标 X", value: "12" }, { label: "纵坐标 Y", value: "34" },
+    ]);
+    expect(details("browser.keyPress", { key: "ControlOrMeta+A", pageId: "$current" })).toEqual([
+      { label: "按键", value: "ControlOrMeta+A" }, { label: "目标网页", value: "当前网页" },
+    ]);
+    expect(details("file.xlsxWrite", { path: "C:\\RPA\\orders.xlsx", sheetName: "结果", rows: [{ id: 1 }] })).toEqual([
+      { label: "文件路径", value: "C:\\RPA\\orders.xlsx" }, { label: "工作表名称", value: "结果" },
+    ]);
   });
 
   it("支持结构化元素引用，同时保持原流程数据不变", () => {

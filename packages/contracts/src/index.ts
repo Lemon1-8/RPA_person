@@ -8,7 +8,7 @@ export interface ElementRef { pageRef?: string; framePath?: string[]; selector: 
 export interface StepDefinition {
   stepId: string; name: string; actionType: string; params: Record<string, unknown>; output?: string;
   disabled?: boolean;
-  timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause';
+  timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause' | 'continue';
   variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
   settings?: { downloadDir?: string; pythonExecutable?: string };
   children?: StepDefinition[]; elseSteps?: StepDefinition[];
@@ -91,7 +91,7 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
     downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径').optional(),
     pythonExecutable: z.string().min(1).optional(),
   }).optional(),
-  onError: z.enum(['fail', 'pause']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
+  onError: z.enum(['fail', 'pause', 'continue']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
 }).transform(step => {
   if (step.actionType !== 'browser.click') return step;
   // Retired click options must disappear before variable resolution and storage comparisons.

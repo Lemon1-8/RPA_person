@@ -19,9 +19,12 @@ const labels: Record<string, string> = {
   url: "网页地址", openMode: "打开方式", pageId: "目标网页", browserChannel: "浏览器", debugPort: "调试端口",
   closeMode: "关闭范围", mode: "模式", selector: "元素选择器", element: "目标元素", framePath: "框架路径",
   value: "参数值", text: "文本", directory: "保存目录", filename: "文件名称", path: "文件路径",
+  x: "横坐标", y: "纵坐标", button: "鼠标按钮", clickCount: "点击次数", steps: "移动步数",
+  deltaX: "横向滚动", deltaY: "纵向滚动", key: "按键", delayMs: "间隔时长", sheetName: "工作表",
+  rows: "行列表",
   urlIncludes: "响应网址包含", method: "请求方法", requestIncludes: "请求内容包含", language: "脚本语言",
   name: "变量名称", message: "日志内容", actual: "实际值", expected: "期望值", color: "备注颜色",
-  durationSeconds: "等待时长", durationMs: "等待时长", timeoutMs: "超时时长", delayMs: "间隔时长",
+  durationSeconds: "等待时长", durationMs: "等待时长", timeoutMs: "超时时长",
 };
 const preferredKeys: Record<string, string[]> = {
   "browser.start": ["browserChannel", "debugPort"],
@@ -32,12 +35,20 @@ const preferredKeys: Record<string, string[]> = {
   "browser.download": ["selector", "filename", "directory", "pageId"],
   "browser.response": ["selector", "urlIncludes", "method", "pageId"],
   "browser.closePage": ["closeMode", "pageId"],
+  "browser.mouseClick": ["x", "y", "button", "clickCount"],
+  "browser.mouseMove": ["x", "y", "steps"],
+  "browser.mouseWheel": ["deltaX", "deltaY", "pageId"],
+  "browser.keyPress": ["key", "pageId"],
+  "browser.keyboardType": ["text", "delayMs", "pageId"],
+  "file.xlsxRead": ["path", "sheetName"],
+  "file.xlsxWrite": ["path", "sheetName", "rows"],
   "variables.set": ["name", "value"],
   "script.run": ["language"],
 };
 const options: Record<string, Record<string, string>> = {
   openMode: { reuse: "在已有标签页打开", new: "新建标签页" },
   closeMode: { page: "指定网页", all: "当前浏览器的所有网页" },
+  button: { left: "左键", middle: "中键", right: "右键" },
   browserChannel: { auto: "自动选择本机 Chrome / Edge", chrome: "Google Chrome", msedge: "Microsoft Edge", chromium: "Chromium（测试用）" },
   language: { python: "Python", javascript: "JavaScript", typescript: "TypeScript" },
 };

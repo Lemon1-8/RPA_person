@@ -613,8 +613,11 @@ small {
   --card-background: #fafdfa;
 }
 .step-card.selected {
-  border-color: var(--teal);
-  background: #f5fcf8;
+  border-color: #0f766e;
+  background: #d5f0e8;
+  box-shadow:
+    inset 0 0 0 1px rgba(15, 118, 110, 0.34),
+    0 0 0 2px rgba(15, 118, 110, 0.12);
 }
 .step-card.selected:before {
   content: "";
@@ -622,8 +625,8 @@ small {
   top: 0;
   bottom: 0;
   left: 0;
-  width: 3px;
-  background: var(--teal);
+  width: 7px;
+  background: #0f766e;
 }
 .step-main {
   grid-column: 1;
@@ -664,7 +667,12 @@ small {
   flex-shrink: 0;
 }
 .selected .step-action-icon {
-  outline: 1px solid color-mix(in srgb, var(--category-color) 20%, transparent);
+  background: #bce5dc;
+  color: #0d5f58;
+  outline: 1px solid rgba(13, 95, 88, 0.32);
+}
+.step-card.selected .step-title-row > strong {
+  color: #17443f;
 }
 .step-card .step-action-icon {
   width: 28px;
@@ -1610,6 +1618,17 @@ td > .status-browser-retained {
   color: #648b84;
   border-radius: 3px;
   vertical-align: baseline;
+}
+.log-step-number {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 5px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #eef3f5;
+  color: #788a93;
+  font-size: 10px;
+  line-height: 1.55;
 }
 .console table {
   border-collapse: collapse;

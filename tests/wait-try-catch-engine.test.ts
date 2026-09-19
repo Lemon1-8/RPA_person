@@ -121,7 +121,11 @@ describe('Try / Catch 执行与异常作用域', () => {
       captured: { message: '结果校验失败：期望 2，实际 1', stepId: 'failure', stepName: '失败校验', actionType: 'core.assert' },
       tryResult: { caught: true }, continued: true,
     });
-    expect(events.filter(event => event.type === 'step' && event.stepId === 'failure' && event.status === 'running').map(event => event.data)).toEqual([{ attempt: 1 }, { attempt: 2 }, { attempt: 3 }]);
+    expect(events.filter(event => event.type === 'step' && event.stepId === 'failure' && event.status === 'running').map(event => event.data)).toEqual([
+      expect.objectContaining({ attempt: 1 }),
+      expect.objectContaining({ attempt: 2 }),
+      expect.objectContaining({ attempt: 3 }),
+    ]);
     expect(events.some(event => event.status === 'waiting_manual')).toBe(false);
   });
 

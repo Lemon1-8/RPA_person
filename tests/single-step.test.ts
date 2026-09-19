@@ -86,6 +86,44 @@ describe('单条指令执行器', () => {
     expect(browser.starts).toHaveBeenCalledTimes(1);
   });
 
+  it('浏览器动作超时失败后默认保留当前浏览器现场', async () => {
+    const workflow = flow([
+      { stepId: 'start', name: '启动', actionType: 'browser.start', params: {} },
+      { stepId: 'click', name: '点击', actionType: 'browser.click', timeoutMs: 100, params: { selector: '#slow' } },
+    ]);
+    const runner = await engine(workflow);
+    await runner.runSingleStep('start');
+    browser.close.mockClear();
+    browser.call.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve({ ok: true }), 200)));
+
+    const result = await runner.runSingleStep('click');
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('浏览器动作超时');
+    expect(result.browserOpen).toBe(true);
+    expect(browser.close).not.toHaveBeenCalled();
+    await runner.control('closeBrowser');
+  });
+
+  it('浏览器动作超时边界保留内部定位错误', async () => {
+    const workflow = flow([
+      { stepId: 'start', name: '启动', actionType: 'browser.start', params: {} },
+      { stepId: 'click', name: '点击', actionType: 'browser.click', timeoutMs: 100, params: { selector: '#missing' } },
+    ]);
+    const runner = await engine(workflow);
+    await runner.runSingleStep('start');
+    browser.call.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error('locator.waitFor: Timeout 100ms exceeded. waiting for locator("#missing")')), 110);
+    }));
+
+    const result = await runner.runSingleStep('click');
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('locator.waitFor');
+    expect(result.error).toContain('#missing');
+    await runner.control('closeBrowser');
+  });
+
   it.each(['runId', 'scheduledFor'])('复用单步会话时 %s 与普通声明一样支持编辑和删除，保留已计算值', async name => {
     const workflow = flow([
       { stepId: 'start', name: '启动', actionType: 'browser.start', params: { browserChannel: 'chromium' } },

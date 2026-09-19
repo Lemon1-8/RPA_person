@@ -27,6 +27,7 @@
     "playwright": "1.63.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "xlsx": "^0.18.5",
     "zod": "4.6.5"
   },
   "devDependencies": {

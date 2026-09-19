@@ -26,10 +26,37 @@ function requiredString(params: Record<string, unknown>, key: string): string {
   return params[key];
 }
 
+function requiredNumber(params: Record<string, unknown>, key: string): number {
+  if (typeof params[key] !== 'number' || !Number.isFinite(params[key])) throw new Error(`浏览器参数 ${key} 必须是有效数字`);
+  return params[key];
+}
+
 function timeout(params: Record<string, unknown>): number {
   const value = params.timeoutMs ?? 15_000;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error('timeoutMs 必须是正数');
   return value;
+}
+
+function clickMode(params: Record<string, unknown>): 'normal' | 'force' | 'dom' {
+  if (params.clickMode === undefined || params.clickMode === '' || params.clickMode === 'normal') return 'normal';
+  if (params.clickMode === 'force' || params.clickMode === 'dom') return params.clickMode;
+  throw new Error('点击方式必须是 normal、force 或 dom');
+}
+
+function isTimeoutLike(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || /Timeout \d+ms exceeded|超时|timeout/i.test(error.message));
+}
+
+function withSelectorHint(error: unknown, selector: string): Error {
+  if (!(error instanceof Error)) return new Error(String(error));
+  if (!selector.includes('\\"')) return error;
+  return new Error(`选择器包含反斜杠转义的引号（\\\"）。如果是从 JSON 或日志里复制的 XPath，请把 \\\" 改成普通引号 " 后再运行。原始错误：${error.message}`, { cause: error });
+}
+
+function locatorSelector(selector: string): string {
+  const trimmed = selector.trim();
+  if (trimmed.startsWith('/') || trimmed.startsWith('./') || trimmed.startsWith('../')) return `xpath=${trimmed}`;
+  return selector;
 }
 
 async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
@@ -233,22 +260,95 @@ export class BrowserSession {
     return page;
   }
 
+  private async inputPage(params: Record<string, unknown>): Promise<Page> {
+    const page = this.page(params);
+    await page.bringToFront();
+    this.currentPageId = this.pageIds.get(page)!;
+    return page;
+  }
+
   private async locator(params: Record<string, unknown>): Promise<Locator> {
     const element = params.element as { framePath?: string[]; selector?: string; expectedCount?: number } | undefined;
     if (element?.framePath && (!Array.isArray(element.framePath) || !element.framePath.every((part) => typeof part === 'string' && part))) throw new Error('framePath 必须是逐层 iframe 选择器列表');
     let scope: Page | FrameLocator = this.page(params);
     for (const frame of element?.framePath ?? []) {
-      const match = scope.locator(frame);
+      const match = scope.locator(locatorSelector(frame));
       await match.first().waitFor({ state: 'attached', timeout: timeout(params) });
       if (await match.count() !== 1) throw new BrowserSessionError('AMBIGUOUS_ELEMENT', `iframe 定位歧义：${frame}`);
-      scope = scope.frameLocator(frame);
+      scope = scope.frameLocator(locatorSelector(frame));
     }
-    const locator = scope.locator(requiredString(element ?? params, 'selector'));
-    await locator.first().waitFor({ state: 'attached', timeout: timeout(params) });
-    const count = await locator.count();
-    const expected = element?.expectedCount ?? 1;
-    if (count !== expected || count !== 1) throw new BrowserSessionError('AMBIGUOUS_ELEMENT', `元素定位歧义：动作要求唯一目标，配置预期 ${expected} 个，实际 ${count} 个`);
-    return locator;
+    const selector = requiredString(element ?? params, 'selector');
+    const locator = scope.locator(locatorSelector(selector));
+    try {
+      await locator.first().waitFor({ state: 'attached', timeout: timeout(params) });
+      const count = await locator.count();
+      const expected = element?.expectedCount ?? 1;
+      if (count !== expected || count !== 1) throw new BrowserSessionError('AMBIGUOUS_ELEMENT', `元素定位歧义：动作要求唯一目标，配置预期 ${expected} 个，实际 ${count} 个`);
+      return locator;
+    } catch (error) { throw withSelectorHint(error, selector); }
+  }
+
+  private async click(locator: Locator, params: Record<string, unknown>, options: { timeout: number }): Promise<unknown> {
+    const mode = clickMode(params);
+    if (mode === 'dom') {
+      await locator.evaluate((element) => {
+        const clickable = element as HTMLElement & { click?: () => void };
+        if (typeof clickable.click === 'function') clickable.click();
+        else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      }, undefined, options);
+      return { ok: true };
+    }
+    try {
+      await locator.click(mode === 'force' ? { ...options, force: true } : options);
+      return { ok: true };
+    } catch (error) {
+      if (!isTimeoutLike(error)) throw error;
+      const diagnostics = await this.clickDiagnostics(locator).catch(diagnosticError => `诊断信息读取失败：${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}`);
+      const modeHint = mode === 'force' ? '强制点击仍未完成' : '标准点击未完成';
+      throw new Error(`元素已定位，但${modeHint}：${error instanceof Error ? error.message.split('\n')[0] : String(error)}。${diagnostics}。可尝试改点外层可点击节点，或在“点击方式”中选择“DOM 点击”；如果页面被弹层遮挡，请先关闭弹层。`, { cause: error });
+    }
+  }
+
+  private async clickDiagnostics(locator: Locator): Promise<string> {
+    const details = await locator.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const receiver = rect.width > 0 && rect.height > 0 ? document.elementFromPoint(centerX, centerY) : null;
+      const label = (node: Element | null) => node ? {
+        tag: node.tagName.toLowerCase(),
+        id: node.id,
+        className: node.getAttribute('class') ?? '',
+        text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40),
+      } : undefined;
+      return {
+        target: label(element),
+        receiver: label(receiver),
+        receivesPointer: !!receiver && (receiver === element || element.contains(receiver)),
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        display: style.display,
+        visibility: style.visibility,
+        pointerEvents: style.pointerEvents,
+        disabled: element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true',
+      };
+    }, undefined, { timeout: 1_000 });
+    const describe = (node?: { tag: string; id: string; className: string; text: string }) => {
+      if (!node) return '无';
+      const id = node.id ? `#${node.id}` : '';
+      const className = node.className ? `.${node.className.split(/\s+/).filter(Boolean).slice(0, 3).join('.')}` : '';
+      const text = node.text ? ` 文本“${node.text}”` : '';
+      return `<${node.tag}${id}${className}>${text}`;
+    };
+    const issues: string[] = [];
+    if (details.display === 'none' || details.visibility === 'hidden' || details.visibility === 'collapse') issues.push('元素不可见');
+    if (details.pointerEvents === 'none') issues.push('元素或其样式禁止接收鼠标事件');
+    if (details.disabled) issues.push('元素处于禁用状态');
+    if (details.rect.width <= 0 || details.rect.height <= 0) issues.push('元素没有可点击区域');
+    if (details.receiver && !details.receivesPointer) issues.push(`中心点被 ${describe(details.receiver)} 接收`);
+    if (!details.receiver) issues.push('元素中心点不在当前视口内');
+    if (!issues.length) issues.push('元素可能仍在动画、布局变化或被浏览器动作性检查判定为不可点击');
+    return `目标 ${describe(details.target)}，区域 ${details.rect.width}x${details.rect.height} @ (${details.rect.x}, ${details.rect.y})；${issues.join('；')}`;
   }
 
   private async execute(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -257,6 +357,38 @@ export class BrowserSession {
       return this.popupGuard!.setMode(params.mode);
     }
     if (method === 'browser.show' || method === 'browser.hide') return this.setWindowState(method === 'browser.show' ? 'normal' : 'minimized', params);
+    if (method === 'browser.mouseClick') {
+      const page = await this.inputPage(params);
+      await page.mouse.click(requiredNumber(params, 'x'), requiredNumber(params, 'y'), {
+        button: params.button === 'middle' || params.button === 'right' ? params.button : 'left',
+        clickCount: typeof params.clickCount === 'number' ? params.clickCount : 1,
+        delay: typeof params.delayMs === 'number' ? params.delayMs : 0,
+      });
+      return { ok: true };
+    }
+    if (method === 'browser.mouseMove') {
+      const page = await this.inputPage(params);
+      await page.mouse.move(requiredNumber(params, 'x'), requiredNumber(params, 'y'), {
+        steps: typeof params.steps === 'number' ? params.steps : 1,
+      });
+      return { ok: true };
+    }
+    if (method === 'browser.mouseWheel') {
+      const page = await this.inputPage(params);
+      await page.mouse.wheel(requiredNumber(params, 'deltaX'), requiredNumber(params, 'deltaY'));
+      return { ok: true };
+    }
+    if (method === 'browser.keyPress') {
+      const page = await this.inputPage(params);
+      await page.keyboard.press(requiredString(params, 'key'));
+      return { ok: true };
+    }
+    if (method === 'browser.keyboardType') {
+      const page = await this.inputPage(params);
+      if (typeof params.text !== 'string') throw new Error('输入文本必须是文本');
+      await page.keyboard.type(params.text, { delay: typeof params.delayMs === 'number' ? params.delayMs : 0 });
+      return { ok: true };
+    }
     if (method === 'browser.switchPage') {
       const page = this.page(params);
       await page.bringToFront();
@@ -316,9 +448,7 @@ export class BrowserSession {
     switch (method) {
       case 'browser.response': return this.captureResponse(params, locator);
       case 'browser.download': return this.saveDownload(params, locator);
-      case 'browser.click':
-        await locator.click(options);
-        return { ok: true };
+      case 'browser.click': return this.click(locator, params, options);
       case 'browser.fill':
         if (typeof params.value !== 'string') throw new Error('输入值必须是文本');
         await locator.fill(params.value, options);

@@ -9,7 +9,7 @@ import type { WorkflowDefinition } from '../packages/contracts/src/index.js';
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
-it('旧流程默认在结束后保留真实浏览器，用户仍可显示并手动关闭', async () => {
+it('旧流程默认保留真实浏览器，新整流程运行会先关闭旧浏览器', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rpa-retention-'));
   const site = await startFixtureServer(); cleanup.push(() => site.close());
   const manager = new RunManager({ dataDir: directory }); await manager.initialize(); cleanup.push(() => manager.shutdown());
@@ -21,10 +21,12 @@ it('旧流程默认在结束后保留真实浏览器，用户仍可显示并手�
   const other = new BrowserSession({ profileDir: join(directory, 'profiles', flow.workflowId), downloadDir: directory, runId: 'probe', headless: true }); cleanup.push(() => other.close());
   await expect(other.start()).rejects.toThrow(/正在使用/);
   await expect(manager.controlRun(result.runId, 'show')).resolves.toBeUndefined();
-  await expect(manager.runWorkflow(saved)).rejects.toThrow('浏览器仍保留');
-  await manager.controlRun(result.runId, 'closeBrowser');
+  const repeated = await manager.waitForRun((await manager.runWorkflow(saved)).runId);
+  expect(repeated.status).toBe('succeeded');
+  expect(repeated.browserOpen).toBe(true);
   expect(manager.listRuns().find(run => run.runId === result.runId)?.browserOpen).toBe(false);
   expect(manager.listRuns().find(run => run.runId === result.runId)?.status).toBe('succeeded');
+  await manager.controlRun(repeated.runId, 'closeBrowser');
   const reopened = new BrowserSession({ profileDir: join(directory, 'profiles', flow.workflowId), downloadDir: directory, runId: 'after-close', headless: true }); cleanup.push(() => reopened.close());
   await expect(reopened.start()).resolves.toBeUndefined();
 });

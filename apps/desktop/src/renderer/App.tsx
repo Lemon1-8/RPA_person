@@ -11,13 +11,16 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   FileText,
   FolderOpen,
   GitBranch,
   Globe,
+  Keyboard,
   Layers,
   ListTree,
   Loader2,
+  MousePointerClick,
   MousePointer2,
   Pause,
   PanelLeftClose,
@@ -102,6 +105,13 @@ const eventFile = (event: RunEvent) =>
   typeof event.data.path === "string"
     ? event.data.path
     : undefined;
+const eventStepNumber = (event: RunEvent) =>
+  event.data &&
+  typeof event.data === "object" &&
+  "stepNumber" in event.data &&
+  typeof event.data.stepNumber === "number"
+    ? event.data.stepNumber
+    : undefined;
 
 function flatten(
   steps: StepDefinition[],
@@ -169,6 +179,9 @@ function ActionIcon({ type, size = 17 }: { type: string; size?: number }) {
   if (type === "core.note") return <StickyNote size={size} />;
   if (type === "control.tryCatch") return <ShieldCheck size={size} />;
   if (type === "browser.popupGuard") return <ShieldCheck size={size} />;
+  if (type.startsWith("file.xlsx")) return <FileSpreadsheet size={size} />;
+  if (type.startsWith("browser.key") || type === "browser.keyboardType") return <Keyboard size={size} />;
+  if (type.startsWith("browser.mouse")) return <MousePointerClick size={size} />;
   if (/script|python|javascript|typescript/.test(type))
     return <Code2 size={size} />;
   if (/download/.test(type)) return <Download size={size} />;
@@ -403,7 +416,7 @@ export function App() {
   const browserPages = pageInventory.runId === pageBrowserId ? pageInventory.pages : [];
   const cannotRunStep = !api || !workflow || !!busy || invalid || workflowRunning || missingStepBrowser;
   const visibleEvents = events.filter(
-    (event) => event.runId === runId && event.message,
+    (event) => event.runId === runId && event.message && (event.type !== "step" || ["succeeded", "failed"].includes(event.status ?? "")),
   );
   const stepEvents = events.filter(
     (event) => event.runId === runId && event.type === "step",
@@ -1609,11 +1622,12 @@ export function App() {
                         onChange={(event) =>
                           updateSelected((step) => ({
                             ...step,
-                            onError: event.target.value as "fail" | "pause",
+                            onError: event.target.value as "fail" | "pause" | "continue",
                           }))
                         }
                       >
                         <option value="fail">结束运行并记录错误</option>
+                        <option value="continue">忽略失败，继续执行</option>
                         <option
                           value="pause"
                           disabled={!selectedAction?.safeToRetry}
@@ -1858,22 +1872,25 @@ export function App() {
                     </span>
                     <span>
                       {event.stepId && (
-                        <button
-                          className="log-step"
-                          onClick={() => {
-                            const found = steps.find(
+                        <>
+                          {eventStepNumber(event) && <span className="log-step-number">#{String(eventStepNumber(event)).padStart(2, "0")}</span>}
+                          <button
+                            className="log-step"
+                            onClick={() => {
+                              const found = steps.find(
+                                (item) => item.step.stepId === event.stepId,
+                              );
+                              if (found) {
+                                setSelectedId(found.step.stepId);
+                                setInspector("step");
+                              }
+                            }}
+                          >
+                            {steps.find(
                               (item) => item.step.stepId === event.stepId,
-                            );
-                            if (found) {
-                              setSelectedId(found.step.stepId);
-                              setInspector("step");
-                            }
-                          }}
-                        >
-                          {steps.find(
-                            (item) => item.step.stepId === event.stepId,
-                          )?.step.name ?? event.stepId.slice(0, 8)}
-                        </button>
+                            )?.step.name ?? event.stepId.slice(0, 8)}
+                          </button>
+                        </>
                       )}
                       {event.message}
                       {eventFile(event) && (

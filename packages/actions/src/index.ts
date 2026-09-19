@@ -4,10 +4,21 @@ import type { ActionDefinition, ActionField, StepDefinition, WorkflowDefinition 
 
 const text = (key: string, label: string, required = true, placeholder?: string): ActionField => ({ key, label, type: 'text', required, placeholder });
 const json = (key: string, label: string): ActionField => ({ key, label, type: 'json', required: true });
+const number = (key: string, label: string, required = true, placeholder?: string): ActionField => ({ key, label, type: 'number', required, placeholder });
 const selector = text('selector', '元素选择器', true, '#customer 或 @元素名称');
 const page = text('pageId', '目标网页', false, '当前网页');
 const fields = [selector, page];
+const clickMode: ActionField = {
+  key: 'clickMode', label: '点击方式', type: 'select', required: true,
+  options: [
+    { label: '标准点击', value: 'normal' },
+    { label: '强制点击', value: 'force' },
+    { label: 'DOM 点击', value: 'dom' },
+  ],
+};
 const nonBlank = z.string().refine(value => value.trim().length > 0, '文本不可为空');
+const finiteNumber = z.number().finite();
+const clickModeSchema = z.union([z.enum(['normal', 'force', 'dom']), z.literal('').transform(() => 'normal')]).optional();
 const framePath = z.array(nonBlank);
 const elementRef = z.object({
   selector: nonBlank, pageRef: nonBlank.optional(), framePath: framePath.optional(), expectedCount: z.number().int().positive().optional(),
@@ -17,6 +28,11 @@ const targetSchema = z.object(target).passthrough().refine(p => p.selector || p.
 const downloadDirectory = z.string().refine(value => value === '' || (process.platform === 'win32'
   ? /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/.test(value)
   : isAbsolute(value)), '下载目录必须为空或绝对路径；Windows 请填写盘符根路径或完整 UNC 共享路径');
+const absoluteFilePath = z.string().refine(value => process.platform === 'win32'
+  ? /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/.test(value)
+  : isAbsolute(value), '文件路径必须是完整绝对路径；Windows 请填写盘符根路径或完整 UNC 共享路径');
+const xlsxFilePath = absoluteFilePath.refine(value => /\.xlsx$/i.test(value), '文件路径必须以 .xlsx 结尾');
+const sheetName = z.string().refine(value => value === '' || (value.trim() === value && value.length <= 31 && !/[:\\/?*\[\]]/.test(value)), '工作表名称不能包含首尾空格、: \\ / ? * [ ]，且最多 31 个字符');
 const responseMethod = z.string().trim().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]*$/, '请求方法必须是单个 HTTP 方法名称').transform(value => value.toUpperCase());
 const browserStartup = {
   browserChannel: z.enum(['auto', 'chrome', 'msedge', 'chromium']).optional(),
@@ -44,8 +60,8 @@ add('browser.popupGuard', '智能屏蔽弹窗', '浏览器', '为当前浏览器
   [{ key: 'mode', label: '屏蔽模式', type: 'select', required: true, options: [{ label: '智能屏蔽（推荐）', value: 'smart' }, { label: '严格屏蔽', value: 'strict' }, { label: '关闭屏蔽', value: 'off' }] }],
   { mode: 'smart' }, z.object({ mode: z.enum(['off', 'smart', 'strict']) }));
 add('browser.wait', '等待元素', '网页操作', '流程执行到这一步时，会先等待指定的网页元素出现并显示出来，再继续执行后面的步骤。如果元素已经显示，就立即继续。\n\n例如：需要手动登录时，先等待登录后才出现的用户名显示，再执行后续操作。\n\n在“元素选择器”中填写要等待的目标。默认最多等待 30 秒，可在“设置”中的“步骤超时（毫秒）”修改；超时后按“失败后”的设置结束运行或暂停，等待人工处理。\n\n此指令只判断元素是否显示，不检查文字是否更新，也不代表整个网页已经加载完成。', true, fields, { selector: '' }, targetSchema);
-add('browser.click', '点击元素', '网页操作', '在当前或指定的目标网页点击元素。', false,
-  fields, { selector: '' }, z.object(target).refine(p => p.selector || p.element, '请设置元素选择器'));
+add('browser.click', '点击元素', '网页操作', '在当前或指定的目标网页点击元素。\n\n标准点击会模拟真实用户点击，并检查元素是否可见、稳定且没有被遮挡。强制点击会跳过遮挡检查。DOM 点击会直接调用元素的 click()，适合 XPath 能定位但自定义控件或样式导致鼠标点击无法命中的场景。', false,
+  [...fields, clickMode], { selector: '', clickMode: 'normal' }, z.object({ ...target, clickMode: clickModeSchema }).refine(p => p.selector || p.element, '请设置元素选择器'));
 add('browser.fill', '输入文本', '网页操作', '填写输入框，支持 {{变量}}。', false, [...fields, text('value', '输入内容')], { selector: '', value: '' }, z.object({ ...target, value: z.string() }).refine(p => p.selector || p.element, '请设置元素选择器'));
 add('browser.text', '读取文本', '数据采集', '读取元素文本，将结果写入输出变量。', true, fields, { selector: '' }, targetSchema);
 add('browser.table', '读取表格', '数据采集', '提取表头和行内容。', true, fields, { selector: 'table' }, targetSchema);
@@ -55,6 +71,34 @@ add('browser.download', '点击并保存下载', '数据采集', '先监听下�
   [...fields, text('directory', '保存目录', false, '留空使用流程设置'), text('filename', '文件名称', false, '订单导出.csv')], { selector: '', directory: '', filename: '' }, z.object({ ...target, directory: downloadDirectory.optional(), filename: z.string().optional() }).refine(p => p.selector || p.element, '请设置元素选择器'));
 add('browser.response', '点击并采集响应', '数据采集', '在点击前监听响应，可按网址、请求方法和请求内容关联。', false,
   [...fields, text('urlIncludes', '响应网址包含'), text('method', '请求方法', false, 'GET'), text('requestIncludes', '请求内容包含', false)], { selector: '', urlIncludes: '' }, z.object({ ...target, urlIncludes: nonBlank, method: responseMethod.optional(), requestIncludes: z.string().optional() }).refine(p => p.selector || p.element, '请设置元素选择器'));
+add('browser.mouseClick', '鼠标点击', '网页操作', '在当前或指定网页的视口坐标点击。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  [page, number('x', '横坐标 X'), number('y', '纵坐标 Y'), { key: 'button', label: '鼠标按钮', type: 'select', required: true, options: [{ label: '左键', value: 'left' }, { label: '中键', value: 'middle' }, { label: '右键', value: 'right' }] }, number('clickCount', '点击次数'), number('delayMs', '按下间隔（毫秒）', false, '0')],
+  { pageId: '$current', x: 0, y: 0, button: 'left', clickCount: 1, delayMs: 0 },
+  z.object({ pageId: z.string().optional(), x: finiteNumber.min(0), y: finiteNumber.min(0), button: z.enum(['left', 'middle', 'right']).optional(), clickCount: z.number().int().min(1).max(10).optional(), delayMs: z.number().int().min(0).max(60_000).optional() }));
+add('browser.mouseMove', '鼠标移动', '网页操作', '把鼠标移动到当前或指定网页的视口坐标。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  [page, number('x', '横坐标 X'), number('y', '纵坐标 Y'), number('steps', '移动步数', false, '1')],
+  { pageId: '$current', x: 0, y: 0, steps: 1 },
+  z.object({ pageId: z.string().optional(), x: finiteNumber.min(0), y: finiteNumber.min(0), steps: z.number().int().min(1).max(1000).optional() }));
+add('browser.mouseWheel', '鼠标滚轮', '网页操作', '在当前或指定网页滚动鼠标滚轮。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  [page, number('deltaX', '横向滚动'), number('deltaY', '纵向滚动')],
+  { pageId: '$current', deltaX: 0, deltaY: 500 },
+  z.object({ pageId: z.string().optional(), deltaX: finiteNumber, deltaY: finiteNumber }));
+add('browser.keyPress', '按下键盘', '网页操作', '在当前或指定网页发送按键或快捷键，例如 ControlOrMeta+A。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  [page, text('key', '按键', true, 'ControlOrMeta+A')],
+  { pageId: '$current', key: 'Enter' },
+  z.object({ pageId: z.string().optional(), key: nonBlank }));
+add('browser.keyboardType', '键盘输入', '网页操作', '在当前或指定网页按键盘输入一段文本。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  [page, text('text', '输入文本'), number('delayMs', '字符间隔（毫秒）', false, '0')],
+  { pageId: '$current', text: '', delayMs: 0 },
+  z.object({ pageId: z.string().optional(), text: z.string(), delayMs: z.number().int().min(0).max(60_000).optional() }));
+add('file.xlsxRead', '读取 XLSX', '文件', '读取 .xlsx 工作表为 JSON 行列表，输出可直接交给“遍历列表”处理。', true,
+  [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), text('sheetName', '工作表名称', false, '留空读取第一个工作表')],
+  { path: '', sheetName: '' },
+  z.object({ path: xlsxFilePath, sheetName: sheetName.optional() }));
+add('file.xlsxWrite', '保存 XLSX', '文件', '把 JSON 对象列表保存为 .xlsx 工作表，并登记到运行产物。', false,
+  [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), json('rows', '行列表（JSON）'), text('sheetName', '工作表名称', false, 'Sheet1')],
+  { path: '', rows: [], sheetName: 'Sheet1' },
+  z.object({ path: xlsxFilePath, rows: z.array(z.record(z.string(), z.unknown())), sheetName: sheetName.optional() }));
 add('script.run', '运行脚本', '脚本', '在独立进程运行本地脚本，通过 rpa 访问本任务的浏览器和变量。', false,
   [{ key: 'language', label: '脚本语言', type: 'select', required: true, options: [{ label: 'Python', value: 'python' }, { label: 'JavaScript', value: 'javascript' }, { label: 'TypeScript', value: 'typescript' }] }, { key: 'code', label: '脚本代码', type: 'textarea', required: true }],
   { language: 'python', code: 'from rpa_sdk import rpa\nrpa.output("脚本执行完成")' }, z.object({ language: z.enum(['python', 'javascript', 'typescript']), code: z.string().min(1) }));

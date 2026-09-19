@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateActionParams } from '../packages/actions/src/index.js';
+import { actionDefinitions, validateActionParams } from '../packages/actions/src/index.js';
 
 describe('action parameter validation boundary', () => {
   it('打开网页包含启动配置，校验端口和打开方式并保留旧启动动作', () => {
@@ -68,6 +68,10 @@ describe('action parameter validation boundary', () => {
     expect(validateActionParams('browser.fill', { element, value: 'test' })).toEqual({ element, value: 'test' });
     expect(validateActionParams('browser.click', { selector: '#customer', framePath: [] })).toEqual({ selector: '#customer', framePath: [] });
     expect(validateActionParams('browser.click', { selector: '@customer' })).toEqual({ selector: '@customer' });
+    expect(validateActionParams('browser.click', { selector: '#customer', clickMode: 'dom' })).toEqual({ selector: '#customer', clickMode: 'dom' });
+    expect(validateActionParams('browser.click', { selector: '#customer', clickMode: '' })).toEqual({ selector: '#customer', clickMode: 'normal' });
+    expect(() => validateActionParams('browser.click', { selector: '#customer', clickMode: 'script' })).toThrow('参数错误');
+    expect(actionDefinitions.find(action => action.type === 'browser.click')?.fields.find(field => field.key === 'clickMode')?.required).toBe(true);
   });
 
   it('validates response filters and normalizes an optional HTTP method without changing request content', () => {
@@ -81,5 +85,31 @@ describe('action parameter validation boundary', () => {
     expect(() => validateActionParams('browser.response', { ...base, urlIncludes: '   ' })).toThrow('参数错误');
     expect(validateActionParams('browser.response', { ...base, method: ' get ', requestIncludes: 'customer=Alice' })).toEqual({ ...base, method: 'GET', requestIncludes: 'customer=Alice' });
     expect(validateActionParams('browser.response', { ...base, method: '', requestIncludes: '' })).toEqual({ ...base, method: '', requestIncludes: '' });
+  });
+
+  it('validates low-level mouse, keyboard, and XLSX file actions', () => {
+    expect(validateActionParams('browser.mouseClick', { pageId: '$current', x: 12, y: 34, button: 'right', clickCount: 2, delayMs: 15 }))
+      .toEqual({ pageId: '$current', x: 12, y: 34, button: 'right', clickCount: 2, delayMs: 15 });
+    expect(validateActionParams('browser.mouseMove', { x: 1, y: 2, steps: 3 })).toEqual({ x: 1, y: 2, steps: 3 });
+    expect(validateActionParams('browser.mouseWheel', { deltaX: -10, deltaY: 500 })).toEqual({ deltaX: -10, deltaY: 500 });
+    expect(validateActionParams('browser.keyPress', { key: 'ControlOrMeta+A' })).toEqual({ key: 'ControlOrMeta+A' });
+    expect(validateActionParams('browser.keyboardType', { text: '订单', delayMs: 0 })).toEqual({ text: '订单', delayMs: 0 });
+    for (const params of [{ x: -1, y: 0 }, { x: 0, y: Number.NaN }, { x: 0, y: 0, button: 'primary' }, { x: 0, y: 0, clickCount: 0 }]) {
+      expect(() => validateActionParams('browser.mouseClick', params)).toThrow('参数错误');
+    }
+    expect(() => validateActionParams('browser.keyPress', { key: '' })).toThrow('参数错误');
+    expect(() => validateActionParams('browser.keyboardType', { text: 'ok', delayMs: -1 })).toThrow('参数错误');
+
+    const file = process.platform === 'win32' ? 'C:\\RPA\\orders.xlsx' : '/tmp/orders.xlsx';
+    expect(validateActionParams('file.xlsxRead', { path: file, sheetName: '' })).toEqual({ path: file, sheetName: '' });
+    expect(validateActionParams('file.xlsxWrite', { path: file, rows: [{ id: 'A001', amount: 12 }], sheetName: '结果' }))
+      .toEqual({ path: file, rows: [{ id: 'A001', amount: 12 }], sheetName: '结果' });
+    for (const path of ['orders.xlsx', file.replace(/\.xlsx$/i, '.csv'), '', 42]) {
+      expect(() => validateActionParams('file.xlsxRead', { path })).toThrow('参数错误');
+    }
+    for (const sheetName of [' bad', 'bad ', 'a:b', 'x'.repeat(32)]) {
+      expect(() => validateActionParams('file.xlsxWrite', { path: file, rows: [], sheetName })).toThrow('参数错误');
+    }
+    expect(() => validateActionParams('file.xlsxWrite', { path: file, rows: [1] })).toThrow('参数错误');
   });
 });

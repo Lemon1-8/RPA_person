@@ -222,6 +222,7 @@ export class RunManager extends EventEmitter {
     if (!stepId) {
       const saved = (await this.listWorkflows()).find(w => w.workflowId === workflow.workflowId);
       if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
+      await this.closeRetainedBrowsersFor(workflow);
     }
     const sameWorkflow = [...this.jobs.values()].find(j => j.run.workflowId === workflow.workflowId && (!terminal(j.run.status) || j.child));
     if (sameWorkflow?.run.browserOpen && terminal(sameWorkflow.run.status)) throw new Error('同一流程的浏览器仍保留，请在运行记录中关闭该浏览器后再运行。');
@@ -237,6 +238,13 @@ export class RunManager extends EventEmitter {
     this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
     this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run), ...(stepId ? { data: { stepId, workflow } } : {}) });
     this.drain(); return structuredClone(run);
+  }
+  private async closeRetainedBrowsersFor(workflow: WorkflowDefinition): Promise<void> {
+    const profileId = workflow.settings.profileId ?? workflow.workflowId;
+    const retained = [...this.jobs.values()].filter(job => job.child && terminal(job.run.status) && job.run.browserOpen && (
+      job.run.workflowId === workflow.workflowId || (job.workflow.settings.profileId ?? job.workflow.workflowId) === profileId
+    ));
+    for (const job of retained) await this.applyControlRun(job.run.runId, 'closeBrowser');
   }
   private publish(event: RunEvent) {
     this.store.recordEvent(event).catch(error => this.emit('storage-error', error));

@@ -30,7 +30,7 @@ await browser.close();
 | `browser.closePage` | `closeMode?: page / all`, `pageId?` | 单页：`{ ok: true, pageId }`；全部：`{ ok: true, closedPageIds }` |
 | `browser.listPages` / `listPages()` | 无；不会启动浏览器 | `[{ pageId, title, url, current, openerPageId? }]` |
 | `browser.popupGuard` | `mode`: `off` / `smart` / `strict` | `{ mode }` |
-| `browser.click` | 元素参数 | `{ ok: true }` |
+| `browser.click` | 元素参数，可选 `clickMode: "normal" \| "force" \| "dom"` | `{ ok: true }` |
 | `browser.fill` | 元素参数、`value` | `{ ok: true }` |
 | `browser.text` | 元素参数 | 文本 |
 | `browser.table` | 表格元素参数 | `{ headers, rows }` |
@@ -69,7 +69,7 @@ await browser.close();
 
 `openMode: reuse` 在指定网页导航；显式别名尚不存在时创建并绑定该别名。`openMode: new` 始终创建新页，活页别名碰撞会在创建前报错。打开成功会更新流程当前目标；元素操作即使指定其他别名也不会改变当前目标。旧流程或脚本调用 `browser.switchPage` 时仍可更改当前目标。
 
-点击元素始终在当前或明确指定的目标网页执行，返回 `{ ok: true }`。点击产生的新标签页会自动登记为 `page-N`，但不改变流程的当前网页；后续可在动作的“目标网页”中选择该网页，或通过 `browser.listPages` 查询后把名称填入动作的 `pageId`。每条动作都独立使用所选目标，不改变后续动作的当前网页。`browser.switchPage` 仅保留旧流程与脚本兼容，工作台不再提供新增指令入口。旧流程中的 `waitForNewPage` 和 `newPageId` 在加载、保存和运行时清除，不再解析变量、等待新页或切换目标。关闭当前目标后，隐式网页操作会报错，需为动作选择有效目标或新建网页；指定已关闭的别名操作同样报错。
+点击元素始终在当前或明确指定的目标网页执行，返回 `{ ok: true }`。默认 `clickMode: "normal"` 使用 Playwright 标准点击，要求元素可见、稳定且可接收鼠标事件；`"force"` 跳过遮挡检查；`"dom"` 直接在目标元素上触发 DOM click，适合 XPath 能定位但自定义控件或样式导致鼠标点击无法命中的场景。点击产生的新标签页会自动登记为 `page-N`，但不改变流程的当前网页；后续可在动作的“目标网页”中选择该网页，或通过 `browser.listPages` 查询后把名称填入动作的 `pageId`。每条动作都独立使用所选目标，不改变后续动作的当前网页。`browser.switchPage` 仅保留旧流程与脚本兼容，工作台不再提供新增指令入口。旧流程中的 `waitForNewPage` 和 `newPageId` 在加载、保存和运行时清除，不再解析变量、等待新页或切换目标。关闭当前目标后，隐式网页操作会报错，需为动作选择有效目标或新建网页；指定已关闭的别名操作同样报错。
 
 `DesktopApi.listBrowserPages(runId)` → manager → worker → engine → `BrowserSession.listPages()` 只读查询现有会话，通过独立请求编号匹配应答，10 秒超时，进程退出或运行器关闭时清理等待。浏览器原生对象不经 IPC 传递，列表只包含 JSON 数据。页面标题、网址是展示信息，不作为隐式定位依据。
 
