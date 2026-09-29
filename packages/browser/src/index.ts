@@ -1,7 +1,9 @@
 import { mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
-import type { BrowserPageInfo } from '../../contracts/src/index.js';
+import type { BrowserPageInfo, BrowserPoint } from '../../contracts/src/index.js';
+import { coordinatePickerSource, disposeCoordinatePicker } from './coordinate-picker.js';
 import { assertDebugPortAvailable, BrowserSessionError, killNativeBrowser, launchNativeBrowser, resolveBrowser, type BrowserChannel, type NativeBrowser } from './native-browser.js';
 import { removeTemporaryDownloadHistory } from './download-history.js';
 import { PopupGuard, type PopupPolicy } from './popup-guard.js';
@@ -91,6 +93,7 @@ export class BrowserSession {
   private closed = false;
   private queue: Promise<unknown> = Promise.resolve();
   private lease?: ProfileLease;
+  private picking = false;
 
   constructor(private readonly options: BrowserSessionOptions) {}
 
@@ -134,6 +137,10 @@ export class BrowserSession {
       const id = this.pageIds.get(page);
       if (id && this.pages.get(id) === page) this.pages.delete(id);
       // Keep the current alias unchanged so the next implicit command reports its closure.
+      if (!this.options.headless && !this.pages.size) {
+        // --no-startup-window may keep Chrome alive after its final window closes.
+        queueMicrotask(() => { if (!this.pages.size) void this.close().catch(() => undefined); });
+      }
     });
     return pageId;
   };
@@ -185,17 +192,112 @@ export class BrowserSession {
       if (!this.context) throw new BrowserSessionError('BROWSER_START_FAILED', '浏览器未提供默认页面上下文');
       this.context.on('page', this.registerPage);
       for (const page of this.context.pages()) this.registerPage(page);
-      // Chrome is launched with about:blank, but CDP can connect before its page
-      // event arrives. Creating a fallback here would produce a duplicate tab.
-      if (!this.pages.size) await this.waitForStartupPage();
+      if (this.options.headless) {
+        // Headless Chrome starts with about:blank; its page event may arrive late.
+        if (!this.pages.size) await this.waitForStartupPage();
+      } else {
+        await this.createBackgroundPage(true);
+      }
       this.popupGuard = new PopupGuard(this.context, this.options.popupPolicy ?? 'smart');
       await this.popupGuard.start();
       this.connectionInfo = { pageId: 'main', browserChannel: installed.channel, debugPort: endpoint.port };
-      if (!this.options.headless) await this.setWindowState('minimized', {});
     } catch (error) {
       await this.stopNativeBrowser();
       await this.finishClose();
       throw error;
+    }
+  }
+
+  private async createBackgroundPage(initial = false): Promise<Page> {
+    const context = this.context!;
+    const session = await this.browser!.newBrowserCDPSession();
+    try {
+      const { targetId } = await bounded(session.send('Target.createTarget', {
+        url: 'about:blank', background: true,
+        ...(initial ? { newWindow: true, windowState: 'minimized' as const, width: 1280, height: 850 } : {}),
+      }), 15_000);
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (this.launchAbort.signal.aborted) throw new BrowserSessionError('BROWSER_START_CANCELLED', '浏览器操作已取消');
+        for (const page of context.pages()) {
+          if (page.isClosed()) continue;
+          const candidate = await context.newCDPSession(page);
+          try {
+            const { targetInfo } = await candidate.send('Target.getTargetInfo');
+            if (targetInfo.targetId !== targetId) continue;
+            if (initial) {
+              const { bounds } = await candidate.send('Browser.getWindowForTarget');
+              if (bounds.windowState !== 'minimized') throw new BrowserSessionError('BACKGROUND_START_FAILED', '浏览器未能在后台启动，请更新浏览器后重试');
+            }
+            this.registerPage(page);
+            return page;
+          } finally { await candidate.detach().catch(() => undefined); }
+        }
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      throw new BrowserSessionError('BROWSER_TIMEOUT', '等待后台网页创建超时');
+    } finally { await session.detach().catch(() => undefined); }
+  }
+
+  async pickPoint(pageId: string, signal: AbortSignal, timeoutMs = 120_000): Promise<BrowserPoint | null> {
+    if (!this.isOpen()) throw new Error('浏览器已关闭，请先打开网页');
+    if (this.options.headless) throw new Error('无头浏览器无法取点，请使用有界面浏览器');
+    if (this.picking) throw new Error('浏览器正在获取坐标');
+    if (signal.aborted) return null;
+    const page = this.page({ pageId });
+    this.picking = true;
+    const key = `__rpa_point_${randomUUID().replaceAll('-', '')}`;
+    const abort = AbortSignal.any([signal, this.launchAbort.signal]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel!: () => void;
+    let closed!: () => void;
+    let navigated!: (frame: import('playwright').Frame) => void;
+    let session: Awaited<ReturnType<BrowserContext['newCDPSession']>> | undefined;
+    let previous: { windowId: number; state: 'normal' | 'minimized' | 'maximized' | 'fullscreen' } | undefined;
+    let displayed = false;
+    let ended = false;
+    const stopped = new Promise<null>((resolve, reject) => {
+      cancel = () => {
+        ended = true;
+        if (this.launchAbort.signal.aborted) reject(new Error('取点期间浏览器已关闭'));
+        else resolve(null);
+      };
+      closed = () => { ended = true; reject(new Error('取点期间网页已关闭')); };
+      navigated = frame => { if (frame === page.mainFrame()) { ended = true; reject(new Error('取点期间网页已跳转，请重新获取坐标')); } };
+      abort.addEventListener('abort', cancel, { once: true });
+      page.on('close', closed);
+      page.on('framenavigated', navigated);
+      timer = setTimeout(cancel, timeoutMs);
+    });
+    void stopped.catch(() => undefined);
+    try {
+      await this.queue;
+      if (abort.aborted || ended) return await stopped;
+      session = await this.context!.newCDPSession(page);
+      const { windowId, bounds } = await session.send('Browser.getWindowForTarget');
+      previous = { windowId, state: bounds.windowState ?? 'normal' };
+      await page.evaluate(coordinatePickerSource(key));
+      if (abort.aborted || ended) return await stopped;
+      displayed = true;
+      await this.setWindowState('normal', { pageId });
+      if (abort.aborted || ended) return await stopped;
+      await page.bringToFront();
+      const point = await Promise.race([
+        page.evaluate(key => (window as unknown as Record<string, { result: Promise<{ x: number; y: number } | null> }>)[key].result, key),
+        stopped,
+      ]);
+      return point ? { pageId: this.pageIds.get(page)!, ...point } : null;
+    } finally {
+      clearTimeout(timer);
+      abort.removeEventListener('abort', cancel);
+      page.off('close', closed);
+      page.off('framenavigated', navigated);
+      if (!page.isClosed()) await bounded(page.evaluate(disposeCoordinatePicker, key), 2_000).catch(() => undefined);
+      if (displayed && previous && !this.closed) {
+        await bounded(session!.send('Browser.setWindowBounds', { windowId: previous.windowId, bounds: { windowState: previous.state } }), 2_000).catch(() => undefined);
+      }
+      await session?.detach().catch(() => undefined);
+      this.picking = false;
     }
   }
 
@@ -231,6 +333,7 @@ export class BrowserSession {
 
   async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     if (method === 'browser.listPages') return this.listPages();
+    if (this.picking) throw new Error('浏览器正在获取坐标，请先完成或取消取点');
     if (method === 'browser.closePage' && params.closeMode !== undefined && params.closeMode !== 'page' && params.closeMode !== 'all') {
       throw new Error('关闭范围必须是 page 或 all');
     }
@@ -262,7 +365,6 @@ export class BrowserSession {
 
   private async inputPage(params: Record<string, unknown>): Promise<Page> {
     const page = this.page(params);
-    await page.bringToFront();
     this.currentPageId = this.pageIds.get(page)!;
     return page;
   }
@@ -380,7 +482,9 @@ export class BrowserSession {
     }
     if (method === 'browser.keyPress') {
       const page = await this.inputPage(params);
-      await page.keyboard.press(requiredString(params, 'key'));
+      const holdMs = params.holdMs === undefined ? 70 + Math.round(Math.random() * 80) : requiredNumber(params, 'holdMs');
+      if (!Number.isInteger(holdMs) || holdMs < 20 || holdMs > 1000) throw new Error('按键时长必须是 20–1000 毫秒的整数');
+      await page.keyboard.press(requiredString(params, 'key'), { delay: holdMs });
       return { ok: true };
     }
     if (method === 'browser.keyboardType') {
@@ -391,7 +495,6 @@ export class BrowserSession {
     }
     if (method === 'browser.switchPage') {
       const page = this.page(params);
-      await page.bringToFront();
       this.currentPageId = this.pageIds.get(page)!;
       return { pageId: this.currentPageId, url: page.url() };
     }
@@ -420,7 +523,7 @@ export class BrowserSession {
           this.reservedPageIds.add(explicitAlias);
         }
         try {
-          page = await this.context!.newPage();
+          page = await this.createBackgroundPage();
           this.registerPage(page);
           if (explicitAlias) this.bindPage(page, explicitAlias);
         } finally { if (explicitAlias) this.reservedPageIds.delete(explicitAlias); }

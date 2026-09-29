@@ -10,8 +10,13 @@ const api: DesktopApi = {
   runWorkflow: workflow => ipcRenderer.invoke('rpa:run', workflow),
   runStep: (workflow, stepId, browserRunId) => ipcRenderer.invoke('rpa:run-step', workflow, stepId, browserRunId),
   listBrowserPages: runId => ipcRenderer.invoke('rpa:list-browser-pages', runId),
+  pickBrowserPoint: (runId, pageId, requestId) => ipcRenderer.invoke('rpa:pick-browser-point', runId, pageId, requestId),
+  cancelBrowserPoint: (runId, requestId) => ipcRenderer.invoke('rpa:cancel-browser-point', runId, requestId),
+  pickDesktopPoint: requestId => ipcRenderer.invoke('rpa:pick-desktop-point', requestId),
+  cancelDesktopPoint: requestId => ipcRenderer.invoke('rpa:cancel-desktop-point', requestId),
   controlRun: (runId, command) => ipcRenderer.invoke('rpa:control', runId, command),
   chooseDirectory: () => ipcRenderer.invoke('rpa:directory'),
+  chooseXlsxPath: (mode, currentPath) => ipcRenderer.invoke('rpa:xlsx-path', mode, currentPath),
   openPath: path => ipcRenderer.invoke('rpa:open-path', path),
   onEvent: listener => {
     const handler = (_event: Electron.IpcRendererEvent, event: RunEvent) => listener(event);

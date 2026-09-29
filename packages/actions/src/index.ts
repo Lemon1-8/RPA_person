@@ -18,6 +18,8 @@ const clickMode: ActionField = {
 };
 const nonBlank = z.string().refine(value => value.trim().length > 0, '文本不可为空');
 const finiteNumber = z.number().finite();
+const humanMouse = { humanLike: z.boolean().optional() };
+const typingOptions = { inputMode: z.enum(['type', 'paste']).optional(), simulateTypo: z.boolean().optional(), typoText: z.string().max(20).optional() };
 const clickModeSchema = z.union([z.enum(['normal', 'force', 'dom']), z.literal('').transform(() => 'normal')]).optional();
 const framePath = z.array(nonBlank);
 const elementRef = z.object({
@@ -71,34 +73,50 @@ add('browser.download', '点击并保存下载', '数据采集', '先监听下�
   [...fields, text('directory', '保存目录', false, '留空使用流程设置'), text('filename', '文件名称', false, '订单导出.csv')], { selector: '', directory: '', filename: '' }, z.object({ ...target, directory: downloadDirectory.optional(), filename: z.string().optional() }).refine(p => p.selector || p.element, '请设置元素选择器'));
 add('browser.response', '点击并采集响应', '数据采集', '在点击前监听响应，可按网址、请求方法和请求内容关联。', false,
   [...fields, text('urlIncludes', '响应网址包含'), text('method', '请求方法', false, 'GET'), text('requestIncludes', '请求内容包含', false)], { selector: '', urlIncludes: '' }, z.object({ ...target, urlIncludes: nonBlank, method: responseMethod.optional(), requestIncludes: z.string().optional() }).refine(p => p.selector || p.element, '请设置元素选择器'));
-add('browser.mouseClick', '鼠标点击', '网页操作', '在当前或指定网页的视口坐标点击。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+add('browser.mouseClick', '网页鼠标点击', '网页操作', '在目标网页的视口坐标点击，后台执行时不激活浏览器。可点击“获取坐标”，用 Ctrl + Alt + 左键单击选取位置。坐标以网页内容区域左上角为原点，页面滚动、缩放或布局变化后请重新确认位置。', false,
   [page, number('x', '横坐标 X'), number('y', '纵坐标 Y'), { key: 'button', label: '鼠标按钮', type: 'select', required: true, options: [{ label: '左键', value: 'left' }, { label: '中键', value: 'middle' }, { label: '右键', value: 'right' }] }, number('clickCount', '点击次数'), number('delayMs', '按下间隔（毫秒）', false, '0')],
   { pageId: '$current', x: 0, y: 0, button: 'left', clickCount: 1, delayMs: 0 },
   z.object({ pageId: z.string().optional(), x: finiteNumber.min(0), y: finiteNumber.min(0), button: z.enum(['left', 'middle', 'right']).optional(), clickCount: z.number().int().min(1).max(10).optional(), delayMs: z.number().int().min(0).max(60_000).optional() }));
-add('browser.mouseMove', '鼠标移动', '网页操作', '把鼠标移动到当前或指定网页的视口坐标。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+add('browser.mouseMove', '网页鼠标移动', '网页操作', '把网页内的鼠标移动到指定视口坐标，后台执行时不激活浏览器。可通过“获取坐标”选取位置。', false,
   [page, number('x', '横坐标 X'), number('y', '纵坐标 Y'), number('steps', '移动步数', false, '1')],
   { pageId: '$current', x: 0, y: 0, steps: 1 },
   z.object({ pageId: z.string().optional(), x: finiteNumber.min(0), y: finiteNumber.min(0), steps: z.number().int().min(1).max(1000).optional() }));
-add('browser.mouseWheel', '鼠标滚轮', '网页操作', '在当前或指定网页滚动鼠标滚轮。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+add('browser.mouseWheel', '网页鼠标滚轮', '网页操作', '在目标网页滚动鼠标滚轮，后台执行时不激活浏览器。', false,
   [page, number('deltaX', '横向滚动'), number('deltaY', '纵向滚动')],
   { pageId: '$current', deltaX: 0, deltaY: 500 },
   z.object({ pageId: z.string().optional(), deltaX: finiteNumber, deltaY: finiteNumber }));
-add('browser.keyPress', '按下键盘', '网页操作', '在当前或指定网页发送按键或快捷键，例如 ControlOrMeta+A。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
-  [page, text('key', '按键', true, 'ControlOrMeta+A')],
+add('browser.keyPress', '网页按下键盘', '网页操作', '向目标网页中获得焦点的控件发送按键或快捷键，例如 Enter、ControlOrMeta+A。按下与松开之间默认保留短暂时长；后台执行时不激活浏览器。需要前台真实键盘时，可显示浏览器并使用电脑“按下键盘”指令；网站仍可能要求安全验证。', false,
+  [page, text('key', '按键', true, 'ControlOrMeta+A'), number('holdMs', '按键时长（毫秒）', false, '留空自动变化')],
   { pageId: '$current', key: 'Enter' },
-  z.object({ pageId: z.string().optional(), key: nonBlank }));
-add('browser.keyboardType', '键盘输入', '网页操作', '在当前或指定网页按键盘输入一段文本。运行时会占用自动化浏览器焦点，请不要手动操作同一窗口。', false,
+  z.object({ pageId: z.string().optional(), key: nonBlank, holdMs: z.number().int().min(20).max(1000).optional() }));
+add('browser.keyboardType', '网页键盘输入', '网页操作', '向目标网页中获得焦点的控件输入文本。请先用点击指令选中输入位置；后台执行时不激活浏览器，也不会把文字发送给其他应用。', false,
   [page, text('text', '输入文本'), number('delayMs', '字符间隔（毫秒）', false, '0')],
   { pageId: '$current', text: '', delayMs: 0 },
   z.object({ pageId: z.string().optional(), text: z.string(), delayMs: z.number().int().min(0).max(60_000).optional() }));
+add('desktop.mouseClick', '鼠标点击', '键盘和鼠标操作', '点击电脑屏幕坐标；会移动并占用真实鼠标，作用于当前前台软件或网页。坐标以整个屏幕左上角为原点。', false,
+  [number('x', '屏幕横坐标 X'), number('y', '屏幕纵坐标 Y'), { key: 'button', label: '鼠标按钮', type: 'select', required: true, options: [{ label: '左键', value: 'left' }, { label: '中键', value: 'middle' }, { label: '右键', value: 'right' }] }, number('clickCount', '点击次数'), { key: 'humanLike', label: '真人轨迹（弧形移动）', type: 'boolean' }],
+  { x: 0, y: 0, button: 'left', clickCount: 1, humanLike: true },
+  z.object({ x: z.number().int(), y: z.number().int(), button: z.enum(['left', 'middle', 'right']), clickCount: z.number().int().min(1).max(10), ...humanMouse }));
+add('desktop.mouseMove', '鼠标移动', '键盘和鼠标操作', '移动电脑真实鼠标到屏幕坐标，可用于任意前台软件或网页。', false,
+  [number('x', '屏幕横坐标 X'), number('y', '屏幕纵坐标 Y'), { key: 'humanLike', label: '真人轨迹（弧形移动）', type: 'boolean' }],
+  { x: 0, y: 0, humanLike: true }, z.object({ x: z.number().int(), y: z.number().int(), ...humanMouse }));
+add('desktop.mouseWheel', '鼠标滚轮', '键盘和鼠标操作', '在真实鼠标当前位置滚动前台窗口；正数向上，负数向下，120 为一格。', false,
+  [number('deltaX', '横向滚动'), number('deltaY', '纵向滚动')], { deltaX: 0, deltaY: -120 },
+  z.object({ deltaX: z.number().int(), deltaY: z.number().int() }));
+add('desktop.keyPress', '按下键盘', '键盘和鼠标操作', '向当前前台软件发送按键或快捷键，例如 Control+A、Enter。会占用真实键盘。', false,
+  [text('key', '按键', true, 'Control+A')], { key: 'Enter' }, z.object({ key: nonBlank }));
+add('desktop.keyboardType', '键盘输入', '键盘和鼠标操作', '向当前前台软件中获得焦点的位置输入文字；可逐字输入或通过剪贴板粘贴。粘贴会覆盖系统剪贴板当前内容。可先输入错字、删除后再输入正确文本。请先选中输入位置。', false,
+  [text('text', '输入文本'), { key: 'inputMode', label: '输入方式', type: 'select', required: true, defaultValue: 'type', options: [{ label: '逐字输入', value: 'type' }, { label: '剪贴板粘贴', value: 'paste' }] }, number('delayMs', '字符间隔（毫秒）', false, '0'), { key: 'simulateTypo', label: '先输错字并删除', type: 'boolean' }, { ...text('typoText', '先输入的错字', false, '错'), defaultValue: '错' }],
+  { text: '', delayMs: 0, inputMode: 'type', simulateTypo: false, typoText: '错' },
+  z.object({ text: z.string(), delayMs: z.number().int().min(0).max(1000).optional(), ...typingOptions }));
 add('file.xlsxRead', '读取 XLSX', '文件', '读取 .xlsx 工作表为 JSON 行列表，输出可直接交给“遍历列表”处理。', true,
   [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), text('sheetName', '工作表名称', false, '留空读取第一个工作表')],
   { path: '', sheetName: '' },
   z.object({ path: xlsxFilePath, sheetName: sheetName.optional() }));
-add('file.xlsxWrite', '保存 XLSX', '文件', '把 JSON 对象列表保存为 .xlsx 工作表，并登记到运行产物。', false,
+add('file.xlsxWrite', '保存 XLSX', '文件', '把 JSON 对象列表或单行对象保存为 .xlsx 工作表，并登记到运行产物。', false,
   [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), json('rows', '行列表（JSON）'), text('sheetName', '工作表名称', false, 'Sheet1')],
   { path: '', rows: [], sheetName: 'Sheet1' },
-  z.object({ path: xlsxFilePath, rows: z.array(z.record(z.string(), z.unknown())), sheetName: sheetName.optional() }));
+  z.object({ path: xlsxFilePath, rows: z.union([z.array(z.record(z.string(), z.unknown())), z.record(z.string(), z.unknown()).transform(row => [row])]), sheetName: sheetName.optional() }));
 add('script.run', '运行脚本', '脚本', '在独立进程运行本地脚本，通过 rpa 访问本任务的浏览器和变量。', false,
   [{ key: 'language', label: '脚本语言', type: 'select', required: true, options: [{ label: 'Python', value: 'python' }, { label: 'JavaScript', value: 'javascript' }, { label: 'TypeScript', value: 'typescript' }] }, { key: 'code', label: '脚本代码', type: 'textarea', required: true }],
   { language: 'python', code: 'from rpa_sdk import rpa\nrpa.output("脚本执行完成")' }, z.object({ language: z.enum(['python', 'javascript', 'typescript']), code: z.string().min(1) }));
@@ -120,6 +138,12 @@ add('control.if', '条件分支', '流程控制', '满足条件执行子步骤�
   { left: true, operator: 'truthy', right: null }, z.object({ left: z.unknown(), operator: z.enum(['equals', 'notEquals', 'truthy']), right: z.unknown().optional() }));
 add('control.forEach', '遍历列表', '流程控制', '逐项执行子步骤，循环结束恢复同名变量。最多 10000 项。', false,
   [json('items', '列表或变量引用（JSON）'), text('itemVariable', '当前项变量')], { items: [], itemVariable: 'item' }, z.object({ items: z.array(z.unknown()).max(10_000), itemVariable: z.string().min(1) }));
+add('control.forEachXlsx', '遍历 XLSX', '文件', '逐行遍历 XLSX；当前行是数组，可用 {{row}}[0]、{{row}}[1] 读取该行的单元格。首行不参与循环，最多 10000 行。', false,
+  [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), text('sheetName', '工作表名称', false, '留空读取第一个工作表'), text('itemVariable', '当前项变量')],
+  { path: '', sheetName: '', itemVariable: 'row', valueMode: 'array', columnIndex: 0 },
+  z.object({ path: xlsxFilePath, sheetName: sheetName.optional(), itemVariable: nonBlank,
+    valueMode: z.enum(['row', 'array', 'column']).optional(), columnIndex: z.number().int().min(0).max(16_383).optional() })
+    .refine(params => params.valueMode !== 'column' || params.columnIndex !== undefined, { path: ['columnIndex'], message: '单列值模式请选择列下标' }));
 add('control.tryCatch', 'Try / Catch', '流程控制', '先执行 Try 内的指令；成功时跳过 Catch，失败时跳过 Try 剩余指令并执行 Catch，处理完成后继续后续步骤。\n\nCatch 内可通过 {{error.message}}、{{error.stepId}}、{{error.stepName}} 和 {{error.actionType}} 读取异常。异常变量名可修改，仅在 Catch 内有效，结束后恢复原来的同名变量。\n\nTry 内的指令完成配置的重试后才进入 Catch，不会先按“失败后暂停”等待。Catch 自身失败会继续向外抛出；用户停止、本容器或祖先容器的总超时不能在本 Catch 中处理。', false,
   [text('errorVariable', '异常变量', true, 'error')], { errorVariable: 'error' }, z.object({
     errorVariable: z.string().min(1, '请填写异常变量名').refine(value => value.trim() === value && !/[{}]/.test(value), '变量名不能包含首尾空格或花括号')
@@ -157,8 +181,8 @@ export function validateActions(workflow: WorkflowDefinition) {
       const action = getAction(step.actionType);
       if (!action.metadata.safeToRetry && (step.retry?.maxAttempts ?? 1) > 1) throw new Error(`“${step.name}”有外部效果，当前版本不允许自动重试。`);
       if (!action.metadata.safeToRetry && step.onError === 'pause') throw new Error(`“${step.name}”有外部效果，当前版本仅支持读取和校验动作失败后暂停。`);
-      if (!['control.if', 'control.forEach', 'control.tryCatch'].includes(step.actionType) && ((step.children?.length ?? 0) || (step.elseSteps?.length ?? 0))) throw new Error(`“${step.name}”不是容器动作，不能包含子步骤。`);
-      if (step.actionType === 'control.forEach' && step.elseSteps?.length) throw new Error('循环不支持否则分支');
+      if (!['control.if', 'control.forEach', 'control.forEachXlsx', 'control.tryCatch'].includes(step.actionType) && ((step.children?.length ?? 0) || (step.elseSteps?.length ?? 0))) throw new Error(`“${step.name}”不是容器动作，不能包含子步骤。`);
+      if (['control.forEach', 'control.forEachXlsx'].includes(step.actionType) && step.elseSteps?.length) throw new Error('循环不支持否则分支');
       visit(step.children ?? []); visit(step.elseSteps ?? []);
     }
   }; visit(workflow.steps);

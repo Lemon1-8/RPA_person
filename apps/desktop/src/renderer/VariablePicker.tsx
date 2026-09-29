@@ -64,7 +64,7 @@ export function VariablePicker({ workflow, stepId, disabled, label = "插入变�
             ))}
             {!filtered.length && <p className="variable-picker-empty">{query ? "没有匹配的变量" : "当前步骤还没有可用变量"}</p>}
           </div>
-          <p className="variable-picker-hint">完整引用保留原始类型；可用 .属性名 或 .0 读取对象或列表。</p>
+          <p className="variable-picker-hint">完整引用保留原始类型；对象可用 .属性名，行数组可用 {`{{row}}[0]`} 取第 1 个值。</p>
           {options.some(option => option.conditional) && <p className="variable-picker-hint">标记值取决于前序分支、循环或列表项结构，请先确保它已产生。</p>}
         </div>
       )}

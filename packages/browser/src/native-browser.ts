@@ -60,8 +60,10 @@ export function launchNativeBrowser(executablePath: string, profileDir: string, 
   const args = [
     `--user-data-dir=${profileDir}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-popup-blocking',
-    '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--window-size=1280,850',
-    ...(headless ? ['--headless=new'] : ['--start-minimized']), 'about:blank',
+    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--window-size=1280,850',
+    // Edge's regular startup can show a delayed auxiliary window despite a minimized target.
+    ...(executablePath.toLowerCase().endsWith('msedge.exe') ? ['--edge-skip-compat-layer-relaunch', '--enable-automation'] : []),
+    ...(headless ? ['--headless=new', 'about:blank'] : ['--no-startup-window']),
   ];
   const child = spawn(executablePath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
   const exited = new Promise<void>(resolve => { child.once('exit', () => resolve()); child.once('error', () => resolve()); });

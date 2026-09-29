@@ -4,6 +4,26 @@
 
 ## 接口
 
+### 后台执行与坐标取点
+
+工作台将 `browser.mouseClick`、`browser.mouseMove`、`browser.mouseWheel`、`browser.keyPress` 和 `browser.keyboardType` 保留在“网页操作”，通过浏览器协议作用于目标网页，旧流程动作名称和参数保持兼容。“键盘和鼠标操作”提供新的 `desktop.*` 指令，直接操作 Windows 前台窗口，可用于任意软件或网页，并会占用真实鼠标和键盘。屏幕坐标与网页视口坐标不同；“输入文本”仍属于网页操作，按选择器填写输入框。
+
+有界面浏览器先以无初始窗口方式启动，再通过 CDP 创建最小化后台窗口。普通鼠标、键盘动作和 `browser.switchPage` 不激活原生窗口；它们通过浏览器协议操作目标网页。键盘输入依赖该网页内的控件焦点，可先点击输入框。`browser.show` 及编辑器主动取点属于用户请求的显示操作。最后一个有界面窗口关闭后，会主动结束后台进程并释放配置目录。
+
+Edge 使用自动化启动参数，避免在最小化页面之外延迟显示原生辅助窗口；仅将主页面最小化不足以防止该启动窗口抢占前台。
+
+保留网站的业务新标签页／新窗口行为：链接或脚本打开这些窗口时，Chrome／Edge 自身仍可能切到前台并打断其他应用（如微信）的输入。本次后台执行改动不会额外拦截业务新窗口；已有弹窗屏蔽策略仍按其设置生效。
+
+“鼠标点击”和“鼠标移动”提供“获取坐标”：先单步打开网页，保留有界面浏览器并结束任务，再选定已打开的网页。取点时主动显示网页，移动鼠标查看坐标，按 **Ctrl + Alt + 左键单击** 回填 X/Y。普通点击被拦截，可滚动主页面；取点不触发底层链接、按钮或 iframe。坐标为主页面视口 CSS 像素，原点不包含地址栏，与系统屏幕坐标无关。滚动、缩放、窗口大小或页面布局变化后，应重新确认坐标。
+
+Esc、取消按钮或两分钟超时会退出且保留原坐标；导航、页面关闭或进程断开也会清理取点状态。完成后恢复原窗口状态。取点期间禁止运行指令或重新启动流程；列表查询仍可用。无头会话、运行/暂停中的任务以及未解析的变量网页目标不能取点。
+
+编辑器通过 `DesktopApi.pickBrowserPoint(runId, pageId, requestId)` / `cancelBrowserPoint(runId, requestId)` 调用，成功返回 `{ pageId, x, y }`，取消返回 `null`。请求标识用于取消与过期结果隔离。这是编辑辅助接口，不是流程动作，也不改变流程的当前网页。
+
+验证：`tests/browser-background.test.ts` 使用 Windows 前台切换事件检查 Chrome／Edge 的启动、键鼠输入和后台新建标签页，并确认业务弹出页仍会登记；`tests/coordinate-picker*.test.ts` 覆盖取点、iframe、滚动、取消、超时、导航、关闭及真实 worker 通信；`scripts/smoke-coordinate-picker.mjs` 验证桌面分类、回填、取消保留和执行闭环。
+
+### 浏览器会话
+
 ```ts
 const browser = new BrowserSession({
   profileDir: 'C:/RPA/profiles/account-a',

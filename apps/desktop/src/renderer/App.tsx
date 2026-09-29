@@ -60,6 +60,11 @@ import { ControlFlowFields, getControlStepErrors } from "./ControlFlowFields.js"
 import { NoteFields, getNoteStepErrors } from "./NoteFields.js";
 import { VariablePicker } from "./VariablePicker.js";
 import { BrowserCloseFields, BrowserOpenFields, PageTargetField } from "./BrowserFields.js";
+import { CoordinatePicker } from "./CoordinatePicker.js";
+import { DesktopCoordinatePicker } from "./DesktopCoordinatePicker.js";
+import { KeyPressField } from "./KeyPressField.js";
+import { XlsxPathField } from "./XlsxPathField.js";
+import { LogViewer } from "./LogViewer.js";
 import { getBrowserPageErrors, getInheritedPageTarget } from "./page-options.js";
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
@@ -83,6 +88,11 @@ const statusLabels: Record<string, string> = {
   skipped: "已跳过",
 };
 type BottomTab = "logs" | "variables" | "artifacts" | "runs";
+
+function clampConsoleHeight(height: number): number {
+  const minimum = window.innerWidth <= 740 ? 160 : 112;
+  return Math.min(Math.max(height, minimum), Math.max(minimum, window.innerHeight - 360));
+}
 type InspectorTab = "step" | "settings" | "inputs" | "elements";
 type StepLocation = {
   step: StepDefinition;
@@ -98,21 +108,6 @@ const formatTime = (value: string) =>
   new Date(value).toLocaleTimeString("zh-CN", { hour12: false });
 const toText = (value: unknown) =>
   typeof value === "string" ? value : JSON.stringify(value);
-const eventFile = (event: RunEvent) =>
-  event.data &&
-  typeof event.data === "object" &&
-  "path" in event.data &&
-  typeof event.data.path === "string"
-    ? event.data.path
-    : undefined;
-const eventStepNumber = (event: RunEvent) =>
-  event.data &&
-  typeof event.data === "object" &&
-  "stepNumber" in event.data &&
-  typeof event.data.stepNumber === "number"
-    ? event.data.stepNumber
-    : undefined;
-
 function flatten(
   steps: StepDefinition[],
   depth = 0,
@@ -179,9 +174,9 @@ function ActionIcon({ type, size = 17 }: { type: string; size?: number }) {
   if (type === "core.note") return <StickyNote size={size} />;
   if (type === "control.tryCatch") return <ShieldCheck size={size} />;
   if (type === "browser.popupGuard") return <ShieldCheck size={size} />;
-  if (type.startsWith("file.xlsx")) return <FileSpreadsheet size={size} />;
-  if (type.startsWith("browser.key") || type === "browser.keyboardType") return <Keyboard size={size} />;
-  if (type.startsWith("browser.mouse")) return <MousePointerClick size={size} />;
+  if (type.startsWith("file.xlsx") || type === "control.forEachXlsx") return <FileSpreadsheet size={size} />;
+  if (type.startsWith("browser.key") || type === "browser.keyboardType" || type.startsWith("desktop.key")) return <Keyboard size={size} />;
+  if (type.startsWith("browser.mouse") || type.startsWith("desktop.mouse")) return <MousePointerClick size={size} />;
   if (/script|python|javascript|typescript/.test(type))
     return <Code2 size={size} />;
   if (/download/.test(type)) return <Download size={size} />;
@@ -334,6 +329,10 @@ export function App() {
   const [query, setQuery] = useState("");
   const [inspector, setInspector] = useState<InspectorTab>("step");
   const [bottomTab, setBottomTab] = useState<BottomTab>("logs");
+  const [consoleHeight, setConsoleHeight] = useState<number | null>(() => {
+    const saved = localStorage.getItem("rpa.consoleHeight");
+    return saved !== null && Number.isFinite(Number(saved)) ? clampConsoleHeight(Number(saved)) : null;
+  });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -350,13 +349,31 @@ export function App() {
     "after" | "children" | "elseSteps"
   >("after");
   const searchRef = useRef<HTMLInputElement>(null);
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const consoleRef = useRef<HTMLElement>(null);
+  const consoleResize = useRef<{ pointerId: number; y: number; height: number } | null>(null);
+  useEffect(() => {
+    if (consoleHeight !== null) localStorage.setItem("rpa.consoleHeight", String(consoleHeight));
+  }, [consoleHeight]);
+  useEffect(() => {
+    const onResize = () => setConsoleHeight(height => height === null ? null : clampConsoleHeight(height));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const workflow = workflows.find((item) => item.workflowId === workflowId);
   const steps = useMemo(
     () => flatten(workflow?.steps ?? []),
     [workflow?.steps],
   );
+  const stepNames = useMemo(() => new Map(steps.map(item => [item.step.stepId, item.step.name])), [steps]);
   const selected = steps.find((item) => item.step.stepId === selectedId);
+  const selectedXlsxLoop = (() => {
+    let current = selected;
+    while (current?.parentId) {
+      const parent = steps.find(item => item.step.stepId === current!.parentId);
+      if (parent?.step.actionType === "control.forEachXlsx") return parent.step;
+      current = parent;
+    }
+  })();
   const isCommented = (id: string) => {
     let current = steps.find(item => item.step.stepId === id);
     while (current) {
@@ -378,6 +395,7 @@ export function App() {
   const selectedAction = actions.find(
     (action) => action.type === selected?.step.actionType,
   );
+  const desktopInputSelected = !!selected?.step.actionType.startsWith("desktop.");
   const availableActions = useMemo(() => actions.filter(action => ![
     "browser.start",
     "browser.switchPage",
@@ -414,10 +432,16 @@ export function App() {
   const pageBrowserId = stepBrowserTarget === "new" ? undefined : runs.find(item =>
     item.workflowId === workflowId && item.browserOpen && (stepBrowserTarget === "auto" || item.runId === stepBrowserTarget))?.runId;
   const browserPages = pageInventory.runId === pageBrowserId ? pageInventory.pages : [];
-  const cannotRunStep = !api || !workflow || !!busy || invalid || workflowRunning || missingStepBrowser;
-  const visibleEvents = events.filter(
-    (event) => event.runId === runId && event.message && (event.type !== "step" || ["succeeded", "failed"].includes(event.status ?? "")),
-  );
+  const coordinateTarget = String(selected?.step.params.pageId ?? "$current").trim() || "$current";
+  const coordinatePage = coordinateTarget === "$current" ? browserPages.find(page => page.current) : browserPages.find(page => page.pageId === coordinateTarget);
+  const coordinateUnavailable = !api ? "桌面运行服务未连接。"
+    : workflowRunning ? "任务结束后才能获取坐标；可先单步打开目标网页。"
+    : !pageBrowserId ? "请先单独运行“打开网页”，并选择保留的浏览器。"
+    : workflow?.settings.headless ? "无头浏览器无法取点，请使用有界面浏览器。"
+    : coordinateTarget.includes("{{") ? "请先将目标网页改为已打开的具体网页。"
+    : !coordinatePage ? "目标网页尚未打开或已关闭，请先打开它。"
+    : busy ? "请等待当前操作完成。" : undefined;
+  const cannotRunStep = !api || !workflow || !!busy || invalid || workflowRunning || (missingStepBrowser && !desktopInputSelected);
   const stepEvents = events.filter(
     (event) => event.runId === runId && event.type === "step",
   );
@@ -532,9 +556,6 @@ export function App() {
     // Keep those entries while discarding drafts from the previous inspector.
     setInvalidFields(previous => Object.fromEntries(Object.entries(previous).filter(([key]) => key.startsWith(validationScope))));
   }, [selectedId, workflowId, inspector, view]);
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ block: "nearest" });
-  }, [visibleEvents.length, bottomTab]);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -667,7 +688,7 @@ export function App() {
   function addAction(action: ActionDefinition, targetId = selectedId, branch = insertBranch) {
     if (!workflow || busy || !availableActions.some(item => item.type === action.type)) return;
     const parent = steps.find(item => item.step.stepId === targetId)?.step;
-    if (branch !== "after" && (!parent || !["control.if", "control.forEach", "control.tryCatch"].includes(parent.actionType)
+    if (branch !== "after" && (!parent || !["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch"].includes(parent.actionType)
       || (branch === "elseSteps" && !["control.if", "control.tryCatch"].includes(parent.actionType)))) return;
     const step: StepDefinition = {
       stepId: uuid(),
@@ -676,7 +697,7 @@ export function App() {
       params: clone(action.defaults),
       ...(["core.wait", "core.note"].includes(action.type) ? {} : { timeoutMs: 30000 }),
       ...(action.type === "core.note" ? {} : { onError: "fail" as const }),
-      ...(["control.if", "control.forEach", "control.tryCatch"].includes(action.type) ? { children: [] } : {}),
+      ...(["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch"].includes(action.type) ? { children: [] } : {}),
       ...(["control.if", "control.tryCatch"].includes(action.type) ? { elseSteps: [] } : {}),
     };
     updateWorkflow((value) => ({
@@ -1162,6 +1183,9 @@ export function App() {
               actionGroups.map(([category, items]) => (
                 <section key={category} className="action-group">
                   <h3>{category}</h3>
+                  {category === "键盘和鼠标操作" && <p className="action-group-notice" role="note">
+                    会抢夺鼠标和键盘，操作当前前台窗口；可用于电脑中的任意软件或网页。运行时请勿同时操作电脑。
+                  </p>}
                   {items.map((action) => (
                     <button
                       type="button"
@@ -1215,7 +1239,7 @@ export function App() {
             <p>备注用于说明流程，运行时会直接跳过，不操作浏览器，也不会产生输出变量。</p>
           </div> : <div className="single-step-toolbar" aria-label="单条运行">
             <div className="single-step-controls">
-              <label htmlFor="step-browser-target"><Globe size={15} />目标浏览器</label>
+              {!desktopInputSelected && <><label htmlFor="step-browser-target"><Globe size={15} />目标浏览器</label>
               <select
                 id="step-browser-target"
                 aria-label="单条运行的目标浏览器"
@@ -1229,7 +1253,7 @@ export function App() {
                   {formatTime(item.startedAt)} · {item.runId.slice(0, 8)}
                 </option>)}
                 {missingStepBrowser && <option value={stepBrowserTarget}>所选浏览器不可用</option>}
-              </select>
+              </select></>}
               <button
                 className="single-step-run"
                 disabled={cannotRunStep || !selected || selectedCommented}
@@ -1242,11 +1266,13 @@ export function App() {
             <p role={missingStepBrowser ? "status" : undefined}>
               {selectedCommented ? "此指令已注释或位于已注释的容器中，取消注释后可运行。"
                 : workflowRunning ? "当前流程正在执行，请等待完成或停止后再单条运行。"
-                : missingStepBrowser ? "所选浏览器已关闭或不可用，请重新选择目标。"
+                : missingStepBrowser && !desktopInputSelected ? "所选浏览器已关闭或不可用，请重新选择目标。"
                 : selectedCatch ? `此指令位于「${selectedCatch.name}」的 Catch 内；单独运行不会生成异常变量，引用异常信息时请运行所在的 Try / Catch。`
                 : selected?.step.actionType === "core.wait" ? "等待无需浏览器；等待结束后继续下一步，可随时停止运行。"
                 : selected?.step.actionType === "control.tryCatch" ? "运行整个 Try / Catch；Try 出错后执行 Catch，异常变量仅在 Catch 执行期间可用。"
                 : selected?.step.actionType === "core.log" ? "使用当前参数；打印日志无需浏览器。引用循环当前项时，请运行整个循环。"
+                : desktopInputSelected ? "操作电脑当前前台窗口，会占用真实鼠标和键盘；运行时请勿同时操作电脑。"
+                : selected?.step.actionType === "control.forEachXlsx" ? "运行整个 XLSX 循环；每行执行一次循环体，无需先打开浏览器。"
                 : "使用当前参数；网页指令先运行「打开网页」，后续复用浏览器。容器会执行其子步骤。"}
             </p>
             {pageBrowserId && <p className="browser-page-status" role="status">
@@ -1267,8 +1293,8 @@ export function App() {
                 }
               >
                 <option value="after">插入到选中步骤之后</option>
-                {["control.if", "control.forEach", "control.tryCatch"].includes(selected.step.actionType) && (
-                  <option value="children">{selected.step.actionType === "control.forEach" ? "添加到循环体" : selected.step.actionType === "control.tryCatch" ? "添加到 Try 执行区" : "添加到满足条件"}</option>
+                {["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch"].includes(selected.step.actionType) && (
+                  <option value="children">{["control.forEach", "control.forEachXlsx"].includes(selected.step.actionType) ? "添加到循环体" : selected.step.actionType === "control.tryCatch" ? "添加到 Try 执行区" : "添加到满足条件"}</option>
                 )}
                 {["control.if", "control.tryCatch"].includes(selected.step.actionType) && (
                   <option value="elseSteps">{selected.step.actionType === "control.tryCatch" ? "添加到 Catch 异常区" : "添加到否则分支"}</option>
@@ -1385,6 +1411,9 @@ export function App() {
                     {selectedAction?.description ??
                       "此动作没有可用的参数定义，可在下方编辑原始 JSON 参数。"}
                   </p>
+                  {selectedAction?.category === "键盘和鼠标操作" && <p className="help-text desktop-input-notice" role="note">
+                    此指令会抢夺真实鼠标和键盘，作用于当前前台窗口；可操作任意软件或网页。运行时请勿同时操作电脑。
+                  </p>}
                   <label className="field">
                     <span>步骤名称</span>
                     <input
@@ -1398,9 +1427,10 @@ export function App() {
                       }
                     />
                   </label>
-                  {workflow && ["control.if", "control.forEach", "control.tryCatch", "core.wait"].includes(selected.step.actionType) ? (
+                  {workflow && ["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch", "core.wait"].includes(selected.step.actionType) ? (
                     <ControlFlowFields
                       key={selectedId}
+                      api={api}
                       workflow={workflow}
                       step={selected.step}
                       disabled={!!busy}
@@ -1416,11 +1446,48 @@ export function App() {
                     <BrowserCloseFields workflow={workflow} step={selected.step} pages={browserPages} disabled={!!busy}
                       onChange={params => updateSelected(step => ({ ...step, params }))} />
                   ) : selectedAction?.fields.map((field) => (
-                    <div key={`${selectedId}-${field.key}`}>
-                      {field.key === "pageId" && workflow ? (
+                    (["browser.mouseClick", "browser.mouseMove", "desktop.mouseClick", "desktop.mouseMove"].includes(selected.step.actionType) && field.key === "y")
+                      || (selected.step.actionType === "desktop.keyboardType" && field.key === "typoText" && !selected.step.params.simulateTypo)
+                      || (selected.step.actionType === "desktop.keyboardType" && field.key === "delayMs" && selected.step.params.inputMode === "paste")
+                      ? null : (
+                    <div key={`${selectedId}-${field.key}`} className={field.key === "x" && ["browser.mouseClick", "browser.mouseMove", "desktop.mouseClick", "desktop.mouseMove"].includes(selected.step.actionType) ? "coordinate-input-block" : undefined}>
+                      {field.key === "x" && ["browser.mouseClick", "browser.mouseMove"].includes(selected.step.actionType) && <CoordinatePicker
+                        key={`${workflowId}:${selectedId}:${pageBrowserId}:${coordinatePage?.pageId}`}
+                        api={api} runId={pageBrowserId} pageId={coordinatePage?.pageId} disabledReason={coordinateUnavailable}
+                        onBusy={picking => setBusy(picking ? "coordinate-pick" : "")}
+                        onPoint={point => setWorkflows(previous => previous.map(item => item.workflowId === workflowId ? {
+                          ...item,
+                          steps: replaceStep(item.steps, selectedId, step => ({ ...step, params: { ...step.params, x: point.x, y: point.y } })),
+                        } : item))}
+                      />}
+                      {field.key === "x" && ["desktop.mouseClick", "desktop.mouseMove"].includes(selected.step.actionType) && <DesktopCoordinatePicker
+                        key={`${workflowId}:${selectedId}`}
+                        api={api} disabled={!!busy || workflowRunning}
+                        onBusy={picking => setBusy(picking ? "coordinate-pick" : "")}
+                        onPoint={point => setWorkflows(previous => previous.map(item => item.workflowId === workflowId ? {
+                          ...item,
+                          steps: replaceStep(item.steps, selectedId, step => ({ ...step, params: { ...step.params, x: point.x, y: point.y } })),
+                        } : item))}
+                      />}
+                      {field.key === "x" && ["browser.mouseClick", "browser.mouseMove", "desktop.mouseClick", "desktop.mouseMove"].includes(selected.step.actionType) ? (
+                        <div className="coordinate-fields" role="group" aria-label="鼠标目标坐标">
+                          {(["x", "y"] as const).map(axis => <label key={axis} className="field">
+                            <span>{axis === "x" ? "横坐标 X" : "纵坐标 Y"}<span className="required"> *</span></span>
+                            <input type="number" value={String(selected.step.params[axis] ?? 0)} disabled={!!busy}
+                              onChange={event => setParam(axis, event.target.value === "" ? undefined : Number(event.target.value))} />
+                          </label>)}
+                        </div>
+                      ) : field.key === "key" && ["browser.keyPress", "desktop.keyPress"].includes(selected.step.actionType) ? (
+                        <KeyPressField value={String(selected.step.params.key ?? "")} disabled={!!busy}
+                          inputId={`param-${selectedId}-key`} onChange={value => setParam("key", value)} />
+                      ) : field.key === "pageId" && workflow ? (
                         <PageTargetField workflow={workflow} pages={browserPages} value={selected.step.params.pageId === undefined ? undefined : String(selected.step.params.pageId)} stepId={selectedId}
                           inheritedTarget={getInheritedPageTarget(workflow, selectedId)}
                           disabled={!!busy} onChange={value => setParam("pageId", value)} />
+                      ) : field.key === "path" && ["file.xlsxRead", "file.xlsxWrite"].includes(selected.step.actionType) ? (
+                        <XlsxPathField api={api} mode={selected.step.actionType === "file.xlsxWrite" ? "save" : "open"}
+                          value={String(selected.step.params.path ?? "")} disabled={!!busy}
+                          onChange={value => setParam("path", value)} />
                       ) : field.type === "json" ? (
                         <JsonEditor
                           key={parameterEdits[field.key] ?? 0}
@@ -1534,6 +1601,10 @@ export function App() {
                           disabled={!!busy}
                           label={`为${field.label}插入变量`}
                           onPick={reference => {
+                            if (field.key === "key") {
+                              setParam(field.key, reference);
+                              return;
+                            }
                             if (field.type === "json") {
                               setParam(field.key, reference);
                               // Reset a malformed draft even when the chosen value equals its last valid value.
@@ -1549,8 +1620,33 @@ export function App() {
                           }}
                         />
                       )}
+                      {selected.step.actionType === "core.log" && field.key === "message" && selectedXlsxLoop && (
+                        <small className={/\{\{[^{}]+\}\}\.\d+/.test(String(selected.step.params.message ?? "")) ? "field-error" : ""}>
+                          {/\{\{[^{}]+\}\}\.\d+/.test(String(selected.step.params.message ?? "")) && <>下标写成 <code>{`{{${String(selectedXlsxLoop.params.itemVariable || "row")}}}.0`}</code> 时，<code>.0</code> 只是普通文字。<br /></>}
+                          {selectedXlsxLoop.params.valueMode === "array"
+                            ? <>当前行是数组：<code>{`{{${String(selectedXlsxLoop.params.itemVariable || "row")}}}[0]`}</code> 取第 1 个值，<code>{`{{${String(selectedXlsxLoop.params.itemVariable || "row")}}}[1]`}</code> 取第 2 个值。下标要写在 <code>{"}}"}</code> 后的方括号中。</>
+                            : <>当前上层“遍历 XLSX”仍按{selectedXlsxLoop.params.valueMode === "column" ? "单列值" : "整行对象"}运行。要使用 <code>{`{{${String(selectedXlsxLoop.params.itemVariable || "row")}}}[0]`}</code>，请先把上层步骤的“遍历内容”改为“整行数组”。</>}
+                        </small>
+                      )}
+                      {selected.step.actionType === "core.log" && field.key === "message" && selectedXlsxLoop
+                        && selectedXlsxLoop.params.valueMode !== "array"
+                        && String(selected.step.params.message ?? "").includes(`{{${String(selectedXlsxLoop.params.itemVariable || "row")}}}`) && (
+                        <button type="button" className="text-button" disabled={!!busy}
+                          onClick={() => {
+                            const name = String(selectedXlsxLoop.params.itemVariable || "row");
+                            const message = String(selected.step.params.message ?? "");
+                            const corrected = message.replace(/\{\{\s*([^{}]+?)\s*\}\}\.(\d+)/g, (original, variable: string, index: string) =>
+                              variable.trim() === name ? `{{${name}}}[${index}]` : original);
+                            updateWorkflow(value => ({ ...value, steps: replaceStep(
+                              replaceStep(value.steps, selectedXlsxLoop.stepId, step => ({ ...step, params: { ...step.params, valueMode: "array" } })),
+                              selectedId, step => ({ ...step, params: { ...step.params, message: corrected } }),
+                            ) }));
+                          }}>
+                          切换整行数组并修正下标
+                        </button>
+                      )}
                     </div>
-                  ))}
+                  ))) }
                   {!selectedAction && (
                     <JsonEditor
                       disabled={!!busy}
@@ -1738,7 +1834,36 @@ export function App() {
         </aside>
       </div>
 
-      <section className="console" aria-label="运行监控" hidden={!panels.bottom || (view !== "editor" && view !== "settings")}>
+      <section ref={consoleRef} className="console" aria-label="运行监控"
+        style={consoleHeight === null ? undefined : { height: clampConsoleHeight(consoleHeight) }}
+        hidden={!panels.bottom || (view !== "editor" && view !== "settings")}>
+        <div className="console-resizer" role="separator" aria-label="调整运行监控高度"
+          aria-orientation="horizontal" aria-valuemin={window.innerWidth <= 740 ? 160 : 112}
+          aria-valuemax={Math.max(window.innerWidth <= 740 ? 160 : 112, window.innerHeight - 360)}
+          aria-valuenow={Math.round(consoleHeight ?? consoleRef.current?.getBoundingClientRect().height
+            ?? clampConsoleHeight(window.innerWidth <= 740 ? 310 : Math.min(280, Math.max(140, window.innerHeight * 0.23))))}
+          tabIndex={0} title="拖动调整底部面板高度；方向键也可调整"
+          onPointerDown={event => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            consoleResize.current = { pointerId: event.pointerId, y: event.clientY, height: consoleRef.current?.getBoundingClientRect().height ?? 0 };
+          }}
+          onPointerMove={event => {
+            const start = consoleResize.current;
+            if (start?.pointerId === event.pointerId) setConsoleHeight(clampConsoleHeight(start.height + start.y - event.clientY));
+          }}
+          onPointerUp={event => {
+            if (consoleResize.current?.pointerId === event.pointerId) consoleResize.current = null;
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+          }}
+          onPointerCancel={() => { consoleResize.current = null; }}
+          onKeyDown={event => {
+            const current = consoleRef.current?.getBoundingClientRect().height ?? 200;
+            const next = event.key === "ArrowUp" ? current + 24 : event.key === "ArrowDown" ? current - 24
+              : event.key === "Home" ? 0 : event.key === "End" ? window.innerHeight : null;
+            if (next !== null) { event.preventDefault(); setConsoleHeight(clampConsoleHeight(next)); }
+          }} />
         <div className="console-header">
           <div className="bottom-tabs" role="tablist" aria-label="运行信息">
             {tabs.map((tab, index) => (
@@ -1846,81 +1971,20 @@ export function App() {
           </div>
         </div>
         <div
-          className="console-content"
+          className={`console-content${bottomTab === "logs" ? " console-content-logs" : ""}`}
           role="tabpanel"
           id={`panel-${bottomTab}`}
           aria-labelledby={`tab-${bottomTab}`}
           tabIndex={0}
         >
-          {bottomTab === "logs" &&
-            (visibleEvents.length ? (
-              <div className="log-lines">
-                {visibleEvents.map((event, index) => (
-                  <div
-                    key={`${event.at}-${index}`}
-                    className={`log-line${event.status === "failed" ? " log-error" : ""}`}
-                  >
-                    <time>{formatTime(event.at)}</time>
-                    <span className="log-type">
-                      {event.type === "step"
-                        ? (statusLabels[event.status ?? ""] ?? "步骤")
-                        : event.type === "artifact"
-                          ? "文件"
-                          : event.type === "run"
-                            ? "运行"
-                            : "日志"}
-                    </span>
-                    <span>
-                      {event.stepId && (
-                        <>
-                          {eventStepNumber(event) && <span className="log-step-number">#{String(eventStepNumber(event)).padStart(2, "0")}</span>}
-                          <button
-                            className="log-step"
-                            onClick={() => {
-                              const found = steps.find(
-                                (item) => item.step.stepId === event.stepId,
-                              );
-                              if (found) {
-                                setSelectedId(found.step.stepId);
-                                setInspector("step");
-                              }
-                            }}
-                          >
-                            {steps.find(
-                              (item) => item.step.stepId === event.stepId,
-                            )?.step.name ?? event.stepId.slice(0, 8)}
-                          </button>
-                        </>
-                      )}
-                      {event.message}
-                      {eventFile(event) && (
-                        <button
-                          className="log-step"
-                          onClick={() =>
-                            void api
-                              ?.openPath(eventFile(event)!)
-                              .catch(catchError)
-                          }
-                        >
-                          打开文件
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                ))}
-                <div ref={logEndRef} />
-              </div>
-            ) : (
-              <div className="console-empty">
-                <Terminal size={22} />
-                <span>
-                  {run?.error ??
-                    (run
-                      ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。"
-                      : "运行流程后，在这里查看步骤进度和执行日志。")}
-                </span>
-              </div>
-            ))}
+          {bottomTab === "logs" && <LogViewer
+            events={events}
+            runId={runId}
+            stepNames={stepNames}
+            emptyMessage={run?.error ?? (run ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。" : "运行流程后，在这里查看步骤进度和执行日志。")}
+            onSelectStep={stepId => { setSelectedId(stepId); setInspector("step"); }}
+            onOpenPath={path => void api?.openPath(path).catch(catchError)}
+          />}
           {bottomTab === "variables" &&
             (run && Object.keys(run.variables).length ? (
               <table>

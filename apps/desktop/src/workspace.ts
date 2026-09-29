@@ -23,7 +23,7 @@ function visitSteps(steps: StepDefinition[], visit: (step: StepDefinition, scope
     const scoped = new Set([...inherited, ...Object.keys(step.variables ?? {})]);
     visit(step, scoped);
     const childrenScope = new Set(scoped);
-    if (step.actionType === 'control.forEach' && typeof step.params.itemVariable === 'string') childrenScope.add(step.params.itemVariable);
+    if (['control.forEach', 'control.forEachXlsx'].includes(step.actionType) && typeof step.params.itemVariable === 'string') childrenScope.add(step.params.itemVariable);
     visitSteps(step.children ?? [], visit, childrenScope);
     const catchScope = new Set(scoped);
     if (step.actionType === 'control.tryCatch' && typeof step.params.errorVariable === 'string') catchScope.add(step.params.errorVariable);
@@ -39,7 +39,7 @@ function hasGlobalWrite(steps: StepDefinition[], name: string, inheritedShadow =
     if (step.output === name && !inheritedShadow) return true;
     if (step.actionType === 'variables.set' && !shadow && (step.params.name === name
       || (typeof step.params.name === 'string' && /\{\{[^{}]+\}\}/.test(step.params.name)))) return true;
-    return hasGlobalWrite(step.children ?? [], name, shadow || (step.actionType === 'control.forEach' && step.params.itemVariable === name))
+    return hasGlobalWrite(step.children ?? [], name, shadow || (['control.forEach', 'control.forEachXlsx'].includes(step.actionType) && step.params.itemVariable === name))
       || hasGlobalWrite(step.elseSteps ?? [], name, shadow || (step.actionType === 'control.tryCatch' && step.params.errorVariable === name));
   });
 }
@@ -75,7 +75,7 @@ function removeDemoDefault(workflow: WorkflowDefinition, name: 'demoUrl' | 'cust
         const inheritedTemplates = Object.fromEntries(Object.entries(originalElements).filter(([, element]) => hasReference(element)));
         if (Object.keys(inheritedTemplates).length) step.elements = { ...inheritedTemplates, ...originalOwnElements };
       }
-      rewriteSteps(step.children ?? [], originalElements, shadow || (step.actionType === 'control.forEach' && step.params.itemVariable === name));
+      rewriteSteps(step.children ?? [], originalElements, shadow || (['control.forEach', 'control.forEachXlsx'].includes(step.actionType) && step.params.itemVariable === name));
       rewriteSteps(step.elseSteps ?? [], originalElements, shadow || (step.actionType === 'control.tryCatch' && step.params.errorVariable === name));
     }
   };

@@ -1,12 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
-import { resolve, join, dirname, basename } from 'node:path';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
+import { resolve, join, dirname, basename, isAbsolute } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { actionDefinitions } from '../../../packages/actions/src/index.js';
 import { RunManager } from '../../runner/src/manager.js';
 import { createDemoWorkflow } from '../../../examples/demo.js';
 import { startFixtureServer } from '../../../tests/fixtures/server.js';
 import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
-import type { RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
+import type { DesktopPoint, RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
 const root = process.env.RPA_ROOT ?? resolve(__dirname, '../..');
 process.env.RPA_ROOT = root;
@@ -17,6 +17,7 @@ let tray: Tray | undefined;
 let quitting = false;
 let manager: RunManager;
 let fixture: Awaited<ReturnType<typeof startFixtureServer>> | undefined;
+let desktopPointPick: { requestId: string; finish(point: DesktopPoint | null): void } | undefined;
 const lock = app.requestSingleInstanceLock();
 if (!lock) app.quit();
 else {
@@ -25,6 +26,7 @@ else {
   app.on('before-quit', event => {
     if (quitting) return;
     event.preventDefault(); quitting = true;
+    desktopPointPick?.finish(null);
     Promise.all([manager?.shutdown(), fixture?.close()]).finally(() => { tray?.destroy(); app.quit(); });
   });
   app.whenReady().then(async () => {
@@ -55,6 +57,45 @@ else {
     ipcMain.handle('rpa:list-browser-pages', (event, runId: string) => {
       trusted(event); return manager.listBrowserPages(runId);
     });
+    ipcMain.handle('rpa:pick-browser-point', async (event, runId: string, pageId: string, requestId: string) => {
+      trusted(event);
+      const point = await manager.pickBrowserPoint(runId, pageId, requestId);
+      if (point && window && !window.isDestroyed()) { window.show(); window.focus(); }
+      return point;
+    });
+    ipcMain.handle('rpa:cancel-browser-point', (event, runId: string, requestId: string) => {
+      trusted(event); return manager.cancelBrowserPoint(runId, requestId);
+    });
+    ipcMain.handle('rpa:pick-desktop-point', (event, requestId: string) => {
+      trusted(event);
+      if (typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)) throw new Error('取点请求无效');
+      if (desktopPointPick) throw new Error('已有取点操作正在进行');
+      return new Promise<DesktopPoint | null>((resolvePoint, rejectPoint) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = (point: DesktopPoint | null) => {
+          if (desktopPointPick?.requestId !== requestId) return;
+          desktopPointPick = undefined;
+          clearTimeout(timer);
+          globalShortcut.unregister('F8');
+          if (window && !window.isDestroyed()) { window.show(); window.focus(); }
+          resolvePoint(point);
+        };
+        desktopPointPick = { requestId, finish };
+        if (!globalShortcut.register('F8', () => {
+          const point = screen.dipToScreenPoint(screen.getCursorScreenPoint());
+          finish({ x: point.x, y: point.y });
+        })) {
+          desktopPointPick = undefined;
+          rejectPoint(new Error('F8 已被其他程序占用，暂时无法取点'));
+          return;
+        }
+        timer = setTimeout(() => finish(null), 30_000);
+      });
+    });
+    ipcMain.handle('rpa:cancel-desktop-point', (event, requestId: string) => {
+      trusted(event);
+      if (desktopPointPick?.requestId === requestId) desktopPointPick.finish(null);
+    });
     ipcMain.handle('rpa:control', async (event, runId: string, command: RunCommand) => {
       trusted(event);
       if (typeof runId !== 'string' || !['pause', 'resume', 'stop', 'show', 'hide', 'closeBrowser'].includes(command)) throw new Error('无效的任务操作');
@@ -63,6 +104,21 @@ else {
     ipcMain.handle('rpa:directory', async event => {
       trusted(event); const result = await dialog.showOpenDialog(window!, { title: '选择下载保存目录', properties: ['openDirectory', 'createDirectory'] });
       return result.canceled ? null : result.filePaths[0];
+    });
+    ipcMain.handle('rpa:xlsx-path', async (event, mode: 'open' | 'save', currentPath?: string) => {
+      trusted(event);
+      if (mode !== 'open' && mode !== 'save') throw new Error('无效的 XLSX 文件选择操作');
+      if (currentPath !== undefined && (typeof currentPath !== 'string' || currentPath.length > 4096)) throw new Error('文件路径无效');
+      const defaultPath = currentPath && isAbsolute(currentPath) && !/[{}]/.test(currentPath)
+        ? currentPath : mode === 'save' ? join(app.getPath('documents'), '输出.xlsx') : app.getPath('documents');
+      const filters = [{ name: 'Excel 工作簿', extensions: ['xlsx'] }];
+      const selected = mode === 'open'
+        ? await dialog.showOpenDialog(window!, { title: '选择 XLSX 文件', defaultPath, filters, properties: ['openFile'] })
+          .then(result => result.canceled ? null : result.filePaths[0] ?? null)
+        : await dialog.showSaveDialog(window!, { title: '选择 XLSX 保存位置', defaultPath, filters })
+          .then(result => result.canceled ? null : result.filePath || null);
+      if (selected && !/\.xlsx$/i.test(selected)) throw new Error('请选择 .xlsx 文件');
+      return selected;
     });
     ipcMain.handle('rpa:open-path', async (event, path: string) => {
       trusted(event);

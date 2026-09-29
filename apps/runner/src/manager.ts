@@ -5,13 +5,14 @@ import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { FileStore, normalizeWorkflowForStorage } from '../../../packages/persistence/src/index.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
-import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
+import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type BrowserPoint, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 import { nextScheduleTime } from './schedule.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
 interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPages { resolve: (pages: BrowserPageInfo[]) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
-interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages> }
+interface PendingPoint { id: string; resolve: (point: BrowserPoint | null) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint }
 async function killOwnedTree(child: ChildProcess) {
   if (!child.pid) return;
   if (process.platform === 'win32') await new Promise<void>(resolve => {
@@ -109,6 +110,51 @@ export class RunManager extends EventEmitter {
   private rejectPageQueries(job: Job, error: Error) {
     for (const pending of job.pageQueries?.values() ?? []) { clearTimeout(pending.timer); pending.reject(error); }
     job.pageQueries?.clear();
+    this.finishPointPick(job, undefined, error);
+  }
+  pickBrowserPoint(runId: string, pageId: string, requestId: string): Promise<BrowserPoint | null> {
+    return this.serialize(async () => {
+      scheduleIdentifier.parse(requestId);
+      if (typeof runId !== 'string' || typeof pageId !== 'string' || !pageId.trim() || pageId.includes('{{')) throw new Error('请选择已打开的目标网页');
+      const job = this.jobs.get(runId);
+      if (!job?.child?.connected || !job.run.browserOpen) throw new Error('浏览器已关闭，请先打开网页');
+      if (!terminal(job.run.status) || job.controls?.size || job.stopping) throw new Error('该浏览器正在执行任务或操作，请等待完成');
+      if (job.workflow.settings.headless) throw new Error('无头浏览器无法取点，请使用有界面浏览器');
+      if (job.pointPick) throw new Error('浏览器正在获取坐标');
+      const result = new Promise<BrowserPoint | null>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          void this.cancelBrowserPoint(runId, requestId).catch(async () => {
+            if (job.child) await killOwnedTree(job.child);
+          }).finally(() => {
+            if (job.pointPick?.id === requestId) this.finishPointPick(job, undefined, new Error('获取坐标超时'));
+          });
+        }, 130_000);
+        job.pointPick = { id: requestId, resolve, reject, timer };
+        try {
+          job.child!.send({ type: 'pick-browser-point', requestId, pageId }, error => {
+            if (error && job.pointPick?.id === requestId) this.finishPointPick(job, undefined, error);
+          });
+        } catch (error) { this.finishPointPick(job, undefined, error as Error); }
+      });
+      // Do not hold the submission queue while waiting for the user's click.
+      void result.catch(() => undefined);
+      return { result };
+    }).then(({ result }) => result);
+  }
+  async cancelBrowserPoint(runId: string, requestId: string): Promise<void> {
+    await this.startQueue;
+    const job = this.jobs.get(runId);
+    if (!job?.pointPick || job.pointPick.id !== requestId) return;
+    await this.sendRequest(job, { type: 'cancel-browser-point', pickId: requestId });
+  }
+  private finishPointPick(job: Job, point?: BrowserPoint | null, error?: Error): void {
+    const pending = job.pointPick;
+    if (!pending) return;
+    job.pointPick = undefined;
+    clearTimeout(pending.timer);
+    if (error) pending.reject(error);
+    else if (point === null || (point && typeof point.pageId === 'string' && Number.isFinite(point.x) && point.x >= 0 && Number.isFinite(point.y) && point.y >= 0)) pending.resolve(point);
+    else pending.reject(new Error('获取坐标返回了无效结果'));
   }
   listWorkflows() { return this.store.listWorkflows(); }
   saveWorkflow(workflow: WorkflowDefinition) { return this.serialize(() => this.store.saveWorkflow(workflow)); }
@@ -194,7 +240,7 @@ export class RunManager extends EventEmitter {
       const job = this.jobs.get(browserRunId);
       if (!job || !job.child?.connected || !job.run.browserOpen) throw new Error('所选浏览器已关闭或不存在，请重新选择');
       if (job.run.workflowId !== workflow.workflowId) throw new Error('只能复用当前流程的浏览器');
-      if (!terminal(job.run.status) || job.controls?.size || job.stopping) throw new Error('该浏览器正在执行任务或操作，请等待完成');
+      if (!terminal(job.run.status) || job.controls?.size || job.stopping || job.pointPick) throw new Error('该浏览器正在执行任务或操作，请等待完成或取消取点');
       if ((workflow.settings.profileId ?? workflow.workflowId) !== (job.workflow.settings.profileId ?? job.workflow.workflowId)
         || workflow.settings.headless !== job.workflow.settings.headless) throw new Error('浏览器配置已改变，请关闭原浏览器后重新运行');
       const previousRun = job.run;
@@ -244,6 +290,7 @@ export class RunManager extends EventEmitter {
     const retained = [...this.jobs.values()].filter(job => job.child && terminal(job.run.status) && job.run.browserOpen && (
       job.run.workflowId === workflow.workflowId || (job.workflow.settings.profileId ?? job.workflow.workflowId) === profileId
     ));
+    if (retained.some(job => job.pointPick)) throw new Error('请先完成或取消取点，再运行流程');
     for (const job of retained) await this.applyControlRun(job.run.runId, 'closeBrowser');
   }
   private publish(event: RunEvent) {
@@ -270,7 +317,10 @@ export class RunManager extends EventEmitter {
     job.child = child; job.controls = new Map(); job.pageQueries = new Map(); job.finished = new Promise(resolve => { job.exit = resolve; });
     child.stdout?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
     child.stderr?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
-    child.on('message', (message: { type: string; event?: RunEvent; message?: string; requestId?: string; error?: string; pages?: BrowserPageInfo[] }) => {
+    child.on('message', (message: { type: string; event?: RunEvent; message?: string; requestId?: string; error?: string; pages?: BrowserPageInfo[]; point?: BrowserPoint | null }) => {
+      if (message.type === 'point-result' && message.requestId === job.pointPick?.id) {
+        this.finishPointPick(job, message.point, message.error ? new Error(message.error) : undefined);
+      }
       if (message.type === 'event' && message.event) {
         if (message.event.run) {
           job.run = message.event.run;

@@ -1,14 +1,16 @@
 import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
+import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
+import { runDesktopInput } from './desktop-input.js';
 import { BrowserSession, type BrowserSessionOptions } from '../../browser/src/index.js';
 import { runScript } from '../../scripts/src/index.js';
 import { actionDefinitions, getAction, validateActionParams, validateActions } from '../../actions/src/index.js';
-import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
+import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type BrowserPoint, type ElementRef, type RunCommand, type RunEvent, type RunSnapshot, type StepDefinition, type WorkflowDefinition } from '../../contracts/src/index.js';
 
-const { readFile: readWorkbook, utils: xlsxUtils, writeFile: writeWorkbook } = xlsx;
+const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
 export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
@@ -44,12 +46,23 @@ function readVariable(variables: Record<string, unknown>, path: string): unknown
   }
   return value;
 }
+function readIndexedVariable(variables: Record<string, unknown>, path: string, indexText: string): unknown {
+  const value = readVariable(variables, path);
+  const index = Number(indexText);
+  if (!Array.isArray(value)) throw new Error(`变量不是列表，无法按下标读取：${path}`);
+  if (!Number.isSafeInteger(index) || !Object.hasOwn(value, index)) throw new Error(`列表下标超出范围：${path}[${indexText}]`);
+  return value[index];
+}
 export function resolveValue(value: unknown, variables: Record<string, unknown>): unknown {
   if (typeof value === 'string') {
+    const indexedEntire = value.match(/^\{\{\s*([^{}]+?)\s*\}\}\[(\d+)\]$/);
+    if (indexedEntire) return jsonClone(readIndexedVariable(variables, indexedEntire[1].trim(), indexedEntire[2]));
     const entire = value.match(/^\{\{\s*([^{}]+?)\s*\}\}$/);
     if (entire) return jsonClone(readVariable(variables, entire[1].trim()));
-    return value.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, key: string) => {
-      const result = readVariable(variables, key.trim());
+    return value.replace(/\{\{\s*([^{}]+?)\s*\}\}\[(\d+)\]|\{\{\s*([^{}]+?)\s*\}\}/g, (_, indexedPath: string | undefined, indexText: string | undefined, path: string | undefined) => {
+      const result = indexedPath && indexText !== undefined
+        ? readIndexedVariable(variables, indexedPath.trim(), indexText)
+        : readVariable(variables, path!.trim());
       return typeof result === 'object' ? JSON.stringify(result) : String(result);
     });
   }
@@ -70,6 +83,7 @@ export class WorkflowEngine {
   private rpcQueue: Promise<unknown> = Promise.resolve();
   private consumed = false;
   private executionFinished = false;
+  private pointPick?: { id: string; abort: AbortController; done: Promise<BrowserPoint | null> };
   private reuseBrowserOnly = false;
   private deadlines: ExecutionDeadline[] = [];
   private errorBoundaryDepth = 0;
@@ -94,6 +108,23 @@ export class WorkflowEngine {
     const browser = this.browser;
     if (!browser?.isOpen()) return [];
     return browser.listPages();
+  }
+  pickBrowserPoint(pageId: string, id: string): Promise<BrowserPoint | null> {
+    if (!this.executionFinished) throw new Error('任务仍在运行，请结束后再获取坐标');
+    if (!this.browser?.isOpen()) throw new Error('浏览器已关闭，请先打开网页');
+    if (this.pointPick) throw new Error('浏览器正在获取坐标');
+    const abort = new AbortController();
+    const done = this.browser.pickPoint(pageId, abort.signal).finally(() => {
+      if (this.pointPick?.id === id) this.pointPick = undefined;
+    });
+    this.pointPick = { id, abort, done };
+    return done;
+  }
+  async cancelBrowserPoint(id: string): Promise<void> {
+    const pick = this.pointPick;
+    if (!pick || pick.id !== id) return;
+    pick.abort.abort();
+    await pick.done.catch(() => undefined);
   }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
     this.options.onEvent?.({ ...event, runId: this.snapshot.runId, at: new Date().toISOString() });
@@ -123,6 +154,10 @@ export class WorkflowEngine {
     this.emit({ type: 'run', run: this.getSnapshot(), status });
   }
   async control(command: RunCommand): Promise<void> {
+    if (this.pointPick) {
+      if (command === 'stop' || command === 'closeBrowser') await this.cancelBrowserPoint(this.pointPick.id);
+      else throw new Error('请先完成或取消取点');
+    }
     if (command === 'closeBrowser') {
       if (!this.executionFinished) throw new Error('任务执行中，请先停止任务再关闭浏览器');
       await this.browser?.close();
@@ -337,6 +372,7 @@ export class WorkflowEngine {
     const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
+    if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal);
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
     if (step.actionType === 'core.note') return null;
     if (step.actionType === 'core.wait') {
@@ -349,13 +385,7 @@ export class WorkflowEngine {
       return params.message;
     }
     if (step.actionType === 'file.xlsxRead') {
-      const workbook = readWorkbook(String(params.path));
-      const requested = typeof params.sheetName === 'string' && params.sheetName.trim() ? params.sheetName : undefined;
-      const sheetName = requested ?? workbook.SheetNames[0];
-      const sheet = sheetName ? workbook.Sheets[sheetName] : undefined;
-      if (!sheetName || !sheet) throw new Error(requested ? `工作表不存在：${requested}` : 'XLSX 文件没有可读取的工作表');
-      const rows = xlsxUtils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
-      return jsonClone({ sheetName, rows });
+      return jsonClone(readXlsxRows(String(params.path), String(params.sheetName ?? '')));
     }
     if (step.actionType === 'file.xlsxWrite') {
       const target = String(params.path);
@@ -365,7 +395,7 @@ export class WorkflowEngine {
       const worksheet = xlsxUtils.json_to_sheet(rows);
       const workbook = xlsxUtils.book_new();
       xlsxUtils.book_append_sheet(workbook, worksheet, sheetName);
-      writeWorkbook(workbook, target, { compression: true });
+      await writeFile(target, writeWorkbook(workbook, { type: 'buffer', bookType: 'xlsx', compression: true }));
       const file = await stat(target);
       const artifact: Artifact = { path: target, name: basename(target), size: file.size, stepId: this.snapshot.currentStepId };
       this.snapshot.artifacts.push(artifact);
@@ -432,13 +462,22 @@ export class WorkflowEngine {
         } finally { this.errorBoundaryDepth--; }
       });
     }
-    if (step.actionType === 'control.forEach') {
+    if (step.actionType === 'control.forEach' || step.actionType === 'control.forEachXlsx') {
       const name = String(params.itemVariable); validateName(name);
+      let items: unknown[];
+      if (step.actionType === 'control.forEachXlsx') {
+        items = params.valueMode === 'column'
+          ? readXlsxColumnValues(String(params.path), String(params.sheetName ?? ''), Number(params.columnIndex)).values
+          : params.valueMode === 'array'
+            ? readXlsxArrayRows(String(params.path), String(params.sheetName ?? '')).rows
+            : readXlsxRows(String(params.path), String(params.sheetName ?? '')).rows;
+      } else items = params.items as unknown[];
+      if (items.length > 10_000) throw new Error('循环最多支持 10000 行，请缩小工作表范围');
       const had = Object.hasOwn(this.snapshot.variables, name); const previous = this.snapshot.variables[name];
       let count = 0;
       try {
         await this.withinDeadline(step, async () => {
-          for (const item of params.items as unknown[]) {
+          for (const item of items) {
             await yieldLoop(); this.checkStop(); this.remainingTimeout(timeout);
             this.setVariable(name, item);
             await this.executeSteps(step.children ?? []); count++;
@@ -534,6 +573,7 @@ export class WorkflowEngine {
     return this.runExecution(() => this.executeSteps(this.workflow.steps), false);
   }
   runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow): Promise<RunSnapshot> {
+    if (this.pointPick) throw new Error('请先完成或取消取点');
     const workflow = workflowSchema.parse(input);
     validateActions(workflow);
     const path = findStepPath(workflow, stepId);

@@ -103,6 +103,15 @@ try {
     assert.equal(await row.isVisible(), true);
     assert.equal(await row.getByRole('button', { name: '打印当前项', exact: true }).count(), 1);
   }
+  const logSearch = monitor.getByRole('textbox', { name: '搜索运行日志' });
+  await logSearch.fill('当前项：2');
+  assert.equal(await monitor.locator('.log-line').count(), 1, '搜索应定位日志正文');
+  await logSearch.fill('');
+  await monitor.getByRole('button', { name: '输出与文件', exact: true }).click();
+  assert.equal(await monitor.locator('.log-line').count(), 4, '输出筛选应隐藏步骤和运行状态');
+  await monitor.getByRole('button', { name: '失败', exact: true }).click();
+  assert.equal(await monitor.locator('.log-line').count(), 0, '成功运行不应出现失败日志');
+  await monitor.getByRole('button', { name: '全部', exact: true }).click();
   await page.setViewportSize({ width: 1464, height: 1200 });
   await stepButton('打印当前项').click();
   await stepButton('日志验收循环').scrollIntoViewIfNeeded();
@@ -127,6 +136,8 @@ try {
   assert.deepEqual(objectLogs[0].data, { value: objectValue });
   const objectRow = monitor.locator('.log-line').filter({ hasText: '对象日志验收' });
   await objectRow.waitFor();
+  assert.deepEqual(await objectRow.locator('dt').allTextContents(), ['path', 'status']);
+  assert.deepEqual(await objectRow.locator('dd').allTextContents(), [objectValue.path, objectValue.status]);
   assert.equal(await monitor.getByRole('button', { name: '打开文件', exact: true }).count(), 0, '日志对象的 path 字段不能被当成下载产物入口');
   await stepButton('打印当前项').click();
   await page.screenshot({ path: join(qa, 'logging-object-success.png'), fullPage: true });

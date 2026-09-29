@@ -53,6 +53,8 @@ export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeB
 export interface BrowserPageInfo {
   pageId: string; title: string; url: string; current: boolean; openerPageId?: string;
 }
+export interface BrowserPoint { pageId: string; x: number; y: number }
+export interface DesktopPoint { x: number; y: number }
 export interface BootstrapData {
   workflows: WorkflowDefinition[]; actions: ActionDefinition[]; runs: RunSnapshot[];
   schedules: WorkflowSchedule[];
@@ -68,8 +70,13 @@ export interface DesktopApi {
   runWorkflow(workflow: WorkflowDefinition): Promise<RunSnapshot>;
   runStep(workflow: WorkflowDefinition, stepId: string, browserRunId?: string): Promise<RunSnapshot>;
   listBrowserPages(runId: string): Promise<BrowserPageInfo[]>;
+  pickBrowserPoint(runId: string, pageId: string, requestId: string): Promise<BrowserPoint | null>;
+  cancelBrowserPoint(runId: string, requestId: string): Promise<void>;
+  pickDesktopPoint(requestId: string): Promise<DesktopPoint | null>;
+  cancelDesktopPoint(requestId: string): Promise<void>;
   controlRun(runId: string, command: RunCommand): Promise<void>;
   chooseDirectory(): Promise<string | null>;
+  chooseXlsxPath(mode: 'open' | 'save', currentPath?: string): Promise<string | null>;
   openPath(path: string): Promise<void>;
   onEvent(listener: (event: RunEvent) => void): () => void;
 }

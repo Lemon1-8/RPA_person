@@ -17,6 +17,7 @@ describe("工作流指令摘要", () => {
     expect(getStepCategory("variables.set").id).toBe("data");
     expect(getStepCategory("browser.download").id).toBe("file");
     expect(getStepCategory("file.xlsxRead").id).toBe("file");
+    expect(getStepCategory("desktop.mouseClick").id).toBe("desktop");
     expect(getStepCategory("control.if").id).toBe("control");
     expect(getStepCategory("script.run").id).toBe("script");
     expect(getStepCategory("core.note").id).toBe("note");
@@ -40,7 +41,10 @@ describe("工作流指令摘要", () => {
     expect(details("browser.click", { selector: "#save", pageId: "$current" })[1]).toEqual({ label: "目标网页", value: "当前网页" });
     expect(details("browser.closePage", { closeMode: "all", pageId: "unused" })).toEqual([{ label: "关闭范围", value: "当前浏览器的所有网页" }]);
     expect(details("browser.mouseClick", { x: 12, y: 34, button: "right", clickCount: 2 })).toEqual([
-      { label: "横坐标 X", value: "12" }, { label: "纵坐标 Y", value: "34" },
+      { label: "网页坐标", value: "X 12 · Y 34" }, { label: "鼠标按钮", value: "右键" },
+    ]);
+    expect(details("desktop.mouseMove", { x: -20, y: 400, humanLike: true })).toEqual([
+      { label: "屏幕坐标", value: "X -20 · Y 400" }, { label: "移动方式", value: "弧形轨迹" },
     ]);
     expect(details("browser.keyPress", { key: "ControlOrMeta+A", pageId: "$current" })).toEqual([
       { label: "按键", value: "ControlOrMeta+A" }, { label: "目标网页", value: "当前网页" },
@@ -68,6 +72,11 @@ describe("工作流指令摘要", () => {
       { label: "循环列表", value: "2 项列表" }, { label: "当前项变量", value: "order" },
     ]);
     expect(details("control.forEach", { items: "{{orders}}" })[0].value).toBe("orders");
+    expect(details("control.forEachXlsx", { path: "C:\\RPA\\orders.xlsx", valueMode: "column", columnIndex: 0, itemVariable: "item" })).toEqual([
+      { label: "XLSX 文件", value: "C:\\RPA\\orders.xlsx" }, { label: "单值列下标", value: "0" },
+    ]);
+    expect(details("control.forEachXlsx", { path: "C:\\RPA\\orders.xlsx", valueMode: "array", itemVariable: "row" })[1]).toEqual({ label: "当前行数组", value: "row" });
+    expect(details("control.forEachXlsx", { path: "C:\\RPA\\orders.xlsx", itemVariable: "row" })[1]).toEqual({ label: "当前行变量", value: "row" });
     expect(details("control.tryCatch", { errorVariable: "failure" })).toEqual([
       { label: "执行规则", value: "主流程失败后执行异常处理" }, { label: "异常变量", value: "failure" },
     ]);

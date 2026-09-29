@@ -109,8 +109,10 @@ function installPopupGuard(mode: PopupPolicy): void {
     const backdrops: HTMLElement[] = [];
     for (const [root, observer] of observers) {
       if (root instanceof ShadowRoot && !root.host.isConnected) { observer.disconnect(); observers.delete(root); continue; }
+      if (root instanceof ShadowRoot && root.host.hasAttribute('data-rpa-coordinate-picker')) continue;
       const elements = Array.from(root.querySelectorAll<HTMLElement>(candidates)).slice(0, 500);
       for (const element of elements) {
+        if (element.closest('[data-rpa-coordinate-picker]')) continue;
         if (!(element instanceof HTMLElement) || element === document.body || element === document.documentElement || hidden.has(element) || !isOverlay(element)) continue;
         if (element.matches('header,nav,main,footer,aside,[role="navigation"]') || element.closest('header,nav,[role="navigation"]')) continue;
         if (/(?:loading|spinner|progress|skeleton)/i.test(`${element.id} ${element.className}`) || element.getAttribute('aria-busy') === 'true') continue;

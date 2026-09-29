@@ -109,7 +109,8 @@ function loopItem(environment: Environment, step: StepDefinition): Environment {
   const scoped = new Map(environment);
   const name = step.params.itemVariable;
   if (usableName(name)) scoped.set(name, {
-    source: `「${step.name}」的当前项`, conditional: false,
+    source: step.actionType === "control.forEachXlsx" && step.params.valueMode === "array"
+      ? `「${step.name}」的当前行数组` : `「${step.name}」的当前项`, conditional: false,
     shape: shapeOf(step.params.items, environment, true).item ?? unknownShape(),
   });
   return scoped;
@@ -138,7 +139,7 @@ function interruptedSteps(environment: Environment, steps: StepDefinition[]): En
     let inside = declareLocals(possible, step);
     if (step.actionType === "control.if") {
       inside = mergeEnvironments(interruptedSteps(inside, step.children ?? []), interruptedSteps(inside, step.elseSteps ?? []));
-    } else if (step.actionType === "control.forEach") {
+    } else if (["control.forEach", "control.forEachXlsx"].includes(step.actionType)) {
       const body = interruptedSteps(loopItem(inside, step), step.children ?? []);
       inside = restoreNames(body, inside, usableName(step.params.itemVariable) ? [step.params.itemVariable] : []);
     } else if (step.actionType === "control.tryCatch") {
@@ -174,7 +175,7 @@ function completeStep(environment: Environment, step: StepDefinition): Environme
   } else if (step.actionType === "control.if") {
     scoped = mergeEnvironments(completeSteps(scoped, step.children ?? []), completeSteps(scoped, step.elseSteps ?? []));
     outputShape = shapeOf({ matched: true }, scoped, false);
-  } else if (step.actionType === "control.forEach") {
+  } else if (["control.forEach", "control.forEachXlsx"].includes(step.actionType)) {
     const body = completeSteps(loopItem(scoped, step), step.children ?? []);
     const restored = restoreNames(body, scoped, usableName(step.params.itemVariable) ? [step.params.itemVariable] : []);
     // The list can be empty, so a body assignment may not have happened.
@@ -230,7 +231,7 @@ export function getVariableOptions(workflow: WorkflowDefinition, stepId: string)
     environment = completeSteps(environment, siblings.slice(0, siblings.indexOf(step)));
     environment = declareLocals(environment, step);
     if (index < path.length - 1) {
-      if (step.actionType === "control.forEach") environment = loopItem(environment, step);
+      if (["control.forEach", "control.forEachXlsx"].includes(step.actionType)) environment = loopItem(environment, step);
       if (step.actionType === "control.tryCatch" && step.elseSteps?.includes(path[index + 1])) {
         environment = catchError(interruptedSteps(environment, step.children ?? []), step);
       }

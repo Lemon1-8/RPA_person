@@ -1,10 +1,11 @@
 import type { ActionDefinition, ActionField, StepDefinition } from "../../../../packages/contracts/src/index.js";
 
-type StepCategory = { id: "browser" | "control" | "script" | "data" | "file" | "core" | "note"; label: string };
+type StepCategory = { id: "browser" | "desktop" | "control" | "script" | "data" | "file" | "core" | "note"; label: string };
 type StepDetail = { label: string; value: string };
 
 export function getStepCategory(actionType: string): StepCategory {
   if (actionType === "core.note") return { id: "note", label: "备注" };
+  if (actionType.startsWith("desktop.")) return { id: "desktop", label: "电脑键鼠" };
   if (actionType.startsWith("control.")) return { id: "control", label: "流程控制" };
   if (actionType.startsWith("script.")) return { id: "script", label: "脚本" };
   if (actionType === "browser.download" || actionType.startsWith("file.")) return { id: "file", label: "文件" };
@@ -20,7 +21,7 @@ const labels: Record<string, string> = {
   closeMode: "关闭范围", mode: "模式", selector: "元素选择器", element: "目标元素", framePath: "框架路径",
   value: "参数值", text: "文本", directory: "保存目录", filename: "文件名称", path: "文件路径",
   x: "横坐标", y: "纵坐标", button: "鼠标按钮", clickCount: "点击次数", steps: "移动步数",
-  deltaX: "横向滚动", deltaY: "纵向滚动", key: "按键", delayMs: "间隔时长", sheetName: "工作表",
+  deltaX: "横向滚动", deltaY: "纵向滚动", key: "按键", delayMs: "间隔时长", holdMs: "按键时长", sheetName: "工作表",
   rows: "行列表",
   urlIncludes: "响应网址包含", method: "请求方法", requestIncludes: "请求内容包含", language: "脚本语言",
   name: "变量名称", message: "日志内容", actual: "实际值", expected: "期望值", color: "备注颜色",
@@ -40,6 +41,11 @@ const preferredKeys: Record<string, string[]> = {
   "browser.mouseWheel": ["deltaX", "deltaY", "pageId"],
   "browser.keyPress": ["key", "pageId"],
   "browser.keyboardType": ["text", "delayMs", "pageId"],
+  "desktop.mouseClick": ["x", "y", "button", "clickCount"],
+  "desktop.mouseMove": ["x", "y"],
+  "desktop.mouseWheel": ["deltaX", "deltaY"],
+  "desktop.keyPress": ["key"],
+  "desktop.keyboardType": ["text", "delayMs"],
   "file.xlsxRead": ["path", "sheetName"],
   "file.xlsxWrite": ["path", "sheetName", "rows"],
   "variables.set": ["name", "value"],
@@ -79,7 +85,7 @@ function formatField(key: string, value: unknown, field?: ActionField): string {
   if (key === "debugPort" && value === 0) return "自动分配";
   const readable = readableValue(value);
   if (key === "durationSeconds") return `${readable} 秒`;
-  if (["durationMs", "timeoutMs", "delayMs"].includes(key)) return `${readable} 毫秒`;
+  if (["durationMs", "timeoutMs", "delayMs", "holdMs"].includes(key)) return `${readable} 毫秒`;
   return readable;
 }
 
@@ -96,10 +102,22 @@ export function getStepDetails(step: StepDefinition, action?: ActionDefinition):
       { label: "当前项变量", value: readableValue(params.itemVariable ?? "item") },
     ];
   }
+  if (actionType === "control.forEachXlsx") {
+    return [
+      { label: "XLSX 文件", value: readableValue(params.path) },
+      { label: params.valueMode === "column" ? "单值列下标" : params.valueMode === "array" ? "当前行数组" : "当前行变量",
+        value: params.valueMode === "column" ? readableValue(params.columnIndex ?? 0) : readableValue(params.itemVariable ?? "row") },
+    ];
+  }
   if (actionType === "control.tryCatch") {
     return [{ label: "执行规则", value: "主流程失败后执行异常处理" }, { label: "异常变量", value: readableValue(params.errorVariable ?? "error") }];
   }
   if (actionType === "core.wait") return [{ label: "等待时长", value: formatField("durationSeconds", params.durationSeconds) }];
+  if (["browser.mouseClick", "browser.mouseMove", "desktop.mouseClick", "desktop.mouseMove"].includes(actionType)) {
+    const position = { label: actionType.startsWith("desktop.") ? "屏幕坐标" : "网页坐标", value: `X ${readableValue(params.x)} · Y ${readableValue(params.y)}` };
+    if (actionType.endsWith("mouseMove")) return [position, { label: "移动方式", value: params.humanLike === false ? "直接定位" : "弧形轨迹" }].slice(0, actionType.startsWith("desktop.") ? 2 : 1);
+    return [position, { label: "鼠标按钮", value: formatField("button", params.button ?? "left", action?.fields.find(field => field.key === "button")) }];
+  }
 
   // Read aliases from structured element references without printing the entire object.
   const element = params.element && typeof params.element === "object" && !Array.isArray(params.element)

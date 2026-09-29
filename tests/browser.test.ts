@@ -54,6 +54,17 @@ describe('BrowserSession public browser boundary', () => {
     expect(await browser.call('browser.evaluate', { expression: '({ clicked: document.body.dataset.clicked, moved: document.body.dataset.moved })' }))
       .toEqual({ clicked: 'yes', moved: 'yes' });
     await browser.call('browser.mouseClick', { x: 30, y: 90 });
+    await browser.call('browser.evaluate', { expression: `
+      window.__keyTimings = [];
+      document.querySelector('#raw-input').addEventListener('keydown', event => window.__keyTimings.push({ type: event.type, at: performance.now() }));
+      document.querySelector('#raw-input').addEventListener('keyup', event => window.__keyTimings.push({ type: event.type, at: performance.now() }));
+      null;
+    ` });
+    await browser.call('browser.keyPress', { key: 'ArrowRight' });
+    const timings = await browser.call('browser.evaluate', { expression: 'window.__keyTimings' }) as Array<{ type: string; at: number }>;
+    expect(timings.map(item => item.type)).toEqual(['keydown', 'keyup']);
+    expect(timings[1].at - timings[0].at).toBeGreaterThanOrEqual(40);
+    await browser.call('browser.evaluate', { expression: 'window.__keyTimings = []; null' });
     await browser.call('browser.keyboardType', { text: 'Alice' });
     await browser.call('browser.keyPress', { key: 'ControlOrMeta+A' });
     await browser.call('browser.keyboardType', { text: 'Bob' });

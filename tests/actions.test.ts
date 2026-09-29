@@ -88,22 +88,45 @@ describe('action parameter validation boundary', () => {
   });
 
   it('validates low-level mouse, keyboard, and XLSX file actions', () => {
+    expect(validateActionParams('desktop.mouseClick', { x: 30, y: 40, button: 'left', clickCount: 2 }))
+      .toEqual({ x: 30, y: 40, button: 'left', clickCount: 2 });
+    expect(validateActionParams('desktop.keyPress', { key: 'Control+A' })).toEqual({ key: 'Control+A' });
+    expect(validateActionParams('desktop.keyboardType', { text: '订单', delayMs: 10 })).toEqual({ text: '订单', delayMs: 10 });
+    expect(validateActionParams('desktop.keyboardType', { text: '订单', inputMode: 'paste', simulateTypo: true, typoText: '错' }))
+      .toEqual({ text: '订单', inputMode: 'paste', simulateTypo: true, typoText: '错' });
+    expect(() => validateActionParams('desktop.keyboardType', { text: '订单', inputMode: 'unknown' })).toThrow('参数错误');
+    expect(validateActionParams('desktop.mouseMove', { x: -20, y: 40, humanLike: false })).toEqual({ x: -20, y: 40, humanLike: false });
+    expect(() => validateActionParams('desktop.mouseClick', { x: 1.5, y: 1, button: 'left', clickCount: 1 })).toThrow('参数错误');
     expect(validateActionParams('browser.mouseClick', { pageId: '$current', x: 12, y: 34, button: 'right', clickCount: 2, delayMs: 15 }))
       .toEqual({ pageId: '$current', x: 12, y: 34, button: 'right', clickCount: 2, delayMs: 15 });
     expect(validateActionParams('browser.mouseMove', { x: 1, y: 2, steps: 3 })).toEqual({ x: 1, y: 2, steps: 3 });
     expect(validateActionParams('browser.mouseWheel', { deltaX: -10, deltaY: 500 })).toEqual({ deltaX: -10, deltaY: 500 });
     expect(validateActionParams('browser.keyPress', { key: 'ControlOrMeta+A' })).toEqual({ key: 'ControlOrMeta+A' });
+    expect(validateActionParams('browser.keyPress', { key: 'Enter', holdMs: 90 })).toEqual({ key: 'Enter', holdMs: 90 });
     expect(validateActionParams('browser.keyboardType', { text: '订单', delayMs: 0 })).toEqual({ text: '订单', delayMs: 0 });
     for (const params of [{ x: -1, y: 0 }, { x: 0, y: Number.NaN }, { x: 0, y: 0, button: 'primary' }, { x: 0, y: 0, clickCount: 0 }]) {
       expect(() => validateActionParams('browser.mouseClick', params)).toThrow('参数错误');
     }
     expect(() => validateActionParams('browser.keyPress', { key: '' })).toThrow('参数错误');
+    expect(() => validateActionParams('browser.keyPress', { key: 'Enter', holdMs: 0 })).toThrow('参数错误');
     expect(() => validateActionParams('browser.keyboardType', { text: 'ok', delayMs: -1 })).toThrow('参数错误');
 
     const file = process.platform === 'win32' ? 'C:\\RPA\\orders.xlsx' : '/tmp/orders.xlsx';
     expect(validateActionParams('file.xlsxRead', { path: file, sheetName: '' })).toEqual({ path: file, sheetName: '' });
+    expect(validateActionParams('control.forEachXlsx', { path: file, sheetName: '', itemVariable: 'row' }))
+      .toEqual({ path: file, sheetName: '', itemVariable: 'row' });
+    expect(actionDefinitions.find(action => action.type === 'control.forEachXlsx')?.defaults).toMatchObject({ valueMode: 'array', itemVariable: 'row' });
+    expect(validateActionParams('control.forEachXlsx', { path: file, itemVariable: 'row', valueMode: 'array' }))
+      .toEqual({ path: file, itemVariable: 'row', valueMode: 'array' });
+    expect(validateActionParams('control.forEachXlsx', { path: file, itemVariable: 'item', valueMode: 'column', columnIndex: 0 }))
+      .toEqual({ path: file, itemVariable: 'item', valueMode: 'column', columnIndex: 0 });
+    for (const columnIndex of [-1, 1.5, 16_384, undefined]) {
+      expect(() => validateActionParams('control.forEachXlsx', { path: file, itemVariable: 'item', valueMode: 'column', columnIndex })).toThrow('参数错误');
+    }
     expect(validateActionParams('file.xlsxWrite', { path: file, rows: [{ id: 'A001', amount: 12 }], sheetName: '结果' }))
       .toEqual({ path: file, rows: [{ id: 'A001', amount: 12 }], sheetName: '结果' });
+    expect(validateActionParams('file.xlsxWrite', { path: file, rows: { id: 'A001', amount: 12 } }))
+      .toEqual({ path: file, rows: [{ id: 'A001', amount: 12 }] });
     for (const path of ['orders.xlsx', file.replace(/\.xlsx$/i, '.csv'), '', 42]) {
       expect(() => validateActionParams('file.xlsxRead', { path })).toThrow('参数错误');
     }

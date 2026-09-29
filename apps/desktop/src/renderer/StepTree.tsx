@@ -128,7 +128,7 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
   };
 
   function renderBranch(step: StepDefinition, branch: Branch, depth: number) {
-    const isLoop = step.actionType === "control.forEach";
+    const isLoop = ["control.forEach", "control.forEachXlsx"].includes(step.actionType);
     const isTry = step.actionType === "control.tryCatch";
     const label = isTry ? branch === "children" ? "Try 执行区" : "Catch 异常区" : isLoop ? "循环体" : branch === "children" ? "满足条件" : "否则";
     const addLabel = isTry ? `添加到 ${label}` : isLoop ? "添加到循环体" : branch === "children" ? "添加到满足条件" : "添加到否则分支";
@@ -169,7 +169,7 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
 
   function renderSteps(items: StepDefinition[], depth: number): ReactNode {
     return items.map((step, index) => {
-      const container = ["control.if", "control.forEach", "control.tryCatch"].includes(step.actionType);
+      const container = ["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch"].includes(step.actionType);
       const note = step.actionType === "core.note";
       const folded = collapsed.has(step.stepId);
       const state = statuses.get(step.stepId);

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type {
+  DesktopApi,
   StepDefinition,
   WorkflowDefinition,
 } from "../../../../packages/contracts/src/index.js";
 import { VariablePicker } from "./VariablePicker.js";
+import { XlsxPathField } from "./XlsxPathField.js";
 
 type ValueMode = "variable" | "text" | "number" | "boolean" | "json";
 type ValueDraft = { mode: ValueMode; text: string };
@@ -134,6 +136,11 @@ export function summarizeControlStep(step: StepDefinition): string | undefined {
       : readable(params.items);
     return `逐项遍历 ${list} · 当前项 ${String(params.itemVariable ?? "item")}`;
   }
+  if (step.actionType === "control.forEachXlsx") {
+    const mode = params.valueMode === "column" ? `第 ${String(params.columnIndex ?? 0)} 列单值`
+      : params.valueMode === "array" ? "整行数组" : "整行对象";
+    return `逐行遍历 ${String(params.path || "未选择 XLSX 文件")} · ${mode} · 当前项 ${String(params.itemVariable ?? "row")}`;
+  }
   if (step.actionType === "core.wait") {
     return `等待 ${typeof params.durationSeconds === "number" ? params.durationSeconds : readable(params.durationSeconds)} 秒`;
   }
@@ -156,6 +163,7 @@ export function changeControlOperator(
 }
 
 interface ControlFlowFieldsProps {
+  api?: DesktopApi;
   step: StepDefinition;
   workflow: WorkflowDefinition;
   disabled?: boolean;
@@ -322,10 +330,14 @@ function ValueField({
   );
 }
 
-function Fields({ step, workflow, disabled, onChange, onValidity }: ControlFlowFieldsProps) {
+function Fields({ api, step, workflow, disabled, onChange, onValidity }: ControlFlowFieldsProps) {
   const setParam = (key: string, value: unknown) => onChange({ ...step.params, [key]: value });
   const cachedRight = useRef(step.params.right);
   const itemVariable = String(step.params.itemVariable ?? "");
+  const columnMode = step.actionType === "control.forEachXlsx" && step.params.valueMode === "column";
+  const arrayMode = step.actionType === "control.forEachXlsx" && step.params.valueMode === "array";
+  const columnIndex = step.params.columnIndex;
+  const columnIndexValid = typeof columnIndex === "number" && Number.isInteger(columnIndex) && columnIndex >= 0 && columnIndex <= 16_383;
   const itemError = !itemVariable.trim()
     ? "请填写当前项变量名，例如 item。"
     : itemVariable !== itemVariable.trim() || /[{}]/.test(itemVariable)
@@ -341,9 +353,13 @@ function Fields({ step, workflow, disabled, onChange, onValidity }: ControlFlowF
   const validity = useRef(onValidity);
   validity.current = onValidity;
   useEffect(() => {
-    if (step.actionType === "control.forEach") validity.current("param:itemVariable", !itemError);
+    if (["control.forEach", "control.forEachXlsx"].includes(step.actionType)) validity.current("param:itemVariable", !itemError);
     return () => validity.current("param:itemVariable", true);
   }, [itemError, step.actionType]);
+  useEffect(() => {
+    if (columnMode) validity.current("param:columnIndex", columnIndexValid);
+    return () => validity.current("param:columnIndex", true);
+  }, [columnMode, columnIndexValid]);
   useEffect(() => {
     if (step.actionType === "control.tryCatch") validity.current("param:errorVariable", !errorVariableError);
     return () => validity.current("param:errorVariable", true);
@@ -411,6 +427,53 @@ function Fields({ step, workflow, disabled, onChange, onValidity }: ControlFlowF
       </div>
     );
   }
+  if (step.actionType === "control.forEachXlsx") return (
+    <div className="control-flow-fields">
+      <XlsxPathField api={api} mode="open" value={String(step.params.path ?? "")} disabled={!!disabled}
+        onChange={path => setParam("path", path)}
+        hint="选择要遍历的 .xlsx 文件；也可填写包含变量的完整路径。" />
+      <label className="field">
+        <span>工作表名称</span>
+        <input aria-label="工作表名称" value={String(step.params.sheetName ?? "")} disabled={disabled}
+          placeholder="留空读取第一个工作表" onChange={event => setParam("sheetName", event.target.value)} />
+      </label>
+      <label className="field">
+        <span>遍历内容</span>
+        <select aria-label="遍历内容" value={columnMode ? "column" : arrayMode ? "array" : "row"} disabled={disabled}
+          onChange={event => onChange({ ...step.params, valueMode: event.target.value,
+            columnIndex: step.params.columnIndex ?? 0 })}>
+          <option value="array">整行数组（用 [0]、[1] 取值）</option>
+          <option value="column">单列值（按下标）</option>
+          <option value="row">整行对象（兼容旧流程）</option>
+        </select>
+      </label>
+      {columnMode && <label className="field">
+        <span>列下标（从 0 开始）</span>
+        <input aria-label="列下标（从 0 开始）" type="number" min="0" max="16383" step="1"
+          value={columnIndex === undefined ? "" : String(columnIndex)} disabled={disabled}
+          className={!columnIndexValid ? "input-error" : ""} aria-invalid={!columnIndexValid}
+          onChange={event => setParam("columnIndex", event.target.value === "" ? "" : Number(event.target.value))} />
+        <small>0 是第一列，1 是第二列；每行只取这一列的单元格值。</small>
+        {!columnIndexValid && <span className="field-error" role="alert">请输入 0～16383 的整数列下标。</span>}
+      </label>}
+      <label className="field">
+        <span>当前项变量</span>
+        <input aria-label="当前项变量" value={itemVariable} disabled={disabled} placeholder="item"
+          className={itemTouched && itemError ? "input-error" : ""} aria-invalid={!!itemError}
+          onBlur={() => setItemTouched(true)} onChange={event => setParam("itemVariable", event.target.value)} />
+        <small>{arrayMode
+          ? <>每轮是一整行；用 <code>{`{{${itemVariable || "row"}}}[0]`}</code> 取第 1 个值、<code>{`{{${itemVariable || "row"}}}[1]`}</code> 取第 2 个值。</>
+          : columnMode
+            ? <>循环体内用 <code>{`{{${itemVariable || "item"}}}`}</code> 直接读取当前单元格的值。</>
+            : <>循环体内用 <code>{`{{${itemVariable || "row"}.列名}}`}</code> 读取整行对象的字段。</>}</small>
+        {itemTouched && itemError && <span className="field-error" role="alert">{itemError}</span>}
+      </label>
+      <div className="control-preview" aria-live="polite">
+        <span>循环内容</span><strong>{summarizeControlStep(step)}</strong>
+        <p>每一行执行缩进区域内的指令。遍历完成后恢复同名变量，并继续后面的步骤。</p>
+      </div>
+    </div>
+  );
   if (step.actionType !== "control.forEach") return null;
   return (
     <div className="control-flow-fields">

@@ -1,5 +1,5 @@
 import { WorkflowEngine, type EngineOptions } from '../../../packages/engine/src/index.js';
-import type { BrowserPageInfo, RunCommand, WorkflowDefinition } from '../../../packages/contracts/src/index.js';
+import type { BrowserPageInfo, BrowserPoint, RunCommand, WorkflowDefinition } from '../../../packages/contracts/src/index.js';
 let engine: WorkflowEngine | undefined;
 let started = false;
 let finished = false;
@@ -14,7 +14,23 @@ function observeExecution(pending: Promise<unknown>) {
     console.error(error); process.exitCode = 1; process.disconnect?.();
   });
 }
-process.on('message', (message: { type: string; requestId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string }) => {
+process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string }) => {
+  if (message.type === 'pick-browser-point' || message.type === 'cancel-browser-point') {
+    controls++;
+    void (async () => {
+      let point: BrowserPoint | null = null;
+      let error: string | undefined;
+      try {
+        if (!engine) throw new Error('任务执行器尚未启动');
+        if (message.type === 'pick-browser-point') point = await engine.pickBrowserPoint(message.pageId!, message.requestId!);
+        else await engine.cancelBrowserPoint(message.pickId!);
+      } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+      if (process.connected) await new Promise<void>(resolve => {
+        process.send?.({ type: message.type === 'pick-browser-point' ? 'point-result' : 'control-result', requestId: message.requestId, point, error }, () => resolve());
+      });
+      controls--; releaseWorkerWhenClosed();
+    })();
+  }
   if (message.type === 'list-browser-pages') {
     controls++;
     void (async () => {

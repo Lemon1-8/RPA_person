@@ -17,7 +17,7 @@
     "test:integration": "vitest run tests/integration",
     "browser:install": "playwright install chromium",
     "setup": "node node_modules/electron/install.js && playwright install chromium",
-    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-workspace.mjs && node scripts/smoke-save-run.mjs && node scripts/smoke-single-step.mjs && node scripts/smoke-control-flow.mjs && node scripts/smoke-wait-try-catch.mjs && node scripts/smoke-note.mjs && node scripts/smoke-logging.mjs && node scripts/smoke-browser-pages.mjs && node scripts/smoke-responsive-workspace.mjs && node scripts/smoke-step-comments.mjs",
+    "test:desktop": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-workspace.mjs && node scripts/smoke-save-run.mjs && node scripts/smoke-single-step.mjs && node scripts/smoke-control-flow.mjs && node scripts/smoke-wait-try-catch.mjs && node scripts/smoke-note.mjs && node scripts/smoke-logging.mjs && node scripts/smoke-browser-pages.mjs && node scripts/smoke-responsive-workspace.mjs && node scripts/smoke-step-comments.mjs && node scripts/smoke-coordinate-picker.mjs && npx tsx scripts/smoke-desktop-point.ts && node scripts/smoke-xlsx.mjs && npx tsx scripts/smoke-desktop-input.ts",
     "demo": "tsx apps/runner/src/cli.ts demo",
     "rpa": "tsx apps/runner/src/cli.ts",
     "check": "npm run typecheck && npm test && npm run build"
@@ -27,7 +27,7 @@
     "playwright": "1.63.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "4.6.5"
   },
   "devDependencies": {

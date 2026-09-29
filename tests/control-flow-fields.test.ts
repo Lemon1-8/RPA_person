@@ -52,6 +52,15 @@ describe("控制流参数编辑", () => {
     expect(changeControlOperator(truthy, "notEquals", null).right).toBeNull();
   });
 
+  it("行数组引用后可用方括号下标取得单值，包括嵌在日志中的引用", () => {
+    const variables = { row: [0, "第二列", null] };
+    expect(resolveValue("{{row}}[0]", variables)).toBe(0);
+    expect(resolveValue("{{row}}[2]", variables)).toBeNull();
+    expect(resolveValue("第一列={{row}}[0]；第二列={{row}}[1]", variables)).toBe("第一列=0；第二列=第二列");
+    expect(() => resolveValue("{{row}}[3]", variables)).toThrow("列表下标超出范围");
+    expect(() => resolveValue("{{row}}[0]", { row: { 0: "对象" } })).toThrow("变量不是列表");
+  });
+
   it("摘要显示自然语言条件和循环当前项，不生成不存在的索引变量", () => {
     const step: StepDefinition = {
       stepId: "condition", name: "条件分支", actionType: "control.if",
