@@ -4,14 +4,28 @@ let engine: WorkflowEngine | undefined;
 let started = false;
 let finished = false;
 let controls = 0;
+let pendingSends = 0;
 function releaseWorkerWhenClosed() {
   setImmediate(() => {
-    if (finished && controls === 0 && !engine?.getSnapshot().browserOpen && process.connected) process.disconnect?.();
+    // Electron disconnects before queued IPC writes drain, so wait for every send callback.
+    if (finished && controls === 0 && pendingSends === 0 && !engine?.getSnapshot().browserOpen && process.connected) process.disconnect?.();
   });
+}
+function sendMessage(message: object, onSent?: () => void) {
+  if (!process.connected || !process.send) { onSent?.(); return; }
+  pendingSends++;
+  const sent = (error: Error | null) => {
+    pendingSends--;
+    if (error) { console.error(`任务消息发送失败：${error.message}`); process.exitCode = 1; }
+    onSent?.();
+    releaseWorkerWhenClosed();
+  };
+  try { process.send(message, sent); }
+  catch (error) { sent(error instanceof Error ? error : new Error(String(error))); }
 }
 function observeExecution(pending: Promise<unknown>) {
   pending.then(() => { finished = true; releaseWorkerWhenClosed(); }).catch(error => {
-    console.error(error); process.exitCode = 1; process.disconnect?.();
+    console.error(error); process.exitCode = 1; finished = true; releaseWorkerWhenClosed();
   });
 }
 process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string }) => {
@@ -26,7 +40,7 @@ process.on('message', (message: { type: string; requestId?: string; pickId?: str
         else await engine.cancelBrowserPoint(message.pickId!);
       } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
       if (process.connected) await new Promise<void>(resolve => {
-        process.send?.({ type: message.type === 'pick-browser-point' ? 'point-result' : 'control-result', requestId: message.requestId, point, error }, () => resolve());
+        sendMessage({ type: message.type === 'pick-browser-point' ? 'point-result' : 'control-result', requestId: message.requestId, point, error }, resolve);
       });
       controls--; releaseWorkerWhenClosed();
     })();
@@ -39,7 +53,7 @@ process.on('message', (message: { type: string; requestId?: string; pickId?: str
       try { pages = await engine?.listBrowserPages() ?? []; }
       catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
       if (process.connected) await new Promise<void>(resolve => {
-        process.send?.({ type: 'pages-result', requestId: message.requestId, pages, error }, () => resolve());
+        sendMessage({ type: 'pages-result', requestId: message.requestId, pages, error }, resolve);
       });
       controls--; releaseWorkerWhenClosed();
     })();
@@ -51,7 +65,7 @@ process.on('message', (message: { type: string; requestId?: string; pickId?: str
       try { if (!engine) throw new Error('任务执行器尚未启动'); await engine.control(message.command!); }
       catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
       if (process.connected) await new Promise<void>(resolve => {
-        process.send?.({ type: 'control-result', requestId: message.requestId, error }, () => resolve());
+        sendMessage({ type: 'control-result', requestId: message.requestId, error }, resolve);
       });
       controls--; releaseWorkerWhenClosed();
     })();
@@ -64,17 +78,17 @@ process.on('message', (message: { type: string; requestId?: string; pickId?: str
       finished = false;
       observeExecution(pending);
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
-    if (process.connected) process.send?.({ type: 'control-result', requestId: message.requestId, error });
+    sendMessage({ type: 'control-result', requestId: message.requestId, error });
   }
   if (message.type === 'start' && !started) {
     started = true;
     try {
       engine = new WorkflowEngine(message.workflow!, { ...message.options!, onEvent: event => {
-        if (process.connected) process.send?.({ type: 'event', event });
+        sendMessage({ type: 'event', event });
         if (event.run && !event.run.browserOpen) releaseWorkerWhenClosed();
       } });
       observeExecution(message.stepId ? engine.runSingleStep(message.stepId) : engine.run());
-    } catch (error) { console.error(error); process.exitCode = 1; process.disconnect?.(); }
+    } catch (error) { console.error(error); process.exitCode = 1; finished = true; releaseWorkerWhenClosed(); }
   }
 });
 process.on('disconnect', () => { engine?.control('stop').catch(() => {}); });

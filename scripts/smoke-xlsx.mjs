@@ -1,9 +1,10 @@
 import { _electron as electron } from 'playwright';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import xlsx from 'xlsx';
 
 const root = process.cwd();
 const data = await mkdtemp(join(tmpdir(), 'rpa-xlsx-desktop-'));
@@ -77,7 +78,44 @@ try {
   assert.deepEqual(calls[0].options.properties, ['openFile']);
   await mkdir(qa, { recursive: true });
   await page.screenshot({ path: join(qa, 'xlsx-picker-success.png'), fullPage: true });
+
+  // Retaining the workbook in a variable creates the same IPC backlog as real XLSX exports.
+  const completeFile = join(data, 'complete.xlsx');
+  const sourceRows = Array.from({ length: 24 }, (_, index) => [`测试店铺${index + 1}`, `测试账号${index + 1}`, '备注'.repeat(4_000)]);
+  const book = xlsx.utils.book_new();
+  xlsx.utils.book_append_sheet(book, xlsx.utils.aoa_to_sheet([['店铺', '账号', '备注'], ...sourceRows]), '数据');
+  await writeFile(completeFile, xlsx.write(book, { type: 'buffer', bookType: 'xlsx' }));
+  const saved = (await page.evaluate(() => window.rpa.bootstrap())).workflows.find(flow => flow.workflowId === workflow.workflowId);
+  const completeFlow = { ...saved, name: 'XLSX 完整遍历验收', steps: [
+    { stepId: 'read-complete', name: '读取完整 XLSX', actionType: 'file.xlsxRead', params: { path: completeFile }, output: 'workbook' },
+    { stepId: 'loop-complete', name: '遍历全部数据行', actionType: 'control.forEachXlsx', params: { path: completeFile, valueMode: 'array', itemVariable: 'row' }, output: 'loopResult', children: [
+      { stepId: 'print-complete', name: '打印当前行', actionType: 'core.log', params: { message: '{{row}}[0], {{row}}[1]' } },
+    ] },
+  ] };
+  await page.evaluate(flow => window.rpa.saveWorkflow(flow), completeFlow);
+  await page.reload();
+  await page.getByRole('heading', { name: completeFlow.name, exact: true }).waitFor();
+  const previousRuns = (await page.evaluate(() => window.rpa.bootstrap())).runs.map(run => run.runId);
+  await page.evaluate(() => { window.xlsxSmokeEvents = []; window.rpa.onEvent(event => window.xlsxSmokeEvents.push(event)); });
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  let completeRun;
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    completeRun = (await page.evaluate(() => window.rpa.bootstrap())).runs.find(run => !previousRuns.includes(run.runId));
+    if (completeRun && ['succeeded', 'failed', 'stopped', 'interrupted'].includes(completeRun.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(completeRun?.status, 'succeeded', completeRun?.error ?? '完整 XLSX 循环未在 20 秒内完成');
+  assert.deepEqual(completeRun.variables.loopResult, { count: sourceRows.length });
+  assert.equal(completeRun.variables.row, undefined, '循环结束后应恢复当前行变量');
+  const printed = await page.evaluate(() => window.xlsxSmokeEvents.filter(event => event.type === 'log' && event.stepId === 'print-complete').map(event => event.message));
+  assert.deepEqual(printed, sourceRows.map(row => `${row[0]}, ${row[1]}`), '每行只打印一次，顺序完整');
+  const monitor = page.getByRole('region', { name: '运行监控', exact: true });
+  assert.equal(await monitor.locator('.log-line-step').count(), 0, '读取、遍历及打印指令默认都不显示完成提示');
+  assert.equal(await monitor.locator('.log-line').filter({ hasText: '测试店铺' }).count(), sourceRows.length);
+  await page.getByRole('button', { name: '步骤 3：打印当前行', exact: true }).click();
+  await page.screenshot({ path: join(qa, 'xlsx-complete-success.png'), fullPage: true });
   console.log(JSON.stringify({ status: 'passed', zip64Loop: true, rowVariable: true, nativeFilePicker: true, cancelPreservesPath: true, saveAsPicker: true, screenshot: join(qa, 'xlsx-picker-success.png') }));
+  console.log(JSON.stringify({ status: 'passed', completeRows: printed.length, printCompletionHidden: true, screenshot: join(qa, 'xlsx-complete-success.png') }));
 } finally {
   await app?.close();
   if (dirname(resolve(data)) !== resolve(tmpdir()) || !basename(data).startsWith('rpa-xlsx-desktop-')) throw new Error('拒绝清理测试目录之外的路径');

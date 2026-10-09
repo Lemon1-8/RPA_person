@@ -29,7 +29,7 @@ async function save() {
   await page.getByText('未保存', { exact: true }).waitFor({ state: 'hidden' });
 }
 
-async function runLoop(workflowId) {
+async function runLoop(workflowId, expectedStatus = 'succeeded') {
   const previous = new Set((await bootstrap()).runs.map(run => run.runId));
   await page.getByRole('button', { name: '单独运行 日志验收循环', exact: true }).click();
   const deadline = Date.now() + 30_000;
@@ -39,7 +39,7 @@ async function runLoop(workflowId) {
     if (run && ['succeeded', 'failed', 'stopped', 'interrupted'].includes(run.status)) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
-  assert.equal(run?.status, 'succeeded', run?.error);
+  assert.equal(run?.status, expectedStatus, run?.error);
   assert.equal(run.stepId, 'loop', '应通过循环的单独运行入口执行');
   assert.equal(run.browserOpen, false, '打印日志无需启动浏览器');
   assert.equal(await page.getByRole('button', { name: '显示所选运行浏览器', exact: true }).isEnabled(), false);
@@ -96,6 +96,9 @@ try {
   assert.ok(logs.every(event => event.stepId === logStep.stepId), '每条日志必须关联循环内的打印步骤');
   assert.equal(first.run.variables.item, undefined, '循环结束后当前项变量应恢复作用域');
   const monitor = page.getByRole('region', { name: '运行监控', exact: true });
+  const detailToggle = monitor.getByRole('switch', { name: '显示指令执行信息', exact: true });
+  assert.equal(await detailToggle.getAttribute('aria-checked'), 'false', '指令执行信息应默认关闭');
+  assert.equal(await monitor.locator('.log-line-step').count(), 0, '所有指令默认隐藏执行中、完成和跳过提示');
   for (let item = 1; item <= 4; item++) {
     const row = monitor.locator('.log-line').filter({ hasText: `当前项：${item}` });
     assert.equal(await row.count(), 1, `日志面板应显示当前项 ${item}`);
@@ -112,6 +115,18 @@ try {
   await monitor.getByRole('button', { name: '失败', exact: true }).click();
   assert.equal(await monitor.locator('.log-line').count(), 0, '成功运行不应出现失败日志');
   await monitor.getByRole('button', { name: '全部', exact: true }).click();
+  await detailToggle.click();
+  assert.equal(await monitor.locator('.log-line-step').count(), 5, '主动开启后显示循环和四次打印的完成信息');
+  const loopCompletion = monitor.locator('.log-line-step').filter({ hasText: '日志验收循环' });
+  assert.match(await loopCompletion.textContent(), /已完成 · .*毫秒|已完成 · .*秒/);
+  await detailToggle.click();
+  assert.equal(await monitor.locator('.log-line-step').count(), 0, '关闭后重新隐藏所有普通执行信息');
+  await monitor.getByRole('button', { name: '步骤', exact: true }).click();
+  assert.equal(await detailToggle.getAttribute('aria-checked'), 'true', '主动选择步骤筛选应开启执行信息');
+  assert.equal(await monitor.locator('.log-line').count(), 5);
+  await detailToggle.click();
+  assert.equal(await monitor.getByRole('button', { name: '全部', exact: true }).getAttribute('aria-pressed'), 'true', '关闭执行信息时退出步骤筛选');
+  assert.equal(await monitor.locator('.log-line-step').count(), 0);
   await page.setViewportSize({ width: 1464, height: 1200 });
   await stepButton('打印当前项').click();
   await stepButton('日志验收循环').scrollIntoViewIfNeeded();
@@ -141,6 +156,22 @@ try {
   assert.equal(await monitor.getByRole('button', { name: '打开文件', exact: true }).count(), 0, '日志对象的 path 字段不能被当成下载产物入口');
   await stepButton('打印当前项').click();
   await page.screenshot({ path: join(qa, 'logging-object-success.png'), fullPage: true });
+
+  await detailToggle.click();
+  await page.reload();
+  await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
+  assert.equal(await detailToggle.getAttribute('aria-checked'), 'true', '重新打开页面后保留主动开启的选择');
+  await detailToggle.click();
+  await page.reload();
+  await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
+  assert.equal(await detailToggle.getAttribute('aria-checked'), 'false', '关闭选择也应持久保存');
+  await page.evaluate(() => { window.loggingSmokeEvents = []; window.rpa.onEvent(event => window.loggingSmokeEvents.push(event)); });
+  await stepButton('打印当前项').click();
+  await inspector.getByLabel(/^日志内容/).fill('{{missing}}');
+  await save();
+  const failed = await runLoop(flow.workflowId, 'failed');
+  assert.ok(failed.run.error.includes('missing'));
+  assert.equal(await monitor.locator('.log-line-step.log-error').count(), 2, '关闭执行信息时仍显示打印和循环的失败');
   assert.equal(pageErrors.length, 0, pageErrors.join('\n'));
   console.log(JSON.stringify({ status: 'passed', addedInsideLoop: true, variablePickerPreservesPrefix: true, savedAndReloaded: true, singleStepLoopMessages: logs.map(event => event.message), stepAttribution: true, browserNotRequired: true, objectValueLogged: true, objectPathNotOpenedAsFile: true, screenshot: join(qa, 'logging-success.png'), objectScreenshot: join(qa, 'logging-object-success.png') }, null, 2));
 } catch (error) {

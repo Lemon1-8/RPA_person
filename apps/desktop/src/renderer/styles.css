@@ -1657,7 +1657,14 @@ td > .status-browser-retained {
 .log-filters button { min-height: 29px; padding: 3px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #61737a; font-size: 12px; white-space: nowrap; }
 .log-filters button:hover { background: #eaf1f2; }
 .log-filters button.active { border-color: #c7dcd7; background: #e4f2ee; color: #17665b; font-weight: 650; }
-.log-filters button:focus-visible, .log-latest:focus-visible, .log-step:focus-visible, .log-file-action:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.log-details-toggle { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 3px 4px; border: 0; border-radius: 5px; background: transparent; color: #61737a; font-size: 12px; white-space: nowrap; }
+.log-details-toggle:hover { background: #eaf1f2; }
+.log-details-track { position: relative; width: 28px; height: 16px; border-radius: 8px; background: #b6c3c8; }
+.log-details-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; }
+.log-details-toggle[aria-checked="true"] { color: #17665b; }
+.log-details-toggle[aria-checked="true"] .log-details-track { background: var(--teal); }
+.log-details-toggle[aria-checked="true"] .log-details-track::after { left: 14px; }
+.log-filters button:focus-visible, .log-details-toggle:focus-visible, .log-latest:focus-visible, .log-step:focus-visible, .log-file-action:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 .log-count { margin-left: auto; color: #647680; font-size: 12px; white-space: nowrap; }
 .log-latest { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 3px 8px; border: 1px solid #b9d6d0; border-radius: 5px; background: #fff; color: #17665b; font-size: 12px; white-space: nowrap; }
 .log-scroll { flex: 1; min-height: 0; overflow: auto; }

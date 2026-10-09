@@ -5,12 +5,13 @@ export interface LogRow { event: RunEvent; index: number }
 
 const terminalRunStatuses = new Set(["succeeded", "failed", "stopped", "interrupted"]);
 
-export function logRows(events: RunEvent[], runId: string): LogRow[] {
+export function logRows(events: RunEvent[], runId: string, showStepDetails = false): LogRow[] {
   const rows: (LogRow | null)[] = [];
   const running = new Map<string, number>();
   events.forEach((event, index) => {
     if (event.runId !== runId) return;
     if (event.type === "step" && event.stepId) {
+      if (!showStepDetails && event.status !== "failed") return;
       if (event.status === "running") {
         const previous = running.get(event.stepId);
         if (previous !== undefined) rows[previous] = null;

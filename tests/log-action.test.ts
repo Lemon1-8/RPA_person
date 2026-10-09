@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunEvent, StepDefinition, WorkflowDefinition } from '../packages/contracts/src/index.js';
 import { WorkflowEngine } from '../packages/engine/src/index.js';
+import { logRows } from '../apps/desktop/src/renderer/log-view.js';
 
 const directories: string[] = [];
 function logStep(message: unknown, stepId = 'print'): StepDefinition {
@@ -33,6 +34,8 @@ describe('打印日志指令', () => {
     expect(result.browserOpen).toBe(false);
     expect(result.variables.printedText).toBe(text);
     expect(printed(events)).toEqual([expect.objectContaining({ runId: 'log-run', message: text, data: { value: text } })]);
+    expect(events.filter(event => event.type === 'step').map(event => event.status)).toEqual(['running', 'succeeded']);
+    expect(logRows(events, 'log-run').filter(row => row.event.stepId === 'print').map(row => row.event.type)).toEqual(['log']);
   });
 
   it('读取前序步骤产生的变量并支持文字内插值', async () => {
