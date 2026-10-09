@@ -59,6 +59,7 @@ await browser.close();
 | `browser.assertText` | 元素参数、`text` | `{ ok: true, text }`；等待包含期望文本 |
 | `browser.response` | 触发元素参数、`urlIncludes`, `method?`, `requestIncludes?` | `{ url, status, method, requestBody, headers, body }` |
 | `browser.download` | 触发元素参数、`directory?`, `filename?` | `{ path, name, size, sourceUrl }` |
+| `browser.screenshot` | `pageId?`, `fullPage?`（默认 `true`）, `directory?`, `filename?` | `{ path, name, size, sourceUrl, pageId }`；PNG 截图 |
 | `browser.evaluate` | `expression`, `pageId?` | JSON 可表达的值 |
 | `browser.show` / `browser.hide` | `pageId?` | `{ state, headless }` |
 
@@ -77,6 +78,7 @@ await browser.close();
 - 锁内容损坏、查询失败、权限不足、进程信息无法确认、网络目录及非 Windows 平台均不会自动回收。PID 被其他活进程复用时也保守视为占用；错误会明确说明未清理的原因。正常停止、启动失败和取消仍释放本任务拥有的租约。
 - `browser.response` 在点击前监听，只接受监听建立之后发出的匹配请求，避免把已经在途的旧响应当成本次操作结果。
 - 下载在点击前监听。最终文件使用独占名称预留，同名追加 `(1)`、`(2)`；完成保存并读取实际文件信息后返回成功。浏览器关闭前已保存的文件会保留。
+- 页面截图支持完整网页和当前可见区域，不要求元素选择器，不改变流程当前网页。目录缺省或为空时使用会话下载目录；通过执行器调用时继承指令／父级／流程的下载目录。文件名缺省或为空时为 `screenshot.png`，省略后缀自动补 `.png`，其他格式或包含路径的文件名会报错。先完成截图，再独占分配文件名并保存，同名文件追加序号。捕获失败或超时不留下空文件，关闭会话会中断捕获；成功后执行器登记产物，脚本 RPC 同样可用。旧的 `screenshot(path)` 方法继续用于失败现场截图。
 - `browser.evaluate` 面向用户自己的本地脚本，不构成运行不可信脚本的安全沙箱。任意页面表达式超时后关闭并废弃整个会话，以阻止晚到的脚本继续影响后续步骤。
 
 ## 标签页与别名

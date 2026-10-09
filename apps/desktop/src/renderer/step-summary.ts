@@ -18,7 +18,7 @@ export function getStepCategory(actionType: string): StepCategory {
 
 const labels: Record<string, string> = {
   url: "网页地址", openMode: "打开方式", pageId: "目标网页", browserChannel: "浏览器", debugPort: "调试端口",
-  closeMode: "关闭范围", mode: "模式", selector: "元素选择器", element: "目标元素", framePath: "框架路径",
+  closeMode: "关闭范围", mode: "模式", selector: "元素选择器", element: "目标元素", framePath: "框架路径", fullPage: "截图范围",
   value: "参数值", text: "文本", directory: "保存目录", filename: "文件名称", path: "文件路径",
   x: "横坐标", y: "纵坐标", button: "鼠标按钮", clickCount: "点击次数", steps: "移动步数",
   deltaX: "横向滚动", deltaY: "纵向滚动", key: "按键", delayMs: "间隔时长", holdMs: "按键时长", sheetName: "工作表",
@@ -30,6 +30,7 @@ const labels: Record<string, string> = {
 const preferredKeys: Record<string, string[]> = {
   "browser.start": ["browserChannel", "debugPort"],
   "browser.open": ["url", "openMode"],
+  "browser.screenshot": ["pageId", "fullPage", "filename", "directory"],
   "browser.fill": ["selector", "value", "pageId"],
   "browser.select": ["selector", "value", "pageId"],
   "browser.assertText": ["selector", "text", "pageId"],
@@ -77,6 +78,7 @@ function expressionValue(value: unknown): string {
 }
 
 function formatField(key: string, value: unknown, field?: ActionField): string {
+  if (key === "fullPage" && typeof value === "boolean") return value ? "完整网页" : "当前可见区域";
   if (key === "pageId" && (value === "$current" || value === "")) return "当前网页";
   if (typeof value === "string") {
     const option = field?.options?.find(item => item.value === value)?.label ?? options[key]?.[value];
@@ -128,6 +130,7 @@ export function getStepDetails(step: StepDefinition, action?: ActionDefinition):
     if (!values.pageId && typeof element.pageRef === "string") values.pageId = element.pageRef;
   }
   if (actionType === "browser.open") values.openMode ??= "reuse";
+  if (actionType === "browser.screenshot") { values.pageId ??= "$current"; values.fullPage ??= true; }
   if (actionType === "browser.closePage") values.closeMode ??= "page";
   const fields = action?.fields ?? [];
   const keys = [...new Set([...(preferredKeys[actionType] ?? []), ...fields.map(field => field.key), ...Object.keys(values)])];
@@ -138,7 +141,7 @@ export function getStepDetails(step: StepDefinition, action?: ActionDefinition):
     const value = values[key];
     if (value === undefined || (value === "" && key !== "pageId")) continue;
     const field = fields.find(item => item.key === key);
-    const label = (field?.label ?? labels[key] ?? `参数 ${result.length + 1}`).replace(/（[^）]*）|\([^)]*\)/g, "").trim();
+    const label = (key === "fullPage" ? labels.fullPage : field?.label ?? labels[key] ?? `参数 ${result.length + 1}`).replace(/（[^）]*）|\([^)]*\)/g, "").trim();
     result.push({ label, value: formatField(key, value, field) });
     if (result.length === 2) break;
   }

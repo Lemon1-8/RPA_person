@@ -353,14 +353,14 @@ export class WorkflowEngine {
       params.element = { selector: params.selector, framePath: params.framePath, pageRef: params.pageId };
       delete params.selector; delete params.framePath;
     }
-    if (method === 'browser.download') {
+    if (method === 'browser.download' || method === 'browser.screenshot') {
       params.directory ||= this.scopedSettings.downloadDir ?? this.workflow.settings.downloadDir;
       if (!params.filename) delete params.filename;
     }
     {
       const value = await this.callBrowser(method, params, timeoutMs, signal);
       this.checkStop(); signal?.throwIfAborted();
-      if (method === 'browser.download') {
+      if (method === 'browser.download' || method === 'browser.screenshot') {
         const artifact = { ...(value as Artifact), stepId: this.snapshot.currentStepId };
         this.snapshot.artifacts.push(artifact);
         this.emit({ type: 'artifact', stepId: this.snapshot.currentStepId, data: artifact });

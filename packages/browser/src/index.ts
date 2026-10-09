@@ -1,8 +1,8 @@
-import { mkdir, open, realpath, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
-import type { BrowserPageInfo, BrowserPoint } from '../../contracts/src/index.js';
+import { browserScreenshotParamsSchema, type BrowserPageInfo, type BrowserPoint, type BrowserScreenshotResult } from '../../contracts/src/index.js';
 import { coordinatePickerSource, disposeCoordinatePicker } from './coordinate-picker.js';
 import { assertDebugPortAvailable, BrowserSessionError, killNativeBrowser, launchNativeBrowser, resolveBrowser, type BrowserChannel, type NativeBrowser } from './native-browser.js';
 import { removeTemporaryDownloadHistory } from './download-history.js';
@@ -68,6 +68,21 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
       timer = setTimeout(() => reject(new BrowserSessionError('BROWSER_TIMEOUT', `浏览器操作超过 ${milliseconds} 毫秒`)), milliseconds);
     })]);
   } finally { clearTimeout(timer); }
+}
+
+async function reserveArtifactPath(directory: string, name: string): Promise<string> {
+  const extension = extname(name);
+  const stem = name.slice(0, name.length - extension.length);
+  // Exclusive creation prevents collisions across processes and browser sessions.
+  for (let index = 0; index < 10_000; index++) {
+    const candidate = join(directory, index ? `${stem} (${index})${extension}` : name);
+    try {
+      const reservation = await open(candidate, 'wx');
+      await reservation.close();
+      return candidate;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+  throw new Error('保存目录内同名文件过多，无法分配文件名');
 }
 
 /** One persistent browser owner. Calls from visual actions and scripts share this queue. */
@@ -454,6 +469,7 @@ export class BrowserSession {
   }
 
   private async execute(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (method === 'browser.screenshot') return this.saveScreenshot(params);
     if (method === 'browser.popupGuard') {
       if (params.mode !== 'off' && params.mode !== 'smart' && params.mode !== 'strict') throw new Error('弹窗屏蔽模式必须是 off、smart 或 strict');
       return this.popupGuard!.setMode(params.mode);
@@ -626,20 +642,7 @@ export class BrowserSession {
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '');
       if (!name) name = 'download';
       if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(name)) name = `_${name}`;
-      const extension = extname(name);
-      const stem = name.slice(0, name.length - extension.length);
-      let target: string | undefined;
-      // Atomic reservation covers all processes and browser sessions sharing this destination.
-      for (let index = 0; index < 10_000; index++) {
-        const candidate = join(directory, index ? `${stem} (${index})${extension}` : name);
-        try {
-          const reservation = await open(candidate, 'wx');
-          await reservation.close();
-          target = candidate;
-          break;
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-      }
-      if (!target) throw new Error('下载目录内同名文件过多，无法分配文件名');
+      const target = await reserveArtifactPath(directory, name);
       try {
         const saving = download.saveAs(target);
         try { await bounded(saving, timeout(params)); }
@@ -663,6 +666,29 @@ export class BrowserSession {
       clearTimeout(timer);
       page.off('download', resolveDownload);
       page.off('close', onClose);
+    }
+  }
+
+  private async saveScreenshot(params: Record<string, unknown>): Promise<BrowserScreenshotResult> {
+    const input = browserScreenshotParamsSchema.parse(params);
+    const page = this.page(input);
+    const directory = resolve(input.directory || this.options.downloadDir);
+    const filename = input.filename || 'screenshot.png';
+    const name = /\.png$/i.test(filename) ? filename : `${filename}.png`;
+    // Capture before reserving a file: a timeout or closed page leaves no empty artifact.
+    const buffer = await page.screenshot({ type: 'png', fullPage: input.fullPage ?? true, timeout: timeout(params) });
+    this.launchAbort.signal.throwIfAborted();
+    await mkdir(directory, { recursive: true });
+    const target = await reserveArtifactPath(directory, name);
+    try {
+      this.launchAbort.signal.throwIfAborted();
+      await writeFile(target, buffer);
+      const file = await stat(target);
+      this.launchAbort.signal.throwIfAborted();
+      return { path: target, name: basename(target), size: file.size, sourceUrl: page.url(), pageId: this.pageIds.get(page)! };
+    } catch (error) {
+      await unlink(target).catch(() => undefined);
+      throw error;
     }
   }
 

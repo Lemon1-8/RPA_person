@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import type { ActionDefinition, ActionField, StepDefinition, WorkflowDefinition } from '../../contracts/src/index.js';
+import { browserScreenshotParamsSchema } from '../../contracts/src/index.js';
 
 const text = (key: string, label: string, required = true, placeholder?: string): ActionField => ({ key, label, type: 'text', required, placeholder });
 const json = (key: string, label: string): ActionField => ({ key, label, type: 'json', required: true });
@@ -61,6 +62,9 @@ add('browser.closePage', '关闭网页', '浏览器', '可关闭一个指定网�
 add('browser.popupGuard', '智能屏蔽弹窗', '浏览器', '为当前浏览器持续屏蔽广告、营销、Cookie 弹层和意外新窗口；登录、支付及业务确认弹层保留。', true,
   [{ key: 'mode', label: '屏蔽模式', type: 'select', required: true, options: [{ label: '智能屏蔽（推荐）', value: 'smart' }, { label: '严格屏蔽', value: 'strict' }, { label: '关闭屏蔽', value: 'off' }] }],
   { mode: 'smart' }, z.object({ mode: z.enum(['off', 'smart', 'strict']) }));
+add('browser.screenshot', '网页截图', '浏览器', '截取当前或指定网页并保存为 PNG 图片。默认截取完整网页；取消勾选后只截取当前可见区域。\n\n保存目录留空时使用当前指令或流程设置的下载目录；文件名称留空时使用 screenshot.png，可省略 .png 后缀。同名文件自动加序号，不覆盖已有图片。输出包含文件路径、名称、字节数、来源网址和网页名称，截图也会显示在运行产物中。', false,
+  [page, { key: 'fullPage', label: '截取完整网页', type: 'boolean', defaultValue: true }, text('directory', '保存目录', false, '留空使用流程设置'), text('filename', '文件名称', false, 'screenshot.png')],
+  { pageId: '$current', fullPage: true, directory: '', filename: '' }, browserScreenshotParamsSchema);
 add('browser.wait', '等待元素', '网页操作', '流程执行到这一步时，会先等待指定的网页元素出现并显示出来，再继续执行后面的步骤。如果元素已经显示，就立即继续。\n\n例如：需要手动登录时，先等待登录后才出现的用户名显示，再执行后续操作。\n\n在“元素选择器”中填写要等待的目标。默认最多等待 30 秒，可在“设置”中的“步骤超时（毫秒）”修改；超时后按“失败后”的设置结束运行或暂停，等待人工处理。\n\n此指令只判断元素是否显示，不检查文字是否更新，也不代表整个网页已经加载完成。', true, fields, { selector: '' }, targetSchema);
 add('browser.click', '点击元素', '网页操作', '在当前或指定的目标网页点击元素。\n\n标准点击会模拟真实用户点击，并检查元素是否可见、稳定且没有被遮挡。强制点击会跳过遮挡检查。DOM 点击会直接调用元素的 click()，适合 XPath 能定位但自定义控件或样式导致鼠标点击无法命中的场景。', false,
   [...fields, clickMode], { selector: '', clickMode: 'normal' }, z.object({ ...target, clickMode: clickModeSchema }).refine(p => p.selector || p.element, '请设置元素选择器'));

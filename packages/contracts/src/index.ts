@@ -38,6 +38,16 @@ export interface ActionDefinition {
   fields: ActionField[]; defaults: Record<string, unknown>;
 }
 export interface Artifact { path: string; name: string; size: number; sourceUrl?: string; stepId?: string }
+export interface BrowserScreenshotResult extends Artifact { pageId: string }
+export const browserScreenshotParamsSchema = z.object({
+  pageId: z.string().optional(),
+  fullPage: z.boolean().optional(),
+  directory: z.string().refine(value => value === '' || (isAbsolute(value) && (process.platform !== 'win32'
+    || /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/.test(value))), '保存目录必须为空或完整绝对路径').optional(),
+  filename: z.string().refine(value => value === '' || (value.trim() === value && !/[<>:"/\\|?*\u0000-\u001f]/.test(value)
+    && !/[. ]$/.test(value) && !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(value)
+    && (!value.includes('.') || /\.png$/i.test(value))), '文件名称必须是有效的 PNG 文件名，不能包含路径；可省略 .png 后缀').optional(),
+});
 export type RunStatus = 'queued' | 'running' | 'paused' | 'waiting_manual' | 'succeeded' | 'failed' | 'stopped' | 'interrupted';
 export interface RunSnapshot {
   runId: string; workflowId: string; workflowName: string; revision: number; status: RunStatus;

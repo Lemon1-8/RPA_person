@@ -201,6 +201,8 @@ function completeStep(environment: Environment, step: StepDefinition): Environme
     outputShape = shapeOf(step.params.closeMode === "all" ? { ok: true, closedPageIds: [] } : { ok: true, pageId: "" }, scoped, false);
   } else if (step.actionType === "browser.click") {
     outputShape = shapeOf({ ok: true }, scoped, false);
+  } else if (step.actionType === "browser.screenshot") {
+    outputShape = shapeOf({ path: "", name: "", size: 0, sourceUrl: "", pageId: "" }, scoped, false);
   }
   scoped = restoreNames(scoped, environment, Object.keys(step.variables ?? {}));
   // The engine publishes outputs after restoring the step's local variables.
