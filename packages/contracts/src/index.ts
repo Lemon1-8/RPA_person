@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import type { WorkflowSchedule } from './schedule.js';
+import { desktopElementSchema, type DesktopElementRef, type DesktopElementSnapshot, type DesktopElementValidation } from './windows.js';
+export * from './windows.js';
 export { scheduleSchema, scheduleIdentifier, type WorkflowSchedule } from './schedule.js';
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -10,12 +12,14 @@ export interface StepDefinition {
   disabled?: boolean;
   timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause' | 'continue';
   variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
+  desktopElements?: Record<string, DesktopElementRef>;
   settings?: { downloadDir?: string; pythonExecutable?: string };
   children?: StepDefinition[]; elseSteps?: StepDefinition[];
 }
 export interface WorkflowDefinition {
   schemaVersion: 1; workflowId: string; name: string; revision: number;
   variables: Record<string, JsonValue>; elements: Record<string, ElementRef>; steps: StepDefinition[];
+  desktopElements?: Record<string, DesktopElementRef>;
   settings: { downloadDir: string; headless: boolean; keepBrowserOpen?: boolean; profileId?: string; pythonExecutable?: string; popupPolicy?: 'off' | 'smart' | 'strict' };
 }
 export function findStepPath(workflow: WorkflowDefinition, stepId: string): StepDefinition[] | undefined {
@@ -84,6 +88,9 @@ export interface DesktopApi {
   cancelBrowserPoint(runId: string, requestId: string): Promise<void>;
   pickDesktopPoint(requestId: string): Promise<DesktopPoint | null>;
   cancelDesktopPoint(requestId: string): Promise<void>;
+  pickDesktopElement(requestId: string): Promise<DesktopElementSnapshot | null>;
+  cancelDesktopElement(requestId: string): Promise<void>;
+  validateDesktopElement(element: DesktopElementRef): Promise<DesktopElementValidation>;
   controlRun(runId: string, command: RunCommand): Promise<void>;
   chooseDirectory(): Promise<string | null>;
   chooseXlsxPath(mode: 'open' | 'save', currentPath?: string): Promise<string | null>;
@@ -104,6 +111,7 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
   retry: z.object({ maxAttempts: z.number().int().min(1).max(5), delayMs: z.number().int().min(0).max(60_000) }).optional(),
   variables: z.record(safeKey, jsonValue).optional(),
   elements: z.record(safeKey, elementSchema).optional(),
+  desktopElements: z.record(safeKey, desktopElementSchema).optional(),
   settings: z.object({
     downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径').optional(),
     pythonExecutable: z.string().min(1).optional(),
@@ -118,6 +126,7 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
 export const workflowSchema: z.ZodType<WorkflowDefinition> = z.object({
   schemaVersion: z.literal(1), workflowId: identifier, name: z.string().min(1).max(120), revision: z.number().int().nonnegative(),
   variables: z.record(safeKey, jsonValue), elements: z.record(safeKey, elementSchema), steps: z.array(stepSchema).max(1000),
+  desktopElements: z.record(safeKey, desktopElementSchema).optional(),
   settings: z.object({ downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径'), headless: z.boolean(), keepBrowserOpen: z.boolean().optional(), profileId: identifier.optional(), pythonExecutable: z.string().min(1).optional(), popupPolicy: z.enum(['off', 'smart', 'strict']).optional() }),
 }).superRefine((flow, ctx) => {
   const ids = new Set<string>(); let count = 0;

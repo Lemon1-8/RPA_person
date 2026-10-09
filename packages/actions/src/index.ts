@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import type { ActionDefinition, ActionField, StepDefinition, WorkflowDefinition } from '../../contracts/src/index.js';
-import { browserScreenshotParamsSchema } from '../../contracts/src/index.js';
+import { browserScreenshotParamsSchema, desktopElementSchema, desktopWindowSchema, desktopAttributeNames, desktopMatchSchema } from '../../contracts/src/index.js';
 
 const text = (key: string, label: string, required = true, placeholder?: string): ActionField => ({ key, label, type: 'text', required, placeholder });
 const json = (key: string, label: string): ActionField => ({ key, label, type: 'json', required: true });
@@ -49,6 +49,30 @@ const definitions: { metadata: ActionDefinition; schema: z.ZodType }[] = [];
 function add(type: string, label: string, category: string, description: string, safeToRetry: boolean, actionFields: ActionField[], defaults: Record<string, unknown>, schema: z.ZodType) {
   definitions.push({ metadata: { type, label, category, description, safeToRetry, fields: actionFields, defaults }, schema });
 }
+const windowsTarget = { selector: z.string().regex(/^@.+$/, '请从桌面元素库选择目标').optional(), element: desktopElementSchema.optional() };
+const windowsFields = [text('selector', '桌面目标元素', true, '@元素名称')];
+const windowsSchema = <T extends z.ZodRawShape>(extra: T = {} as T) => z.object({ ...windowsTarget, ...extra }).refine(p => {
+  const target = p as { selector?: unknown; element?: unknown };
+  return target.selector || target.element;
+}, '请设置桌面目标元素');
+const windowsMode: ActionField = { key: 'mode', label: '操作方式', type: 'select', options: [{ label: '控件接口', value: 'api' }, { label: '模拟操作（占用真实键鼠）', value: 'simulate' }] };
+const windowsCategory = '桌面软件自动化';
+add('windows.findWindow', '获取软件窗口', windowsCategory, '按进程名称、标题及类名获取唯一窗口，输出窗口的定位引用与属性。标题支持 * 通配符。', true,
+  [text('processName', '进程名称', false, '不含 .exe'), text('title', '窗口标题', false), text('className', '窗口类名', false)], { processName: '', title: '', className: '' },
+  z.object({ processName: z.string().optional(), title: z.string().optional(), className: z.string().optional(), window: desktopWindowSchema.optional() }).refine(p => p.window || p.processName || p.title || p.className, '请设置至少一个窗口条件').transform(p => ({ window: p.window ?? Object.fromEntries(['processName', 'title', 'className'].filter(k => p[k as keyof typeof p]).map(k => [k, { value: p[k as keyof typeof p], match: k === 'title' && String(p.title).includes('*') ? 'wildcard' : 'exact' }])) })));
+for (const [method, label, description] of [
+  ['find', '获取软件元素', '获取元素的定位引用、属性及位置。'],
+  ['text', '读取软件文本', '优先读取文本接口、值接口，最后读取元素名称。'],
+  ['bounds', '获取软件元素位置', '输出物理屏幕像素坐标 x、y、width、height。'],
+  ['exists', '判断软件元素存在', '存在返回 true；未找到返回 false；歧义和系统错误仍报错。'],
+] as const) add(`windows.${method}`, label, windowsCategory, description, true, windowsFields, { selector: '' }, windowsSchema());
+add('windows.click', '点击软件元素', windowsCategory, '默认通过 Invoke 接口单击；不支持时可选择模拟操作，先激活目标窗口再使用真实鼠标。', false, [...windowsFields, windowsMode], { selector: '', mode: 'api' }, windowsSchema({ mode: z.enum(['api', 'simulate']).default('api') }));
+add('windows.fill', '填写软件输入框', windowsCategory, '默认通过 Value 接口填写；可选择模拟操作。覆盖输入或追加文字，支持变量。', false, [...windowsFields, windowsMode, text('value', '输入内容'), { key: 'append', label: '追加输入', type: 'boolean' }], { selector: '', mode: 'api', value: '', append: false }, windowsSchema({ mode: z.enum(['api', 'simulate']).default('api'), value: z.string(), append: z.boolean().default(false) }));
+add('windows.getAttribute', '读取软件元素属性', windowsCategory, '读取 UIA 控件属性。', true, [...windowsFields, { key: 'name', label: '属性', type: 'select', options: desktopAttributeNames.map(value => ({ label: value, value })) }], { selector: '', name: 'Name' }, windowsSchema({ name: z.enum(desktopAttributeNames) }));
+add('windows.wait', '等待软件元素', windowsCategory, '等待元素存在、可见或消失，遵守当前步骤超时。', true, [...windowsFields, { key: 'state', label: '等待状态', type: 'select', options: [{ label: '可见', value: 'visible' }, { label: '存在', value: 'exists' }, { label: '消失', value: 'gone' }] }], { selector: '', state: 'visible' }, windowsSchema({ state: z.enum(['visible', 'exists', 'gone']).default('visible') }));
+add('windows.check', '设置软件复选框', windowsCategory, '通过 Toggle 接口设置复选框的选中状态。', false, [...windowsFields, { key: 'checked', label: '选中', type: 'boolean' }], { selector: '', checked: true }, windowsSchema({ checked: z.boolean() }));
+add('windows.select', '选择软件下拉选项', windowsCategory, '通过展开和选择接口设置下拉框；选项文字必须匹配唯一项。', false, [...windowsFields, text('item', '选项文字'), { key: 'match', label: '匹配方式', type: 'select', options: [{ label: '精确', value: 'exact' }, { label: '通配符', value: 'wildcard' }] }], { selector: '', item: '', match: 'exact' }, windowsSchema({ item: z.union([nonBlank, desktopMatchSchema]), match: z.enum(['exact', 'wildcard']).default('exact') }).transform(p => ({ ...p, item: typeof p.item === 'string' ? { value: p.item, match: p.match } : p.item })));
+add('windows.related', '获取软件关联元素', windowsCategory, '获取父元素、所有子元素、指定子元素或前后相邻元素；返回可复用的结构化定位引用。', true, [...windowsFields, { key: 'relation', label: '关联方式', type: 'select', options: [{ label: '父元素', value: 'parent' }, { label: '所有子元素', value: 'children' }, { label: '指定子元素', value: 'child' }, { label: '前一个相邻元素', value: 'previous' }, { label: '后一个相邻元素', value: 'next' }] }, number('index', '子元素序号（从 0 开始）')], { selector: '', relation: 'parent', index: 0 }, windowsSchema({ relation: z.enum(['parent', 'children', 'child', 'previous', 'next']), index: z.number().int().nonnegative().default(0) }));
 add('browser.start', '启动浏览器', '浏览器', '启动本机 Chrome 或 Edge，通过独立调试端口连接。', false,
   browserStartupFields, { browserChannel: 'auto', debugPort: 0 }, z.object(browserStartup));
 add('browser.open', '打开网页', '浏览器', '首次自动启动浏览器，后续复用；可在已有标签页打开或新建网页。', false,

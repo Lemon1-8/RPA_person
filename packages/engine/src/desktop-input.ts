@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { withDesktopInteraction } from '../../windows/src/interaction-lock.js';
 
 const script = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -35,9 +36,19 @@ public static class RpaDesktopInput {
   [DllImport("user32.dll", SetLastError = true)] static extern bool SetCursorPos(int x, int y);
   [StructLayout(LayoutKind.Sequential)] struct Point { public int x, y; }
   [DllImport("user32.dll", SetLastError = true)] static extern bool GetCursorPos(out Point point);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flag);
   [DllImport("user32.dll", SetLastError = true)] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern short VkKeyScanW(char character);
+
+  static IntPtr expectedWindow;
+  public static void Guard(long handle) { expectedWindow = new IntPtr(handle); EnsureTarget(); }
+  static void EnsureTarget() {
+    if (expectedWindow != IntPtr.Zero && GetForegroundWindow() != expectedWindow)
+      throw new InvalidOperationException("UNAVAILABLE: 目标窗口已失去前台焦点，已停止模拟操作");
+  }
 
   static void Cursor(int x, int y) {
     if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法移动鼠标，请检查桌面会话");
@@ -80,6 +91,9 @@ public static class RpaDesktopInput {
   public static void Click(int x, int y, string button, int count, bool humanLike) {
     Move(x, y, humanLike);
     if (humanLike) Thread.Sleep(70);
+    EnsureTarget();
+    if (expectedWindow != IntPtr.Zero && GetAncestor(WindowFromPoint(new Point { x=x, y=y }),2) != expectedWindow)
+      throw new InvalidOperationException("UNAVAILABLE: 点击位置已被遮挡或目标窗口已移动");
     uint down = button == "right" ? 0x0008u : button == "middle" ? 0x0020u : 0x0002u;
     uint up = button == "right" ? 0x0010u : button == "middle" ? 0x0040u : 0x0004u;
     for (int i = 0; i < count; i++) {
@@ -125,6 +139,7 @@ public static class RpaDesktopInput {
     throw new ArgumentException("不支持的按键：" + value);
   }
   public static void Press(string combination) {
+    EnsureTarget();
     string[] parts = combination.Split(new char[] { '+' }, StringSplitOptions.RemoveEmptyEntries);
     if (parts.Length == 0) throw new ArgumentException("按键不能为空");
     bool shift, ctrl = false, alt = false, win = false;
@@ -149,6 +164,7 @@ public static class RpaDesktopInput {
   }
   public static void Type(string text, int delayMs) {
     foreach (char character in text) {
+      EnsureTarget();
       Input[] inputs = new Input[2];
       inputs[0].type = 1;
       inputs[0].data.key.scan = character;
@@ -171,12 +187,21 @@ public static class RpaDesktopInput {
 }
 '@
   $p = $payload.params
+  if ($null -ne $p.expectedWindow) { [RpaDesktopInput]::Guard([long]$p.expectedWindow) }
   switch ($payload.action) {
     'probe' { [RpaDesktopInput]::Probe() }
     'desktop.mouseClick' { [RpaDesktopInput]::Click([int]$p.x, [int]$p.y, [string]$p.button, [int]$p.clickCount, ($p.humanLike -ne $false)) }
     'desktop.mouseMove' { [RpaDesktopInput]::Move([int]$p.x, [int]$p.y, ($p.humanLike -ne $false)) }
     'desktop.mouseWheel' { [RpaDesktopInput]::Wheel([int]$p.deltaX, [int]$p.deltaY) }
     'desktop.keyPress' { [RpaDesktopInput]::Press([string]$p.key) }
+    'desktop.elementFill' {
+      [RpaDesktopInput]::Click([int]$p.x, [int]$p.y, 'left', 1, $true)
+      Start-Sleep -Milliseconds 120
+      if ($p.append) { [RpaDesktopInput]::Press('Control+End') } else { [RpaDesktopInput]::Press('Control+A') }
+      Start-Sleep -Milliseconds 120
+      if (!$p.append) { [RpaDesktopInput]::Press('Backspace'); Start-Sleep -Milliseconds 120 }
+      [RpaDesktopInput]::Type([string]$p.text, 0)
+    }
     'desktop.keyboardType' {
       if ($p.simulateTypo -eq $true) {
         $wrong = if ([string]$p.typoText -ne '') { [string]$p.typoText } else { '错' }
@@ -203,6 +228,11 @@ public static class RpaDesktopInput {
 
 /** Send input to the foreground Windows desktop, never through a browser session. */
 export function runDesktopInput(action: string, params: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal): Promise<{ ok: true }> {
+  return withDesktopInteraction(timeoutMs, signal, remaining => runDesktopInputUnlocked(action, params, remaining, signal));
+}
+
+/** Caller must own the desktop interaction lock while activating and sending input. */
+export function runDesktopInputUnlocked(action: string, params: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal): Promise<{ ok: true }> {
   if (process.platform !== 'win32') return Promise.reject(new Error('电脑键鼠操作仅支持 Windows'));
   if (signal?.aborted) return Promise.reject(new Error('电脑键鼠操作已取消'));
   return new Promise((resolve, reject) => {
@@ -221,6 +251,7 @@ export function runDesktopInput(action: string, params: Record<string, unknown>,
     const abort = () => { child.kill(); finish(new Error('电脑键鼠操作已取消')); };
     const timer = setTimeout(() => { child.kill(); finish(new Error(`电脑键鼠操作超时（${timeoutMs} ms）`)); }, timeoutMs);
     child.stderr.on('data', data => { if (error.length < 4000) error += String(data); });
+    child.stdin.on('error', cause => { if (!settled) { child.kill(); finish(cause); } });
     child.on('error', cause => finish(cause));
     child.on('exit', code => finish(code === 0 ? undefined : new Error(error.trim() || `电脑键鼠操作失败（退出码 ${code}）`)));
     signal?.addEventListener('abort', abort, { once: true });

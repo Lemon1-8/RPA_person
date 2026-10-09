@@ -6,6 +6,8 @@ Electron + React + TypeScript 界面，独立 Node 任务进程，Playwright 浏
 
 当前执行链路见 [流程执行图](docs/流程执行图.md)，涵盖单条运行、XLSX、电脑键鼠、事件传输和浏览器会话收尾，附 Archify 可编辑图源。
 
+Windows 软件控件可在“桌面软件自动化”分类中捕获、编辑、校验和保存，通过 UI Automation 执行点击、输入、读取、勾选、选择及关联元素操作。低代码和 JS／Python 共用元素库与执行器，详见 [Windows 元素自动化](docs/Windows元素自动化.md)。
+
 ## 启动
 
 环境：Windows、Node.js 22.13+（本机已用 24.18 验证）、Python 3.10+（执行 Python 步骤需要）。浏览器兼容处理使用 Node 内置 SQLite，因此最低 Node 版本从 22.12 提升至 22.13；不需要额外数据库服务。依赖版本由 `package-lock.json` 固定。
@@ -234,6 +236,7 @@ packages/contracts/   流程格式、运行事件、桌面接口
 packages/actions/     动作校验与表单元数据
 packages/engine/      执行、变量、条件循环、暂停取消
 packages/browser/     会话、元素、下载、响应
+packages/windows/     Windows UIA 原生执行器与电脑交互锁
 packages/scripts/     脚本子进程与 RPC
 packages/sdk-js/      JS/TS SDK
 packages/persistence/ D1 JSON 文件存储

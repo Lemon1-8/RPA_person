@@ -5,6 +5,8 @@ import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
 import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
 import { runDesktopInput } from './desktop-input.js';
+import { WindowsSession } from '../../windows/src/index.js';
+import type { DesktopElementRef } from '../../contracts/src/index.js';
 import { BrowserSession, type BrowserSessionOptions } from '../../browser/src/index.js';
 import { runScript } from '../../scripts/src/index.js';
 import { actionDefinitions, getAction, validateActionParams, validateActions } from '../../actions/src/index.js';
@@ -75,6 +77,7 @@ export class WorkflowEngine {
   workflow: WorkflowDefinition;
   private snapshot: RunSnapshot;
   private browser?: BrowserSession;
+  private windows?: WindowsSession;
   private stopped = false;
   private pauseRequested = false;
   private resumeWaiter?: () => void;
@@ -88,6 +91,7 @@ export class WorkflowEngine {
   private deadlines: ExecutionDeadline[] = [];
   private errorBoundaryDepth = 0;
   private scopedElements: Record<string, ElementRef>;
+  private scopedDesktopElements: Record<string, DesktopElementRef>;
   private scopedSettings: NonNullable<StepDefinition['settings']>;
   private stepNumbers = new Map<string, number>();
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
@@ -95,6 +99,7 @@ export class WorkflowEngine {
     validateActions(this.workflow);
     this.rebuildStepNumbers();
     this.scopedElements = this.workflow.elements;
+    this.scopedDesktopElements = this.workflow.desktopElements ?? {};
     this.scopedSettings = this.workflow.settings;
     this.snapshot = {
       runId: options.runId, workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
@@ -216,9 +221,11 @@ export class WorkflowEngine {
     for (const [name] of locals) validateName(name);
     const previous = locals.map(([name]) => ({ name, had: Object.hasOwn(this.snapshot.variables, name), value: this.snapshot.variables[name] }));
     const parentElements = this.scopedElements;
+    const parentDesktopElements = this.scopedDesktopElements;
     const parentSettings = this.scopedSettings;
     for (const [name, value] of locals) this.snapshot.variables[name] = value;
     this.scopedElements = { ...parentElements, ...step.elements };
+    this.scopedDesktopElements = { ...parentDesktopElements, ...step.desktopElements };
     this.scopedSettings = { ...parentSettings, ...Object.fromEntries(Object.entries(step.settings ?? {}).filter(([, value]) => value !== undefined)) };
     try { return await run(); }
     finally {
@@ -227,6 +234,7 @@ export class WorkflowEngine {
         else delete this.snapshot.variables[name];
       }
       this.scopedElements = parentElements;
+      this.scopedDesktopElements = parentDesktopElements;
       this.scopedSettings = parentSettings;
     }
   }
@@ -341,6 +349,19 @@ export class WorkflowEngine {
       const input = validateActionParams(method, rawParams);
       return this.setVariable(String(input.name), input.value);
     }
+    if (method.startsWith('windows.')) {
+      const input = { ...rawParams };
+      if (typeof input.selector === 'string' && input.selector.startsWith('@')) {
+        const name = input.selector.slice(1);
+        const element = this.scopedDesktopElements[name];
+        if (!element) throw new Error(`桌面元素库不存在：${name}`);
+        input.element = resolveValue(element, this.snapshot.variables);
+        delete input.selector;
+      }
+      const params = validateActionParams(method, input);
+      this.windows ??= new WindowsSession();
+      return this.windows.call(method, params, timeoutMs, signal);
+    }
     if (!method.startsWith('browser.')) throw new Error(`不支持的 RPC 方法：${method}`);
     const validated = actionDefinitions.some(action => action.type === method) ? validateActionParams(method, rawParams) : rawParams;
     this.checkStop(); signal?.throwIfAborted();
@@ -372,6 +393,7 @@ export class WorkflowEngine {
     const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
+    if (step.actionType.startsWith('windows.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal);
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
     if (step.actionType === 'core.note') return null;
@@ -601,6 +623,7 @@ export class WorkflowEngine {
     this.rebuildStepNumbers();
     this.reuseBrowserOnly = reusing;
     this.scopedElements = workflow.elements;
+    this.scopedDesktopElements = workflow.desktopElements ?? {};
     this.scopedSettings = workflow.settings;
     this.snapshot.workflowName = workflow.name;
     this.snapshot.revision = workflow.revision;
@@ -625,6 +648,7 @@ export class WorkflowEngine {
     let finalStatus: RunSnapshot['status'] = 'succeeded'; let finalError: string | undefined;
     try { await execute(); this.checkStop(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError = error instanceof Error ? error.message : String(error); }
+    this.windows?.close(); this.windows = undefined;
     try { if (this.stopped || (finalStatus === 'succeeded' && !keepBrowserOpen && this.workflow.settings.keepBrowserOpen === false)) await this.browser?.close(); }
     catch (error) { finalStatus = this.stopped ? 'stopped' : 'failed'; finalError ??= `浏览器清理失败：${String(error)}`; }
     this.snapshot.browserOpen = this.browser?.isOpen() ?? false;

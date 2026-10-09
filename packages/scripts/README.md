@@ -18,6 +18,8 @@ rpa.output({ 'count': rpa.get('count') })
 
 `rpa.get` 和 `rpa.set` 每次请求当前执行器的变量。JavaScript／TypeScript 接口为异步；Python 接口为同步。`rpa.output` 保存该步骤的输出；未指定时输出为 `null`。脚本异常仍会使步骤失败。
 
+Windows 软件控件使用 `rpa.call('windows.…', …)`，与低代码共用桌面元素库、参数校验、超时与取消机制，无需启动浏览器。`windows.find` 的输出含 JSON 定位引用，后续以 `element: result.element`（Python 为 `result['element']`）调用。接口和用法见 [Windows 元素自动化](../../docs/Windows元素自动化.md)，可粘贴的 [JavaScript 示例](../../examples/windows-elements.js) 和 [Python 示例](../../examples/windows-elements.py) 使用已捕获的命名元素。
+
 网页截图通过 `browser.screenshot` 使用当前任务浏览器，也会登记运行产物。例如 JS／TS：`await rpa.output(await rpa.call('browser.screenshot', { pageId: 'orders', filename: '订单.png', fullPage: true }));`；Python：`rpa.output(rpa.call('browser.screenshot', { 'pageId': 'orders', 'filename': '订单.png', 'fullPage': True }))`。省略保存目录时继承当前指令／流程的下载目录；返回 `path`、`name`、`size`、`sourceUrl`、`pageId`。
 
 JS／TS 脚本结束前会等待已经提交的 RPC。未处理的请求失败会使步骤失败；用户通过 `await` 与 `try/catch` 处理的失败可以继续运行。定时器或其他异步任务中尚未提交的请求需要由脚本自己 `await`。

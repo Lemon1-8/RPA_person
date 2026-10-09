@@ -62,6 +62,8 @@ import { VariablePicker } from "./VariablePicker.js";
 import { BrowserCloseFields, BrowserOpenFields, PageTargetField } from "./BrowserFields.js";
 import { CoordinatePicker } from "./CoordinatePicker.js";
 import { DesktopCoordinatePicker } from "./DesktopCoordinatePicker.js";
+import { DesktopElements } from "./DesktopElements.js";
+import { DesktopTargetField } from "./DesktopTargetField.js";
 import { KeyPressField } from "./KeyPressField.js";
 import { XlsxPathField } from "./XlsxPathField.js";
 import { LogViewer } from "./LogViewer.js";
@@ -395,7 +397,8 @@ export function App() {
   const selectedAction = actions.find(
     (action) => action.type === selected?.step.actionType,
   );
-  const desktopInputSelected = !!selected?.step.actionType.startsWith("desktop.");
+  const desktopElementSelected = !!selected?.step.actionType.startsWith("windows.");
+  const desktopInputSelected = !!selected?.step.actionType.startsWith("desktop.") || desktopElementSelected;
   const availableActions = useMemo(() => actions.filter(action => ![
     "browser.start",
     "browser.switchPage",
@@ -668,7 +671,7 @@ export function App() {
     setBusy(`step:${stepId}`);
     setError("");
     try {
-      const snapshot = await api.runStep(workflow, stepId, targetBrowser?.runId);
+      const snapshot = await api.runStep(workflow, stepId, step.actionType.startsWith("windows.") ? undefined : targetBrowser?.runId);
       // Events may arrive before this IPC response; do not replace their newer state.
       setRuns((previous) => previous.some((item) => item.runId === snapshot.runId)
         ? previous : [snapshot, ...previous]);
@@ -1271,6 +1274,7 @@ export function App() {
                 : selected?.step.actionType === "core.wait" ? "等待无需浏览器；等待结束后继续下一步，可随时停止运行。"
                 : selected?.step.actionType === "control.tryCatch" ? "运行整个 Try / Catch；Try 出错后执行 Catch，异常变量仅在 Catch 执行期间可用。"
                 : selected?.step.actionType === "core.log" ? "使用当前参数；打印日志无需浏览器。引用循环当前项时，请运行整个循环。"
+                : desktopElementSelected ? "按保存的窗口与控件条件定位；模拟操作会激活目标窗口并占用真实键鼠。"
                 : desktopInputSelected ? "操作电脑当前前台窗口，会占用真实鼠标和键盘；运行时请勿同时操作电脑。"
                 : selected?.step.actionType === "control.forEachXlsx" ? "运行整个 XLSX 循环；每行执行一次循环体，无需先打开浏览器。"
                 : "使用当前参数；网页指令先运行「打开网页」，后续复用浏览器。容器会执行其子步骤。"}
@@ -1477,6 +1481,8 @@ export function App() {
                               onChange={event => setParam(axis, event.target.value === "" ? undefined : Number(event.target.value))} />
                           </label>)}
                         </div>
+                      ) : field.key === "selector" && desktopElementSelected && workflow ? (
+                        <DesktopTargetField workflow={workflow} step={selected.step} disabled={!!busy} onChange={params => updateSelected(step => ({ ...step, params }))} onElements={() => setInspector("elements")} />
                       ) : field.key === "key" && ["browser.keyPress", "desktop.keyPress"].includes(selected.step.actionType) ? (
                         <KeyPressField value={String(selected.step.params.key ?? "")} disabled={!!busy}
                           inputId={`param-${selectedId}-key`} onChange={value => setParam("key", value)} />
@@ -1805,6 +1811,7 @@ export function App() {
             )}
             {inspector === "elements" && selected && selected.step.actionType !== "core.note" && (
               <>
+                {workflow && <DesktopElements key={`${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? "desktop-element" : "")} onChange={next => updateWorkflow(() => next)} />}
                 <h2 className="panel-title">元素引用</h2>
                 <p className="help-text">
                   当前指令通过 @元素名 引用自己的元素；子步骤继承，其他指令不受影响。

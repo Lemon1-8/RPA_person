@@ -6,6 +6,7 @@ import { RunManager } from '../../runner/src/manager.js';
 import { createDemoWorkflow } from '../../../examples/demo.js';
 import { startFixtureServer } from '../../../tests/fixtures/server.js';
 import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
+import { DesktopElementService } from './desktop-elements.js';
 import type { DesktopPoint, RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
 const root = process.env.RPA_ROOT ?? resolve(__dirname, '../..');
@@ -18,6 +19,7 @@ let quitting = false;
 let manager: RunManager;
 let fixture: Awaited<ReturnType<typeof startFixtureServer>> | undefined;
 let desktopPointPick: { requestId: string; finish(point: DesktopPoint | null): void } | undefined;
+const desktopElements = new DesktopElementService(() => window, () => !!desktopPointPick);
 const lock = app.requestSingleInstanceLock();
 if (!lock) app.quit();
 else {
@@ -27,6 +29,7 @@ else {
     if (quitting) return;
     event.preventDefault(); quitting = true;
     desktopPointPick?.finish(null);
+    desktopElements.close();
     Promise.all([manager?.shutdown(), fixture?.close()]).finally(() => { tray?.destroy(); app.quit(); });
   });
   app.whenReady().then(async () => {
@@ -70,6 +73,7 @@ else {
       trusted(event);
       if (typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)) throw new Error('取点请求无效');
       if (desktopPointPick) throw new Error('已有取点操作正在进行');
+      if (desktopElements.isPicking()) throw new Error('请先完成或取消元素捕获');
       return new Promise<DesktopPoint | null>((resolvePoint, rejectPoint) => {
         let timer: ReturnType<typeof setTimeout>;
         const finish = (point: DesktopPoint | null) => {
@@ -96,6 +100,9 @@ else {
       trusted(event);
       if (desktopPointPick?.requestId === requestId) desktopPointPick.finish(null);
     });
+    ipcMain.handle('rpa:pick-desktop-element', (event, requestId: string) => { trusted(event); return desktopElements.pick(requestId); });
+    ipcMain.handle('rpa:cancel-desktop-element', (event, requestId: string) => { trusted(event); desktopElements.cancel(requestId); });
+    ipcMain.handle('rpa:validate-desktop-element', (event, element) => { trusted(event); return desktopElements.validate(element); });
     ipcMain.handle('rpa:control', async (event, runId: string, command: RunCommand) => {
       trusted(event);
       if (typeof runId !== 'string' || !['pause', 'resume', 'stop', 'show', 'hide', 'closeBrowser'].includes(command)) throw new Error('无效的任务操作');

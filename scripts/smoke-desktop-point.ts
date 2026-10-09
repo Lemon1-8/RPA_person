@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { runDesktopInput } from '../packages/engine/src/desktop-input.js';
 
 if (process.platform !== 'win32') throw new Error('此冒烟测试需要 Windows 桌面会话');
+if (process.env.RPA_SKIP_DESKTOP_INTERACTION === '1') { console.warn('环境跳过：真实桌面取点快捷键（RPA_SKIP_DESKTOP_INTERACTION=1）'); process.exit(0); }
 const root = process.cwd();
 const data = await mkdtemp(join(tmpdir(), 'rpa-desktop-point-'));
 const qa = resolve('.rpa/qa');
