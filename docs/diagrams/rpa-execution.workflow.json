@@ -1,0 +1,247 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Personal RPA · 流程执行与会话收尾",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "security": {
+          "label": "校验与判断"
+        },
+        "database": {
+          "label": "数据与记录"
+        },
+        "frontend": {
+          "label": "交互与控制"
+        },
+        "backend": {
+          "label": "执行处理"
+        },
+        "messagebus": {
+          "label": "事件与通信"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "request",
+      "label": "运行请求"
+    },
+    {
+      "id": "manager",
+      "label": "运行管理"
+    },
+    {
+      "id": "runtime",
+      "label": "任务执行"
+    },
+    {
+      "id": "finish",
+      "label": "事件与终态"
+    },
+    {
+      "id": "release",
+      "label": "会话与进程收尾"
+    }
+  ],
+  "mainPath": [
+    "trigger",
+    "snapshot",
+    "admission",
+    "worker",
+    "execute",
+    "events",
+    "record",
+    "session",
+    "drain",
+    "exit"
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "lane": "request",
+      "type": "frontend",
+      "label": "发起运行",
+      "sublabel": "手动 / 计划 / 单条",
+      "col": 0,
+      "width": 136
+    },
+    {
+      "id": "snapshot",
+      "lane": "request",
+      "type": "database",
+      "label": "确定运行版本",
+      "sublabel": "保存版本 / 单条草稿",
+      "col": 1,
+      "width": 136
+    },
+    {
+      "id": "admission",
+      "lane": "manager",
+      "type": "security",
+      "label": "校验与排队",
+      "sublabel": "互斥 / 默认并发 2",
+      "col": 1,
+      "width": 136
+    },
+    {
+      "id": "worker",
+      "lane": "manager",
+      "type": "backend",
+      "label": "任务进程",
+      "sublabel": "新建 / 复用会话",
+      "col": 2,
+      "width": 136
+    },
+    {
+      "id": "execute",
+      "lane": "runtime",
+      "type": "backend",
+      "label": "执行指令",
+      "sublabel": "作用域与控制流",
+      "col": 2,
+      "width": 136
+    },
+    {
+      "id": "events",
+      "lane": "runtime",
+      "type": "messagebus",
+      "label": "发送运行事件",
+      "sublabel": "步骤 / 日志 / 产物 / 状态",
+      "col": 3,
+      "width": 136
+    },
+    {
+      "id": "record",
+      "lane": "finish",
+      "type": "database",
+      "label": "记录并展示",
+      "sublabel": "JSON / JSONL / 筛选",
+      "col": 3,
+      "width": 136
+    },
+    {
+      "id": "session",
+      "lane": "finish",
+      "type": "security",
+      "label": "浏览器仍打开？",
+      "sublabel": "独立会话状态",
+      "col": 4,
+      "width": 136
+    },
+    {
+      "id": "retained",
+      "lane": "release",
+      "type": "frontend",
+      "label": "保留浏览器",
+      "sublabel": "单条调试 / 手动关闭",
+      "col": 3,
+      "width": 136
+    },
+    {
+      "id": "drain",
+      "lane": "release",
+      "type": "messagebus",
+      "label": "等待消息收尾",
+      "sublabel": "发送回调 / 控制操作",
+      "col": 4,
+      "width": 136
+    },
+    {
+      "id": "exit",
+      "lane": "release",
+      "type": "backend",
+      "label": "释放任务名额",
+      "sublabel": "断开 IPC / 退出",
+      "col": 5,
+      "width": 136
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "snapshot",
+      "label": "选择版本"
+    },
+    {
+      "from": "snapshot",
+      "to": "admission",
+      "label": "运行快照"
+    },
+    {
+      "from": "admission",
+      "to": "worker",
+      "label": "准入后执行"
+    },
+    {
+      "from": "worker",
+      "to": "execute",
+      "label": "整流程或选中步骤"
+    },
+    {
+      "from": "execute",
+      "to": "events",
+      "label": "持续发布"
+    },
+    {
+      "from": "events",
+      "to": "record",
+      "label": "IPC 传输"
+    },
+    {
+      "from": "record",
+      "to": "session",
+      "label": "收到运行终态"
+    },
+    {
+      "from": "session",
+      "to": "drain",
+      "label": "否"
+    },
+    {
+      "from": "session",
+      "to": "retained",
+      "label": "是"
+    },
+    {
+      "from": "retained",
+      "to": "drain",
+      "label": "关闭会话"
+    },
+    {
+      "from": "drain",
+      "to": "exit",
+      "label": "满足退出条件"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "指令执行能力",
+      "items": [
+        "Playwright 网页动作与 Python / JS / TS RPC 共用会话",
+        "XLSX 读写与遍历、电脑键鼠、变量与日志"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "运行与会话",
+      "items": [
+        "默认保留浏览器；单条运行复用页面与变量",
+        "整流程重跑先关闭相关保留会话，再创建新任务"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "完整事件与可读日志",
+      "items": [
+        "完整事件持续落盘；界面默认隐藏普通步骤信息",
+        "发送积压清空且浏览器关闭后，任务进程才退出"
+      ]
+    }
+  ]
+}
