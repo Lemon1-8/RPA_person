@@ -56,25 +56,21 @@ try {
   await inspector.getByRole('textbox', { name: /^日志内容/ }).fill('{{row}}[0]');
 
   const consolePanel = page.getByRole('region', { name: '运行监控' });
-  const handle = page.getByRole('separator', { name: '调整运行监控高度' });
-  const before = (await consolePanel.boundingBox())!;
-  const grip = (await handle.boundingBox())!;
-  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(grip.x + grip.width / 2, grip.y - 115, { steps: 8 });
-  await page.mouse.up();
-  const enlarged = (await consolePanel.boundingBox())!;
-  assert.ok(enlarged.height >= before.height + 90, `拖拽后高度未增加：${before.height} → ${enlarged.height}`);
-  await handle.focus();
-  await page.keyboard.press('ArrowDown');
-  const adjusted = (await consolePanel.boundingBox())!;
-  assert.ok(adjusted.height < enlarged.height, '方向键应能缩小面板');
+  const before = (await page.locator('.step-scroll').boundingBox())!;
+  await page.getByRole('button', { name: '运行结果', exact: true }).click();
+  const monitor = (await consolePanel.boundingBox())!;
+  const after = (await page.locator('.step-scroll').boundingBox())!;
+  assert.ok(Math.abs(before.height - after.height) <= 1, '切换运行结果不能减少流程高度');
+  assert.ok(monitor.x >= (await inspector.boundingBox())!.x, '运行结果必须位于右栏');
   await page.reload();
   await page.getByRole('heading', { name: 'XLSX 下标与面板验收', exact: true }).waitFor();
-  const restored = (await consolePanel.boundingBox())!;
-  assert.ok(Math.abs(restored.height - adjusted.height) <= 2, '重新打开后应记住面板高度');
+  assert.equal(await consolePanel.isVisible(), true, '重新打开后应记住右栏内容');
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
+  assert.equal(await consolePanel.isVisible(), false);
+  await page.getByRole('button', { name: '步骤 2：打印日志', exact: true }).click();
+  assert.equal(await inspector.getByRole('textbox', { name: /^日志内容/ }).inputValue(), '{{row}}[0]');
   await page.screenshot({ path: join(qa, 'console-xlsx-success.png'), fullPage: true });
-  console.log('底部面板拖拽及 XLSX 下标界面冒烟测试通过');
+  console.log('三栏切换及 XLSX 下标界面冒烟测试通过');
 } finally {
   await app?.close();
   if (dirname(resolve(data)) !== resolve(tmpdir()) || !basename(data).startsWith('rpa-console-xlsx-')) throw new Error('拒绝清理测试目录之外的路径');

@@ -49,6 +49,7 @@ else {
       return { workflows, actions: actionDefinitions, runs: manager.listRuns(), schedules: manager.listSchedules(), demoUrl: fixture!.url, dataDir, defaultDownloadDir };
     });
     ipcMain.handle('rpa:save', (event, workflow: WorkflowDefinition) => { trusted(event); return manager.saveWorkflow(workflow); });
+    ipcMain.handle('rpa:run-workflow', (event, runId: string) => { trusted(event); return manager.getRunWorkflow(runId); });
     ipcMain.handle('rpa:delete-workflow', (event, workflowId: string) => { trusted(event); return manager.deleteWorkflow(workflowId); });
     ipcMain.handle('rpa:list-schedules', event => { trusted(event); return manager.listSchedules(); });
     ipcMain.handle('rpa:save-schedule', (event, schedule: WorkflowSchedule) => { trusted(event); return manager.saveSchedule(schedule); });

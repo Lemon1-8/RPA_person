@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { WorkflowDefinition } from '../packages/contracts/src/index.js';
+import type { RunEvent, WorkflowDefinition } from '../packages/contracts/src/index.js';
 import { WorkflowEngine } from '../packages/engine/src/index.js';
 
 export function makeWorkflow(steps: WorkflowDefinition['steps']): WorkflowDefinition {
@@ -15,10 +15,12 @@ describe('流程公共执行接口', () => {
       { stepId: 'copy', name: '复制列表', actionType: 'variables.set', params: { name: 'copied', value: '{{orders}}' }, output: 'result' },
       { stepId: 'check', name: '校验', actionType: 'core.assert', params: { actual: '{{copied.0.id}}', expected: 101 } },
     ]);
-    const engine = new WorkflowEngine(workflow, { dataDir: await mkdtemp(join(tmpdir(), 'rpa-engine-')), runId: 'test-run' });
+    const events: RunEvent[] = [];
+    const engine = new WorkflowEngine(workflow, { dataDir: await mkdtemp(join(tmpdir(), 'rpa-engine-')), runId: 'test-run', onEvent: event => events.push(event) });
     const result = await engine.run();
     expect(result.status).toBe('succeeded');
     expect(result.variables.copied).toEqual([{ id: 101 }]);
+    expect(events.filter(event => event.stepId === 'set').every(event => event.stepName === '设置列表')).toBe(true);
   });
   it('纯计算循环也接收停止请求，不能阻塞控制消息', async () => {
     const workflow = makeWorkflow([{ stepId: 'loop', name: '遍历', actionType: 'control.forEach', params: { items: Array.from({ length: 10000 }, (_, i) => i), itemVariable: 'item' }, children: [{ stepId: 'copy', name: '复制', actionType: 'variables.set', params: { name: 'last', value: '{{item}}' } }] }]);

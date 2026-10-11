@@ -94,6 +94,7 @@ export class WorkflowEngine {
   private scopedDesktopElements: Record<string, DesktopElementRef>;
   private scopedSettings: NonNullable<StepDefinition['settings']>;
   private stepNumbers = new Map<string, number>();
+  private stepNames = new Map<string, string>();
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
     this.workflow = workflowSchema.parse(workflow);
     validateActions(this.workflow);
@@ -132,19 +133,22 @@ export class WorkflowEngine {
     await pick.done.catch(() => undefined);
   }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
-    this.options.onEvent?.({ ...event, runId: this.snapshot.runId, at: new Date().toISOString() });
+    this.options.onEvent?.({ ...event, ...(event.stepId ? { stepName: this.stepNames.get(event.stepId) } : {}), runId: this.snapshot.runId, at: new Date().toISOString() });
   }
   private rebuildStepNumbers() {
     const numbers = new Map<string, number>();
+    const names = new Map<string, string>();
     const visit = (steps: StepDefinition[]) => {
       for (const step of steps) {
         numbers.set(step.stepId, numbers.size + 1);
+        names.set(step.stepId, step.name);
         visit(step.children ?? []);
         visit(step.elseSteps ?? []);
       }
     };
     visit(this.workflow.steps);
     this.stepNumbers = numbers;
+    this.stepNames = names;
   }
   private stepData(step: StepDefinition, data?: unknown): unknown {
     const stepNumber = this.stepNumbers.get(step.stepId);

@@ -73,6 +73,7 @@ try {
   await page.getByRole('tab', { name: /下载|产物/ }).click();
   const artifacts = page.getByRole('tabpanel', { name: '下载产物' });
   await artifacts.getByText('订单截图.png', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await inspector.getByLabel('截取完整网页', { exact: true }).check();
   const second = await run(page.getByRole('button', { name: '单独运行 网页截图', exact: true }));
   assert.equal(second.runId, first.runId, '截图单条运行必须复用现有浏览器');

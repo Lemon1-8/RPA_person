@@ -61,6 +61,7 @@ export interface RunSnapshot {
 }
 export interface RunEvent {
   type: 'run' | 'step' | 'log' | 'artifact'; runId: string; at: string; stepId?: string;
+  stepName?: string;
   status?: string; message?: string; data?: unknown; run?: RunSnapshot;
 }
 export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser';
@@ -76,6 +77,7 @@ export interface BootstrapData {
 }
 export interface DesktopApi {
   bootstrap(): Promise<BootstrapData>;
+  getRunWorkflow(runId: string): Promise<WorkflowDefinition | null>;
   saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowDefinition>;
   deleteWorkflow(workflowId: string): Promise<void>;
   listSchedules(): Promise<WorkflowSchedule[]>;

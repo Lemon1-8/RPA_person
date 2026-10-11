@@ -190,7 +190,7 @@ try {
   assert.equal(events.some(event => event.type === 'log' && /literal|missingNoteVariable|采集前检查|复核说明/.test(event.message ?? '')), false);
   assert.equal(events.some(event => event.run?.browserOpen), false, '执行过程中也不能打开浏览器');
   await page.setViewportSize({ width: 1540, height: 1200 });
-  await page.getByRole('button', { name: '收起底部栏', exact: true }).click();
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await stepButton('深蓝循环说明').click();
   for (const [name, color, text] of expected) await assertNoteAppearance(name, color, text);
   await page.screenshot({ path: join(qa, 'note-success.png'), fullPage: true });

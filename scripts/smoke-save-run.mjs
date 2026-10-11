@@ -59,6 +59,7 @@ try {
 
   await runFromToolbar();
   // Running after another edit uses the same save-and-run path, without a reload workaround.
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await inspector.getByRole('textbox', { name: /^输出变量/ }).fill('anotherOutput');
   await inspector.getByRole('textbox', { name: /^输出变量/ }).fill('');
   await runFromToolbar();

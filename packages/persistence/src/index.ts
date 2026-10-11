@@ -64,6 +64,15 @@ export class FileStore {
     await writeJsonAtomic(join(path, 'workflow.json'), workflow);
     await this.saveRun(run);
   }
+  async readRunWorkflow(runId: string): Promise<WorkflowDefinition | null> {
+    const id = scheduleIdentifier.parse(runId);
+    try {
+      return workflowSchema.parse(JSON.parse(await readFile(join(this.directory, 'runs', id, 'workflow.json'), 'utf8')));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
   saveRun(run: RunSnapshot): Promise<void> {
     const snapshot = structuredClone(run);
     const operation = this.queue.then(() => writeJsonAtomic(join(this.directory, 'runs', snapshot.runId, 'run.json'), snapshot));

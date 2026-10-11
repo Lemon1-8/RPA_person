@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   Braces,
@@ -27,10 +27,9 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  PanelBottomClose,
-  PanelBottomOpen,
   Play,
   Plus,
+  Redo2,
   Save,
   Search,
   Settings2,
@@ -38,6 +37,7 @@ import {
   Square,
   StickyNote,
   Terminal,
+  Undo2,
   Workflow,
   X,
 } from "lucide-react";
@@ -68,6 +68,8 @@ import { KeyPressField } from "./KeyPressField.js";
 import { XlsxPathField } from "./XlsxPathField.js";
 import { LogViewer } from "./LogViewer.js";
 import { getBrowserPageErrors, getInheritedPageTarget } from "./page-options.js";
+import { editorReducer, emptyEditorState } from "./editor-history.js";
+import { explainError, runRecovery } from "./run-feedback.js";
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
 const terminalStatuses = new Set([
@@ -89,12 +91,7 @@ const statusLabels: Record<string, string> = {
   retrying: "重试中",
   skipped: "已跳过",
 };
-type BottomTab = "logs" | "variables" | "artifacts" | "runs";
-
-function clampConsoleHeight(height: number): number {
-  const minimum = window.innerWidth <= 740 ? 160 : 112;
-  return Math.min(Math.max(height, minimum), Math.max(minimum, window.innerHeight - 360));
-}
+type RunTab = "logs" | "variables" | "artifacts" | "runs";
 type InspectorTab = "step" | "settings" | "inputs" | "elements";
 type StepLocation = {
   step: StepDefinition;
@@ -212,12 +209,14 @@ function RetainedBrowserStatus() {
 
 function IconButton({
   label,
+  title,
   children,
   disabled,
   onClick,
   danger,
 }: {
   label: string;
+  title?: string;
   children: ReactNode;
   disabled?: boolean;
   onClick: () => void;
@@ -227,7 +226,7 @@ function IconButton({
     <button
       type="button"
       className={`icon-button${danger ? " danger" : ""}`}
-      title={label}
+      title={title ?? label}
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
@@ -316,29 +315,39 @@ export function App() {
   const [schedules, setSchedules] = useState<WorkflowSchedule[]>([]);
   const [openFlows, setOpenFlows] = useState<string[]>([]);
   const [panels, setPanels] = useState(() => {
-    try { return { left: true, right: true, bottom: true, ...JSON.parse(localStorage.getItem("rpa.panels") ?? "{}") } as { left: boolean; right: boolean; bottom: boolean }; }
-    catch { return { left: true, right: true, bottom: true }; }
+    try {
+      const savedPanels = JSON.parse(localStorage.getItem("rpa.panels") ?? "{}");
+      return { left: savedPanels.left !== false, right: savedPanels.right !== false };
+    } catch { return { left: true, right: true }; }
   });
-  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [editorState, dispatchEditor] = useReducer(editorReducer, emptyEditorState);
+  const workflows = editorState.workflows;
+  const setWorkflows = (update: WorkflowDefinition[] | ((previous: WorkflowDefinition[]) => WorkflowDefinition[])) => dispatchEditor({ type: "sync", update });
   const [workflowId, setWorkflowId] = useState("");
   const [actions, setActions] = useState<ActionDefinition[]>([]);
   const [runs, setRuns] = useState<RunSnapshot[]>([]);
   const [runId, setRunId] = useState("");
+  const [runScope, setRunScope] = useState<"workflow" | "all">("workflow");
+  const [runWorkflows, setRunWorkflows] = useState<Record<string, WorkflowDefinition>>({});
   const [stepBrowserTargets, setStepBrowserTargets] = useState<Record<string, string>>({});
   const [pageInventory, setPageInventory] = useState<{ runId: string; pages: BrowserPageInfo[]; error?: string }>({ runId: "", pages: [] });
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [query, setQuery] = useState("");
+  const [actionCategory, setActionCategory] = useState("全部");
   const [inspector, setInspector] = useState<InspectorTab>("step");
-  const [bottomTab, setBottomTab] = useState<BottomTab>("logs");
-  const [consoleHeight, setConsoleHeight] = useState<number | null>(() => {
-    const saved = localStorage.getItem("rpa.consoleHeight");
-    return saved !== null && Number.isFinite(Number(saved)) ? clampConsoleHeight(Number(saved)) : null;
+  const [runTab, setRunTab] = useState<RunTab>("logs");
+  const [rightPane, setRightPane] = useState<"step" | "run">(() => {
+    try { return localStorage.getItem("rpa.rightPane") === "run" ? "run" : "step"; }
+    catch { return "step"; }
   });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
+  const [error, setErrorMessage] = useState("");
+  const [errorDetail, setErrorDetail] = useState<string>();
+  const setError = (message: string) => { setErrorMessage(message); setErrorDetail(undefined); };
   const [notice, setNotice] = useState("");
+  const [deleteNotice, setDeleteNotice] = useState<{ workflowId: string; count: number }>();
   const [dataDir, setDataDir] = useState("");
   const [downloadDir, setDownloadDir] = useState("");
   const [demoUrl, setDemoUrl] = useState("");
@@ -351,22 +360,15 @@ export function App() {
     "after" | "children" | "elseSteps"
   >("after");
   const searchRef = useRef<HTMLInputElement>(null);
-  const consoleRef = useRef<HTMLElement>(null);
-  const consoleResize = useRef<{ pointerId: number; y: number; height: number } | null>(null);
   useEffect(() => {
-    if (consoleHeight !== null) localStorage.setItem("rpa.consoleHeight", String(consoleHeight));
-  }, [consoleHeight]);
-  useEffect(() => {
-    const onResize = () => setConsoleHeight(height => height === null ? null : clampConsoleHeight(height));
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+    try { localStorage.setItem("rpa.rightPane", rightPane); }
+    catch { /* The pane remains usable when preferences cannot be saved. */ }
+  }, [rightPane]);
   const workflow = workflows.find((item) => item.workflowId === workflowId);
   const steps = useMemo(
     () => flatten(workflow?.steps ?? []),
     [workflow?.steps],
   );
-  const stepNames = useMemo(() => new Map(steps.map(item => [item.step.stepId, item.step.name])), [steps]);
   const selected = steps.find((item) => item.step.stepId === selectedId);
   const selectedXlsxLoop = (() => {
     let current = selected;
@@ -410,12 +412,20 @@ export function App() {
     "browser.select",
   ].includes(action.type)), [actions]);
   const run = runs.find((item) => item.runId === runId);
+  const runWorkflow = runWorkflows[runId];
+  const stepNames = useMemo(() => new Map(flatten(runWorkflow?.steps ?? []).map(item => [item.step.stepId, item.step.name])), [runWorkflow]);
+  const scopedRuns = runScope === "all" ? runs : runs.filter(item => item.workflowId === workflowId);
+  const recovery = runRecovery(run, events);
+  const history = editorState.histories[workflowId];
+  const canUndo = !!history?.past.length;
+  const canRedo = !!history?.future.length;
   const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
   const validationScope = `${workflowId}:${selectedId}:${inspector}:${view}:`;
   const invalid = !(inspector === "step" && selectedCommented) && Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
   const workflowErrors = useMemo(() => workflow ? [...getBrowserPageErrors(workflow), ...getControlStepErrors(workflow), ...getNoteStepErrors(workflow)] : [], [workflow]);
   const invalidWorkflow = invalid || workflowErrors.length > 0;
   const activeRun = run && !terminalStatuses.has(run.status);
+  const currentActiveRun = activeRun && run.workflowId === workflowId;
   const retainedBrowser = !!run?.browserOpen && !activeRun;
   const browserAvailable = !!activeRun || !!run?.browserOpen;
   const retainedBrowserCount = runs.filter(
@@ -454,7 +464,9 @@ export function App() {
   const actionGroups = useMemo(() => {
     const groups = new Map<string, ActionDefinition[]>();
     for (const action of availableActions.filter((item) =>
-      `${item.label} ${item.type} ${item.description}`
+      (query || actionCategory === "全部" || (actionCategory === "网页" ? item.type.startsWith("browser.")
+        : actionCategory === "软件" ? item.type.startsWith("windows.") || item.type.startsWith("desktop.")
+        : ["browser.open", "browser.fill", "browser.click", "core.wait", "core.log", "variables.set"].includes(item.type))) && `${item.label} ${item.type} ${item.description}`
         .toLowerCase()
         .includes(query.toLowerCase()),
     )) {
@@ -462,8 +474,31 @@ export function App() {
       group.push(action);
       groups.set(action.category, group);
     }
-    return [...groups.entries()];
-  }, [availableActions, query]);
+    return [...groups.entries()].sort((a, b) => Number(b[1].some(item => item.type.startsWith("browser."))) - Number(a[1].some(item => item.type.startsWith("browser."))));
+  }, [availableActions, query, actionCategory]);
+
+  useEffect(() => {
+    if (runScope === "workflow") setRunId(previous => runs.some(item => item.runId === previous && item.workflowId === workflowId)
+      ? previous : runs.find(item => item.workflowId === workflowId)?.runId ?? "");
+  }, [workflowId, runScope, runs]);
+  useEffect(() => {
+    if (!api || !runId) return;
+    let disposed = false;
+    void api.getRunWorkflow(runId).then(value => {
+      if (!disposed && value) setRunWorkflows(previous => ({ ...previous, [runId]: value }));
+    }).catch(() => { /* Missing historical context never borrows names from the current draft. */ });
+    return () => { disposed = true; };
+  }, [runId, run?.revision, run?.stepId]);
+  const recoveryKey = recovery && `${runId}:${run?.status}:${recovery.stepId ?? ""}`;
+  useEffect(() => {
+    if (!recoveryKey) return;
+    setPanels(previous => ({ ...previous, right: true }));
+    setRightPane("run");
+    setRunTab("logs");
+  }, [recoveryKey]);
+  useEffect(() => {
+    if (selectedId) document.querySelector(`[data-step-id="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [selectedId, workflowId, editorState.restored]);
 
   useEffect(() => {
     if (!api || !pageBrowserId || view !== "editor") return;
@@ -495,6 +530,10 @@ export function App() {
     const off = api.onEvent((event) => {
       if (!mounted) return;
       setEvents((previous) => [...previous.slice(-3999), event]);
+      if (event.data && typeof event.data === "object" && "workflow" in event.data) {
+        const definition = event.data.workflow as WorkflowDefinition;
+        if (definition?.workflowId && Array.isArray(definition.steps)) setRunWorkflows(previous => ({ ...previous, [event.runId]: definition }));
+      }
       if (event.run) {
         const snapshot = event.run;
         setRuns((previous) => [
@@ -520,7 +559,7 @@ export function App() {
         ]);
         setWorkflowId(state.workflows[0]?.workflowId ?? "");
         setSelectedId(state.workflows[0]?.steps[0]?.stepId ?? "");
-        setRunId(state.runs[0]?.runId ?? "");
+        setRunId(state.runs.find(item => item.workflowId === state.workflows[0]?.workflowId)?.runId ?? "");
         setSaved(
           Object.fromEntries(
             state.workflows.map((item) => [
@@ -575,20 +614,17 @@ export function App() {
       previous[`${validationScope}${key}`] === !valid ? previous : { ...previous, [`${validationScope}${key}`]: !valid },
     );
   const updateWorkflow = (
-    update: (value: WorkflowDefinition) => WorkflowDefinition,
+    update: (value: WorkflowDefinition) => WorkflowDefinition, group?: string,
   ) => {
     if (busy) return;
-    setWorkflows((previous) =>
-      previous.map((item) =>
-        item.workflowId === workflowId ? update(item) : item,
-      ),
-    );
+    setDeleteNotice(undefined);
+    dispatchEditor({ type: "edit", id: workflowId, update, selectedId, group, at: Date.now() });
   };
-  const updateSelected = (update: (step: StepDefinition) => StepDefinition) =>
+  const updateSelected = (update: (step: StepDefinition) => StepDefinition, group?: string) =>
     updateWorkflow((value) => ({
       ...value,
       steps: replaceStep(value.steps, selectedId, update),
-    }));
+    }), group);
   const toggleComments = (ids: string[]) => {
     if (busy || !workflow) return;
     const targets = new Set(ids);
@@ -610,9 +646,59 @@ export function App() {
       if (value === undefined) delete params[key];
       else params[key] = value;
       return { ...step, params };
-    });
-  const catchError = (cause: unknown) =>
-    setError(cause instanceof Error ? cause.message : String(cause));
+    }, `param:${selectedId}:${key}`);
+  const catchError = (cause: unknown) => {
+    const feedback = explainError(cause);
+    setErrorMessage(feedback.message); setErrorDetail(feedback.detail);
+  };
+
+  function restoreEdit(type: "undo" | "redo") {
+    if (busy || !workflow) return;
+    const entry = (type === "undo" ? history?.past : history?.future)?.at(-1);
+    if (!entry) return;
+    dispatchEditor({ type, id: workflowId, selectedId });
+    const restoredSteps = flatten(entry.workflow.steps);
+    setSelectedId(restoredSteps.some(item => item.step.stepId === entry.selectedId) ? entry.selectedId : restoredSteps[0]?.step.stepId ?? "");
+    setInvalidFields({}); setDeleteNotice(undefined); setError("");
+    setNotice(type === "undo" ? "已撤销上一次编辑" : "已重做上一次编辑");
+  }
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      if (view !== "editor" && view !== "settings" || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : undefined;
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return;
+      const key = event.key.toLowerCase();
+      if (key === "z" || key === "y") { event.preventDefault(); restoreEdit(key === "y" || event.shiftKey ? "redo" : "undo"); }
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [view, busy, workflowId, history, selectedId]);
+
+  function showRunPanel() {
+    setRightPane("run"); setView("editor");
+    setPanels(previous => ({ ...previous, right: true }));
+  }
+
+  function locateRunStep(stepId: string) {
+    if (!run) return;
+    const target = workflows.find(item => item.workflowId === run.workflowId);
+    if (!target || !flatten(target.steps).some(item => item.step.stepId === stepId)) {
+      setNotice(`运行中的步骤「${stepNames.get(stepId) ?? stepId}」已不在当前草稿中，请参考本次运行日志。`); return;
+    }
+    openWorkflow(target.workflowId); setSelectedId(stepId); setInspector("step"); setRightPane("step");
+    setPanels(previous => ({ ...previous, right: true }));
+  }
+
+  function startExample() {
+    if (!workflow || workflow.steps.length || busy) return;
+    const sample: StepDefinition[] = [
+      { stepId: uuid(), name: "打开演示网页", actionType: "browser.open", params: { url: demoUrl }, onError: "fail" },
+      { stepId: uuid(), name: "打印执行说明", actionType: "core.log", params: { message: "演示网页已打开，可以继续添加点击、填写或采集指令。" }, onError: "fail" },
+    ];
+    updateWorkflow(value => ({ ...value, steps: sample }));
+    setSelectedId(sample[0]!.stepId); setInspector("step"); setRightPane("step"); setPanels(previous => ({ ...previous, right: true }));
+    setNotice("已添加可运行示例，确认参数后点击运行");
+  }
 
   async function saveWorkflow(thenRun = false) {
     if (!api || !workflow || busy || invalidWorkflow) return;
@@ -631,14 +717,16 @@ export function App() {
       }));
       if (thenRun) {
         const snapshot = await api.runWorkflow(persisted);
+        setRunWorkflows(previous => ({ ...previous, [snapshot.runId]: persisted }));
+        setRunScope("workflow");
         setRuns((previous) =>
           previous.some((item) => item.runId === snapshot.runId)
             ? previous
             : [snapshot, ...previous],
         );
         setRunId(snapshot.runId);
-        setBottomTab("logs");
-        setPanels(previous => ({ ...previous, bottom: true }));
+        setRunTab("logs");
+        showRunPanel();
         setNotice(`已提交运行 · 修订 ${snapshot.revision}`);
       } else setNotice("流程已保存");
     } catch (cause) {
@@ -672,14 +760,16 @@ export function App() {
     setError("");
     try {
       const snapshot = await api.runStep(workflow, stepId, step.actionType.startsWith("windows.") ? undefined : targetBrowser?.runId);
+      setRunWorkflows(previous => ({ ...previous, [snapshot.runId]: workflow }));
+      setRunScope("workflow");
       // Events may arrive before this IPC response; do not replace their newer state.
       setRuns((previous) => previous.some((item) => item.runId === snapshot.runId)
         ? previous : [snapshot, ...previous]);
       setRunId(snapshot.runId);
       if (stepBrowserTarget === "new") setStepBrowserTargets((previous) => ({ ...previous, [workflowId]: "auto" }));
       setSelectedId(stepId);
-      setBottomTab("logs");
-      setPanels((previous) => ({ ...previous, bottom: true }));
+      setRunTab("logs");
+      showRunPanel();
       setNotice(`已提交单条运行：${step.name}`);
     } catch (cause) {
       catchError(cause);
@@ -720,11 +810,12 @@ export function App() {
           : [...value.steps, step],
     }));
     setSelectedId(step.stepId);
-    setInspector("step");
+    setInspector("step"); setRightPane("step");
     setPanels(previous => ({ ...previous, right: true }));
   }
 
   function mutateStep(id: string, command: "up" | "down" | "copy" | "delete") {
+    if (busy) return;
     const original = steps.find((item) => item.step.stepId === id)?.step;
     const copied =
       command === "copy" && original ? copyStep(original) : undefined;
@@ -743,6 +834,10 @@ export function App() {
       }),
     }));
     if (command === "delete" && original && flatten([original]).some(item => item.step.stepId === selectedId)) setSelectedId("");
+    if (command === "delete" && original) {
+      const count = flatten([original]).length;
+      setDeleteNotice({ workflowId, count }); setNotice(`已删除「${original.name}」${count > 1 ? `及其子步骤，共 ${count} 条` : ""}`);
+    }
     if (copied) setSelectedId(copied.stepId);
   }
 
@@ -759,6 +854,7 @@ export function App() {
     };
     setWorkflows((previous) => [...previous, created]);
     setWorkflowId(created.workflowId);
+    setRunScope("workflow"); setRunId(""); setDeleteNotice(undefined);
     setOpenFlows(previous => [...previous, created.workflowId]);
     setSelectedId("");
     setView("settings");
@@ -768,10 +864,11 @@ export function App() {
     const next = workflows.find(item => item.workflowId === id);
     if (!next) return;
     setWorkflowId(id);
+    setRunScope("workflow"); setRunId(runs.find(item => item.workflowId === id)?.runId ?? ""); setDeleteNotice(undefined);
     setSelectedId(next.steps[0]?.stepId ?? "");
     setOpenFlows(previous => previous.includes(id) ? previous : [...previous, id]);
     setView(destination);
-    setInspector("step");
+    setInspector("step"); setRightPane("step");
   }
 
   function duplicateWorkflow(source: WorkflowDefinition) {
@@ -779,6 +876,7 @@ export function App() {
     delete copied.settings.profileId;
     setWorkflows(previous => [...previous, copied]);
     setWorkflowId(copied.workflowId); setSelectedId(copied.steps[0]?.stepId ?? "");
+    setRunScope("workflow"); setRunId(""); setDeleteNotice(undefined);
     setOpenFlows(previous => [...previous, copied.workflowId]); setView("settings");
     setNotice("已复制流程，保存后可运行");
   }
@@ -803,29 +901,32 @@ export function App() {
   }
 
   const tabs: {
-    id: BottomTab;
+    id: RunTab;
     label: string;
+    shortLabel: string;
     icon: ReactNode;
     count?: number;
   }[] = [
-    { id: "logs", label: "运行日志", icon: <Terminal size={15} /> },
-    { id: "variables", label: "变量", icon: <Braces size={15} /> },
+    { id: "logs", label: "运行日志", shortLabel: "日志", icon: <Terminal size={15} /> },
+    { id: "variables", label: "变量", shortLabel: "变量", icon: <Braces size={15} /> },
     {
       id: "artifacts",
       label: "下载产物",
+      shortLabel: "文件",
       icon: <Download size={15} />,
       count: run?.artifacts.length,
     },
     {
       id: "runs",
       label: "全部运行",
+      shortLabel: "历史",
       icon: <Layers size={15} />,
       count: runs.length,
     },
   ];
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${recovery ? " has-recovery" : ""}`}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">
@@ -873,8 +974,8 @@ export function App() {
           </button>
           <button
             className="top-run-control"
-            title="控制下方选中的运行；当前步骤完成后暂停"
-            disabled={!activeRun || !!busy || run?.status === "queued"}
+            title={`控制当前流程的所选运行${run?.workflowId === workflowId ? ` · ${run.runId.slice(0, 8)}` : ""}；当前步骤完成后暂停`}
+            disabled={!currentActiveRun || !!busy || run?.status === "queued"}
             onClick={() =>
               void control(
                 run?.status === "paused" || run?.status === "waiting_manual"
@@ -894,8 +995,8 @@ export function App() {
           </button>
           <button
             className="top-run-control"
-            title="停止下方选中的运行"
-            disabled={!activeRun || !!busy}
+            title={`停止当前流程的所选运行${run?.workflowId === workflowId ? ` · ${run.runId.slice(0, 8)}` : ""}`}
+            disabled={!currentActiveRun || !!busy}
             onClick={() => void control("stop")}
           >
             <Square size={14} />
@@ -908,6 +1009,8 @@ export function App() {
         <div className="alert" role="alert">
           <AlertCircle size={17} />
           <span>{error}</span>
+          {errorDetail && <details className="error-detail"><summary>技术详情</summary><pre>{errorDetail}</pre></details>}
+          <button className="text-button" onClick={() => { setError(""); if (workflow) setView("editor"); }}>返回编辑</button>
           <IconButton label="关闭提示" onClick={() => setError("")}>
             <X size={16} />
           </IconButton>
@@ -917,13 +1020,14 @@ export function App() {
         <AlertCircle size={17} />
         <span>“{workflowErrors[0].stepName}”：{workflowErrors[0].error}{workflowErrors.length > 1 ? `（另有 ${workflowErrors.length - 1} 项待完善）` : ""}</span>
         <button className="text-button" onClick={() => {
-          setSelectedId(workflowErrors[0].stepId); setInspector("step"); setView("editor"); setPanels(previous => ({ ...previous, right: true }));
+          setSelectedId(workflowErrors[0].stepId); setInspector("step"); setRightPane("step"); setView("editor"); setPanels(previous => ({ ...previous, right: true }));
         }}>定位步骤</button>
       </div>}
       {notice && (
         <div className="toast" role="status">
           <Check size={16} />
           {notice}
+          {deleteNotice?.workflowId === workflowId && canUndo && <button className="text-button" onClick={() => restoreEdit("undo")}><Undo2 size={14} />撤销删除</button>}
           <IconButton label="关闭通知" onClick={() => setNotice("")}>
             <X size={14} />
           </IconButton>
@@ -937,7 +1041,7 @@ export function App() {
         <div className="panel-controls" aria-label="面板布局">
           <button aria-label={panels.left ? "收起左侧栏" : "展开左侧栏"} title={panels.left ? "收起左侧栏" : "展开左侧栏"} aria-expanded={panels.left} onClick={() => setPanels(value => ({ ...value, left: !value.left }))}>{panels.left ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button>
           <button aria-label={panels.right ? "收起右侧栏" : "展开右侧栏"} title={panels.right ? "收起右侧栏" : "展开右侧栏"} aria-expanded={panels.right} onClick={() => setPanels(value => ({ ...value, right: !value.right }))}>{panels.right ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>
-          <button aria-label={panels.bottom ? "收起底部栏" : "展开底部栏"} title={panels.bottom ? "收起底部栏" : "展开底部栏"} aria-expanded={panels.bottom} onClick={() => setPanels(value => ({ ...value, bottom: !value.bottom }))}>{panels.bottom ? <PanelBottomClose size={17} /> : <PanelBottomOpen size={17} />}</button>
+          <button aria-label="查看运行结果" title="在右侧查看日志、变量、文件和历史运行" aria-pressed={view === "editor" && panels.right && rightPane === "run"} onClick={() => { setView("editor"); setRightPane("run"); setPanels(value => ({ ...value, right: true })); }}><Terminal size={17} /></button>
         </div>
       </nav>
       {view === "workflows" && <WorkflowsPage workflows={workflows} saved={saved} busy={loading || !!busy || !api} onCreate={createWorkflow} onOpen={openWorkflow} onSettings={id => openWorkflow(id, "settings")} onCopy={duplicateWorkflow} onDelete={deleteWorkflow} />}
@@ -1175,6 +1279,10 @@ export function App() {
             />
             <kbd>Ctrl K</kbd>
           </label>
+          <div className="library-categories" role="group" aria-label="指令类别">
+            {["全部", "常用", "网页", "软件"].map(category => <button key={category} aria-pressed={actionCategory === category}
+              onClick={() => { setActionCategory(category); setQuery(""); }}>{category}</button>)}
+          </div>
           <div className="action-groups">
             {loading ? (
               <div className="skeleton-list" aria-label="加载指令库">
@@ -1229,6 +1337,10 @@ export function App() {
               <h2>流程步骤</h2>
               <span className="count">{steps.length}</span>
             </div>
+            <div className="editor-history" aria-label="编辑历史">
+              <IconButton label="撤销编辑" title="撤销编辑（Ctrl+Z；输入框内使用文本撤销）" disabled={!canUndo || !!busy} onClick={() => restoreEdit("undo")}><Undo2 size={16} /></IconButton>
+              <IconButton label="重做编辑" title="重做编辑（Ctrl+Y 或 Ctrl+Shift+Z）" disabled={!canRedo || !!busy} onClick={() => restoreEdit("redo")}><Redo2 size={16} /></IconButton>
+            </div>
             <button
               className="text-button"
               disabled={!workflow}
@@ -1238,7 +1350,7 @@ export function App() {
               运行设置
             </button>
           </div>
-          {workflow && (selected?.step.actionType === "core.note" ? <div className="single-step-toolbar" aria-label="备注说明">
+          {workflow && steps.length > 0 && (selected?.step.actionType === "core.note" ? <div className="single-step-toolbar" aria-label="备注说明">
             <p>备注用于说明流程，运行时会直接跳过，不操作浏览器，也不会产生输出变量。</p>
           </div> : <div className="single-step-toolbar" aria-label="单条运行">
             <div className="single-step-controls">
@@ -1285,7 +1397,7 @@ export function App() {
                 : `已登记 ${browserPages.length} 个网页 · 当前：${browserPages.find(page => page.current)?.pageId ?? "尚未选定或已关闭"}`}
             </p>}
           </div>)}
-          <div className="editor-caption">
+          <div className="editor-caption" hidden={!steps.length}>
             <span>内部指令按层级缩进；点击分支内的 + 添加指令</span>
             {selected && (
               <select
@@ -1332,7 +1444,7 @@ export function App() {
                   ]) : new Map()}
                   renderIcon={type => <ActionIcon type={type} size={19} />}
                   renderStatus={status => <Status status={status} />}
-                  onSelect={id => { setSelectedId(id); setInspector("step"); setPanels(previous => ({ ...previous, right: true })); }}
+                  onSelect={id => { setSelectedId(id); setInspector("step"); setRightPane("step"); setPanels(previous => ({ ...previous, right: true })); }}
                   onRun={id => void runSingleStep(id)}
                   onToggleComment={toggleComments}
                   onMutate={mutateStep}
@@ -1351,14 +1463,18 @@ export function App() {
                 <h3>{workflow ? "搭建第一个步骤" : "连接你的流程工作台"}</h3>
                 <p>
                   {workflow
-                    ? "从左侧指令库选择一个动作，开始编排流程。"
+                    ? "网页任务从打开网页开始；已有目标软件时，可浏览软件指令。"
                     : "请从 Electron 桌面应用启动，以加载流程和运行服务。"}
                 </p>
                 {workflow && (
-                  <button onClick={() => searchRef.current?.focus()}>
-                    <Plus size={16} />
-                    选择指令
-                  </button>
+                  <div className="empty-start-actions">
+                    <button className="primary" disabled={!!busy || !availableActions.some(action => action.type === "browser.open")} onClick={() => {
+                      const action = availableActions.find(item => item.type === "browser.open");
+                      if (action) addAction(action);
+                    }}><Globe size={16} />添加打开网页</button>
+                    <button disabled={!!busy || !demoUrl} onClick={startExample}><Play size={16} />使用可运行示例</button>
+                    <button className="text-button" onClick={() => { setActionCategory("软件"); setQuery(""); setPanels(previous => ({ ...previous, left: true })); searchRef.current?.focus(); }}><Search size={16} />浏览软件指令</button>
+                  </div>
                 )}
               </div>
             )}
@@ -1377,6 +1493,11 @@ export function App() {
         </main>
 
         <aside className="inspector" aria-label="参数与设置">
+          <div className="right-pane-switch" role="group" aria-label="右侧栏内容">
+            <button aria-pressed={rightPane === "step"} aria-controls="step-editor-panel" onClick={() => setRightPane("step")}><Settings2 size={15} />步骤编辑</button>
+            <button aria-label="运行结果" aria-pressed={rightPane === "run"} aria-controls="run-monitor-panel" onClick={() => setRightPane("run")}><Terminal size={15} />运行结果{run && <span className={`pane-status pane-status-${run.status}`} title={statusLabels[run.status]} aria-label={statusLabels[run.status]} />}</button>
+          </div>
+          <div className="step-editor-panel" id="step-editor-panel" hidden={rightPane !== "step"}>
           <nav className="inspector-tabs" aria-label="属性面板">
             {(
               [
@@ -1396,7 +1517,7 @@ export function App() {
             ))}
           </nav>
           <div className="inspector-context"><span>当前指令</span><strong>{selected?.step.name ?? "未选择"}</strong></div>
-          <div className="inspector-body" key={`${workflowId}:${selectedId}:${view}`}>
+          <div className="inspector-body" key={`${workflowId}:${selectedId}:${view}:${editorState.restored}`}>
             {inspector === "step" &&
               (selected ? (
                 <>
@@ -1838,304 +1959,196 @@ export function App() {
               </p>
             )}
           </div>
+          </div>
+          <section className="console" id="run-monitor-panel" aria-label="运行监控" hidden={rightPane !== "run"}>
+            <div className="console-header">
+              <div className="run-tabs" role="tablist" aria-label="运行信息">
+                {tabs.map((tab, index) => (
+                  <button
+                    key={tab.id}
+                    id={`tab-${tab.id}`}
+                    role="tab"
+                    aria-label={tab.label}
+                    title={tab.label}
+                    aria-selected={runTab === tab.id}
+                    aria-controls={`panel-${tab.id}`}
+                    tabIndex={runTab === tab.id ? 0 : -1}
+                    className={runTab === tab.id ? "active" : ""}
+                    onClick={() => setRunTab(tab.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+                        event.preventDefault();
+                        const next =
+                          tabs[
+                            (index +
+                              (event.key === "ArrowRight" ? 1 : -1) +
+                              tabs.length) %
+                              tabs.length
+                          ]!;
+                        setRunTab(next.id);
+                        document.getElementById(`tab-${next.id}`)?.focus();
+                      }
+                    }}
+                  >
+                    {tab.icon}
+                    {tab.shortLabel}
+                    {!!tab.count && <span className="count">{tab.count}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+              <div className="run-tools">
+                <div className="run-selection">
+                <select aria-label="运行查看范围" className="run-scope" value={runScope} onChange={event => {
+                  setRunScope(event.target.value as "workflow" | "all");
+                  if (event.target.value === "all" && !runId) setRunId(runs[0]?.runId ?? "");
+                }}><option value="workflow">当前流程</option><option value="all">全部流程</option></select>
+                <select
+                  aria-label="当前查看的运行"
+                  value={runId}
+                  onChange={(event) => setRunId(event.target.value)}
+                >
+                  <option value="">选择运行记录</option>
+                  {scopedRuns.map((item) => (
+                    <option key={item.runId} value={item.runId}>
+                      {formatTime(item.startedAt)} · {item.workflowName}{item.stepId ? " · 单条" : ""}
+                    </option>
+                  ))}
+                </select>
+                </div>
+                <IconButton
+                  label={
+                    run?.status === "paused" || run?.status === "waiting_manual"
+                      ? "继续所选运行"
+                      : "暂停所选运行（当前步骤完成后）"
+                  }
+                  disabled={!activeRun || !!busy || run?.status === "queued"}
+                  onClick={() =>
+                    void control(
+                      run?.status === "paused" || run?.status === "waiting_manual"
+                        ? "resume"
+                        : "pause",
+                    )
+                  }
+                >
+                  {run?.status === "paused" || run?.status === "waiting_manual" ? (
+                    <Play size={16} />
+                  ) : (
+                    <Pause size={16} />
+                  )}
+                </IconButton>
+                <IconButton
+                  label="停止所选运行"
+                  disabled={!activeRun || !!busy}
+                  danger
+                  onClick={() => void control("stop")}
+                >
+                  <Square size={15} />
+                </IconButton>
+                <IconButton
+                  label="显示所选运行浏览器"
+                  disabled={!browserAvailable || !!busy}
+                  onClick={() => void control("show")}
+                >
+                  <Eye size={16} />
+                </IconButton>
+                <IconButton
+                  label="最小化所选运行浏览器"
+                  disabled={!browserAvailable || !!busy}
+                  onClick={() => void control("hide")}
+                >
+                  <EyeOff size={16} />
+                </IconButton>
+                <IconButton
+                  label={activeRun ? "关闭浏览器前请先停止所选运行" : "关闭所选运行浏览器"}
+                  disabled={!retainedBrowser || !!busy}
+                  danger
+                  onClick={() => void control("closeBrowser")}
+                >
+                  <X size={16} />
+                </IconButton>
+              </div>
+            <div className="run-context" aria-label="所选运行上下文">
+              {run ? <><strong title={run.workflowName}>{run.workflowName}</strong><code>{run.runId.slice(0, 8)}</code><span>v{run.revision}{run.stepId ? " · 单条运行" : ""}</span><Status status={run.status} />{retainedBrowser && <RetainedBrowserStatus />}
+                {run.workflowId !== workflowId && <span className="run-other-flow">正在查看其他流程</span>}</>
+                : <span>{runScope === "workflow" ? `「${workflow?.name ?? "当前流程"}」尚无运行记录` : "选择一条运行记录查看执行情况"}</span>}
+            </div>
+            {recovery && run && <div className="run-recovery" role="region" aria-label="运行恢复">
+              <div className="run-recovery-copy"><strong>{recovery.canResume ? "需要人工处理" : run.status === "interrupted" ? "运行已中断" : "运行失败"}{recovery.stepId ? ` · ${stepNames.get(recovery.stepId) ?? recovery.stepId}` : ""}</strong>
+                <p title={run.error ?? recovery.reason}>{recovery.reason}</p>
+                <small>{recovery.canResume ? "处理后继续会重试失败指令，使用本次运行参数；修改草稿须停止后重跑。" : "修改草稿后重新运行将从头开始；单条运行只执行该指令。"}</small>
+              </div>
+              <div className="run-recovery-actions">
+                {recovery.stepId && <button disabled={!!busy} onClick={() => locateRunStep(recovery.stepId!)}>定位失败步骤</button>}
+                {run.browserOpen && runWorkflow && !runWorkflow.settings.headless && <button disabled={!!busy} onClick={() => void control("show")}><Eye size={14} />显示浏览器</button>}
+                {recovery.canResume ? <button className="primary" disabled={!!busy} onClick={() => void control("resume")}><Play size={14} />处理后继续</button>
+                  : <button disabled={!!busy || !workflows.some(flow => flow.workflowId === run.workflowId)} onClick={() => openWorkflow(run.workflowId)}>编辑后重新运行</button>}
+              </div>
+            </div>}
+            <div
+              className={`console-content${runTab === "logs" ? " console-content-logs" : ""}`}
+              role="tabpanel"
+              id={`panel-${runTab}`}
+              aria-labelledby={`tab-${runTab}`}
+              tabIndex={0}
+            >
+              {runTab === "logs" && <LogViewer
+                events={events}
+                runId={runId}
+                stepNames={stepNames}
+                emptyMessage={run?.error ?? (run ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。" : "运行流程后，在这里查看步骤进度和执行日志。")}
+                onSelectStep={locateRunStep}
+                onOpenPath={path => void api?.openPath(path).catch(catchError)}
+              />}
+              {runTab === "variables" &&
+                (run && Object.keys(run.variables).length ? (
+                  <dl className="runtime-values">
+                    {Object.entries(run.variables).map(([name, value]) => (
+                      <div key={name}>
+                        <dt><code>{name}</code><span>{value === null ? "null" : Array.isArray(value) ? "array" : typeof value}</span></dt>
+                        <dd><code className="variable-value">{toText(value)}</code></dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <div className="console-empty"><Braces size={23} /><span>所选运行尚未产生变量。</span></div>
+                ))}
+              {runTab === "artifacts" &&
+                (run?.artifacts.length ? (
+                  <ul className="runtime-files">
+                    {run.artifacts.map((artifact: Artifact) => (
+                      <li key={artifact.path}>
+                        <div className="runtime-file-heading"><FileText size={16} /><strong>{artifact.name}</strong><span>{artifact.size < 1024 ? `${artifact.size} B` : `${(artifact.size / 1024).toFixed(1)} KB`}</span></div>
+                        <code className="artifact-path" title={artifact.path}>{artifact.path}</code>
+                        <button className="text-button" onClick={() => void api?.openPath(artifact.path).catch(catchError)}><FolderOpen size={14} />打开</button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="console-empty"><Download size={23} /><span>下载成功后，文件路径和大小将在这里显示。</span></div>
+                ))}
+              {runTab === "runs" &&
+                (runs.length ? (
+                  <ul className="runtime-history" aria-label="历史运行记录">
+                    {runs.map(item => (
+                      <li key={item.runId}>
+                        <button className={`run-select${runId === item.runId ? " selected-row" : ""}`} onClick={() => { setRunScope("all"); setRunId(item.runId); setRunTab("logs"); }}>
+                          <span className="runtime-history-heading"><strong>{item.workflowName}{item.stepId ? " · 单条运行" : ""}</strong><Status status={item.status} /></span>
+                          <span className="runtime-history-meta"><code>{item.runId.slice(0, 8)}</code><span>v{item.revision}</span><time dateTime={item.startedAt}>{new Date(item.startedAt).toLocaleString("zh-CN", { hour12: false })}</time></span>
+                          {item.browserOpen && terminalStatuses.has(item.status) && <RetainedBrowserStatus />}
+                          {item.currentStepId && !item.error && <span>当前步骤 · <code>{item.currentStepId}</code></span>}
+                          {item.error && <span className="error-text">{explainError(item.error).message}</span>}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="console-empty"><Layers size={23} /><span>还没有运行记录。保存流程后，点击顶部「运行」。</span></div>
+                ))}
+            </div>
+          </section>
         </aside>
       </div>
-
-      <section ref={consoleRef} className="console" aria-label="运行监控"
-        style={consoleHeight === null ? undefined : { height: clampConsoleHeight(consoleHeight) }}
-        hidden={!panels.bottom || (view !== "editor" && view !== "settings")}>
-        <div className="console-resizer" role="separator" aria-label="调整运行监控高度"
-          aria-orientation="horizontal" aria-valuemin={window.innerWidth <= 740 ? 160 : 112}
-          aria-valuemax={Math.max(window.innerWidth <= 740 ? 160 : 112, window.innerHeight - 360)}
-          aria-valuenow={Math.round(consoleHeight ?? consoleRef.current?.getBoundingClientRect().height
-            ?? clampConsoleHeight(window.innerWidth <= 740 ? 310 : Math.min(280, Math.max(140, window.innerHeight * 0.23))))}
-          tabIndex={0} title="拖动调整底部面板高度；方向键也可调整"
-          onPointerDown={event => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            consoleResize.current = { pointerId: event.pointerId, y: event.clientY, height: consoleRef.current?.getBoundingClientRect().height ?? 0 };
-          }}
-          onPointerMove={event => {
-            const start = consoleResize.current;
-            if (start?.pointerId === event.pointerId) setConsoleHeight(clampConsoleHeight(start.height + start.y - event.clientY));
-          }}
-          onPointerUp={event => {
-            if (consoleResize.current?.pointerId === event.pointerId) consoleResize.current = null;
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-          }}
-          onPointerCancel={() => { consoleResize.current = null; }}
-          onKeyDown={event => {
-            const current = consoleRef.current?.getBoundingClientRect().height ?? 200;
-            const next = event.key === "ArrowUp" ? current + 24 : event.key === "ArrowDown" ? current - 24
-              : event.key === "Home" ? 0 : event.key === "End" ? window.innerHeight : null;
-            if (next !== null) { event.preventDefault(); setConsoleHeight(clampConsoleHeight(next)); }
-          }} />
-        <div className="console-header">
-          <div className="bottom-tabs" role="tablist" aria-label="运行信息">
-            {tabs.map((tab, index) => (
-              <button
-                key={tab.id}
-                id={`tab-${tab.id}`}
-                role="tab"
-                aria-selected={bottomTab === tab.id}
-                aria-controls={`panel-${tab.id}`}
-                tabIndex={bottomTab === tab.id ? 0 : -1}
-                className={bottomTab === tab.id ? "active" : ""}
-                onClick={() => setBottomTab(tab.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-                    event.preventDefault();
-                    const next =
-                      tabs[
-                        (index +
-                          (event.key === "ArrowRight" ? 1 : -1) +
-                          tabs.length) %
-                          tabs.length
-                      ]!;
-                    setBottomTab(next.id);
-                    document.getElementById(`tab-${next.id}`)?.focus();
-                  }
-                }}
-              >
-                {tab.icon}
-                {tab.label}
-                {!!tab.count && <span className="count">{tab.count}</span>}
-              </button>
-            ))}
-          </div>
-          <div className="run-tools">
-            {run && (
-              <>
-                <Status status={run.status} />
-                {retainedBrowser && <RetainedBrowserStatus />}
-                <span className="run-version">v{run.revision}</span>
-              </>
-            )}
-            <select
-              aria-label="当前查看的运行"
-              value={runId}
-              onChange={(event) => setRunId(event.target.value)}
-            >
-              <option value="">选择运行记录</option>
-              {runs.map((item) => (
-                <option key={item.runId} value={item.runId}>
-                  {formatTime(item.startedAt)} · {item.workflowName}{item.stepId ? " · 单条" : ""}
-                </option>
-              ))}
-            </select>
-            <IconButton
-              label={
-                run?.status === "paused" || run?.status === "waiting_manual"
-                  ? "继续所选运行"
-                  : "暂停所选运行（当前步骤完成后）"
-              }
-              disabled={!activeRun || !!busy || run?.status === "queued"}
-              onClick={() =>
-                void control(
-                  run?.status === "paused" || run?.status === "waiting_manual"
-                    ? "resume"
-                    : "pause",
-                )
-              }
-            >
-              {run?.status === "paused" || run?.status === "waiting_manual" ? (
-                <Play size={16} />
-              ) : (
-                <Pause size={16} />
-              )}
-            </IconButton>
-            <IconButton
-              label="停止所选运行"
-              disabled={!activeRun || !!busy}
-              danger
-              onClick={() => void control("stop")}
-            >
-              <Square size={15} />
-            </IconButton>
-            <IconButton
-              label="显示所选运行浏览器"
-              disabled={!browserAvailable || !!busy}
-              onClick={() => void control("show")}
-            >
-              <Eye size={16} />
-            </IconButton>
-            <IconButton
-              label="最小化所选运行浏览器"
-              disabled={!browserAvailable || !!busy}
-              onClick={() => void control("hide")}
-            >
-              <EyeOff size={16} />
-            </IconButton>
-            <IconButton
-              label={activeRun ? "关闭浏览器前请先停止所选运行" : "关闭所选运行浏览器"}
-              disabled={!retainedBrowser || !!busy}
-              danger
-              onClick={() => void control("closeBrowser")}
-            >
-              <X size={16} />
-            </IconButton>
-          </div>
-        </div>
-        <div
-          className={`console-content${bottomTab === "logs" ? " console-content-logs" : ""}`}
-          role="tabpanel"
-          id={`panel-${bottomTab}`}
-          aria-labelledby={`tab-${bottomTab}`}
-          tabIndex={0}
-        >
-          {bottomTab === "logs" && <LogViewer
-            events={events}
-            runId={runId}
-            stepNames={stepNames}
-            emptyMessage={run?.error ?? (run ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。" : "运行流程后，在这里查看步骤进度和执行日志。")}
-            onSelectStep={stepId => { setSelectedId(stepId); setInspector("step"); }}
-            onOpenPath={path => void api?.openPath(path).catch(catchError)}
-          />}
-          {bottomTab === "variables" &&
-            (run && Object.keys(run.variables).length ? (
-              <table>
-                <thead>
-                  <tr>
-                    <th>变量名称</th>
-                    <th>类型</th>
-                    <th>当前值</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(run.variables).map(([name, value]) => (
-                    <tr key={name}>
-                      <td>
-                        <code>{name}</code>
-                      </td>
-                      <td className="muted">
-                        {value === null
-                          ? "null"
-                          : Array.isArray(value)
-                            ? "array"
-                            : typeof value}
-                      </td>
-                      <td>
-                        <code className="variable-value">{toText(value)}</code>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="console-empty">
-                <Braces size={23} />
-                <span>所选运行尚未产生变量。</span>
-              </div>
-            ))}
-          {bottomTab === "artifacts" &&
-            (run?.artifacts.length ? (
-              <table>
-                <thead>
-                  <tr>
-                    <th>文件名称</th>
-                    <th>保存路径</th>
-                    <th className="number-cell">大小</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {run.artifacts.map((artifact: Artifact) => (
-                    <tr key={artifact.path}>
-                      <td>
-                        <span className="file-name">
-                          <FileText size={16} />
-                          {artifact.name}
-                        </span>
-                      </td>
-                      <td>
-                        <code className="artifact-path" title={artifact.path}>
-                          {artifact.path}
-                        </code>
-                      </td>
-                      <td className="number-cell">
-                        {artifact.size < 1024
-                          ? `${artifact.size} B`
-                          : `${(artifact.size / 1024).toFixed(1)} KB`}
-                      </td>
-                      <td>
-                        <button
-                          className="text-button"
-                          onClick={() =>
-                            void api?.openPath(artifact.path).catch(catchError)
-                          }
-                        >
-                          <FolderOpen size={14} />
-                          打开
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="console-empty">
-                <Download size={23} />
-                <span>下载成功后，文件路径和大小将在这里显示。</span>
-              </div>
-            ))}
-          {bottomTab === "runs" &&
-            (runs.length ? (
-              <table>
-                <thead>
-                  <tr>
-                    <th>流程 / 运行 ID</th>
-                    <th>版本</th>
-                    <th>开始时间</th>
-                    <th>状态</th>
-                    <th>当前步骤 / 错误</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map((item) => (
-                    <tr
-                      key={item.runId}
-                      className={runId === item.runId ? "selected-row" : ""}
-                    >
-                      <td>
-                        <button
-                          className="run-select"
-                          onClick={() => {
-                            setRunId(item.runId);
-                            setBottomTab("logs");
-                          }}
-                        >
-                          <strong>{item.workflowName}{item.stepId ? " · 单条运行" : ""}</strong>
-                          <code>{item.runId.slice(0, 12)}</code>
-                        </button>
-                      </td>
-                      <td>v{item.revision}</td>
-                      <td>
-                        {new Date(item.startedAt).toLocaleString("zh-CN", {
-                          hour12: false,
-                        })}
-                      </td>
-                      <td>
-                        <Status status={item.status} />
-                        {item.browserOpen && terminalStatuses.has(item.status) && (
-                          <RetainedBrowserStatus />
-                        )}
-                      </td>
-                      <td className={item.error ? "error-text" : "muted"}>
-                        {item.error ?? item.currentStepId ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="console-empty">
-                <Layers size={23} />
-                <span>还没有运行记录。保存流程后，点击顶部「运行」。</span>
-              </div>
-            ))}
-        </div>
-      </section>
       <footer className="statusbar">
         <span>
           <span className={`connection-dot${api ? " connected" : ""}`} />

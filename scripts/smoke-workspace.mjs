@@ -18,7 +18,7 @@ try {
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.getByRole('heading', { name: '订单采集与导出', exact: true }).waitFor();
-  for (const area of ['左侧栏', '右侧栏', '底部栏']) {
+  for (const area of ['左侧栏', '右侧栏']) {
     await page.getByRole('button', { name: `收起${area}`, exact: true }).click();
     await page.getByRole('button', { name: `展开${area}`, exact: true }).waitFor();
   }
@@ -27,7 +27,7 @@ try {
   assert.equal(await page.getByRole('region', { name: '运行监控' }).isVisible(), false);
   await page.reload();
   await page.getByRole('button', { name: '展开左侧栏', exact: true }).waitFor();
-  for (const area of ['左侧栏', '右侧栏', '底部栏']) await page.getByRole('button', { name: `展开${area}`, exact: true }).click();
+  for (const area of ['左侧栏', '右侧栏']) await page.getByRole('button', { name: `展开${area}`, exact: true }).click();
 
   await page.getByRole('button', { name: /^流程管理/ }).click();
   const management = page.getByRole('main', { name: '流程管理', exact: true });

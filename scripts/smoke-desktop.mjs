@@ -49,6 +49,14 @@ try {
   const firstRunId = after.runs[0].runId;
   const file = after.runs[0].artifacts[0];
   assert.match(await readFile(file.path, 'utf8'), /跨语言订单/);
+  await page.getByRole('tab', { name: '变量', exact: true }).click();
+  const runtimeVariables = page.getByRole('tabpanel', { name: '变量', exact: true });
+  assert.deepEqual(await runtimeVariables.locator('dt code').allTextContents(), Object.keys(after.runs[0].variables), '窄栏必须列出实际运行变量');
+  await page.getByRole('tab', { name: '全部运行', exact: true }).click();
+  const history = page.getByRole('list', { name: '历史运行记录', exact: true });
+  await history.getByRole('button').filter({ hasText: firstRunId.slice(0, 8) }).click();
+  await page.getByRole('tabpanel', { name: '运行日志', exact: true }).waitFor();
+  assert.match(await page.getByLabel('所选运行上下文').innerText(), /桌面验收 · 订单导出/);
   await page.getByRole('tab', { name: /下载|产物/ }).click();
   await page.getByRole('tabpanel', { name: '下载产物' }).getByText(file.name, { exact: true }).waitFor();
   await page.screenshot({ path: join(qa, 'desktop-success.png'), fullPage: true });
@@ -62,6 +70,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < closedDeadline);
   assert.equal(after.runs.find(run => run.runId === firstRunId)?.browserOpen, false);
+  await page.getByRole('button', { name: '运行设置', exact: true }).click();
   await retention.selectOption('close');
   await page.getByRole('button', { name: '运行', exact: true }).click();
   const secondDeadline = Date.now() + 45000;

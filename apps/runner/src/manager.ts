@@ -90,6 +90,11 @@ export class RunManager extends EventEmitter {
     this.startQueue = operation.catch(() => {}); return operation;
   }
   listRuns() { return [...this.jobs.values()].map(j => structuredClone(j.run)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  async getRunWorkflow(runId: string): Promise<WorkflowDefinition | null> {
+    const id = scheduleIdentifier.parse(runId);
+    const workflow = this.jobs.get(id)?.workflow;
+    return workflow ? structuredClone(workflow) : this.store.readRunWorkflow(id);
+  }
   async listBrowserPages(runId: string): Promise<BrowserPageInfo[]> {
     if (typeof runId !== 'string' || !runId) throw new Error('浏览器运行标识无效');
     if (this.shuttingDown) throw new Error('运行器正在退出');

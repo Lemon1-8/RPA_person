@@ -6,6 +6,20 @@ import { FileStore } from '../packages/persistence/src/index.js';
 import type { WorkflowDefinition } from '../packages/contracts/src/index.js';
 
 const directories: string[] = [];
+it('读取运行时的流程快照，支持旧记录并拒绝越界运行标识', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rpa-persistence-run-context-'));
+  directories.push(directory);
+  const store = new FileStore(directory); await store.initialize();
+  const original: WorkflowDefinition = { schemaVersion: 1, workflowId: 'history', name: '原流程', revision: 1, variables: {}, elements: {},
+    settings: { downloadDir: directory, headless: true }, steps: [{ stepId: 'original', name: '原步骤名称', actionType: 'core.log', params: { message: '原日志' } }] };
+  await store.createRun(original, { runId: 'old-run', workflowId: original.workflowId, workflowName: original.name, revision: 1,
+    status: 'succeeded', startedAt: new Date().toISOString(), variables: {}, artifacts: [] });
+  expect(await store.readRunWorkflow('old-run')).toEqual(original);
+  expect(await store.readRunWorkflow('missing')).toBeNull();
+  await expect(store.readRunWorkflow('../workflows')).rejects.toThrow();
+  await writeFile(join(directory, 'runs', 'old-run', 'workflow.json'), '{invalid');
+  await expect(store.readRunWorkflow('old-run')).rejects.toThrow();
+});
 afterEach(async () => {
   await Promise.all(directories.splice(0).map(async directory => {
     const target = resolve(directory);

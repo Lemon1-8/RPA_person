@@ -246,7 +246,7 @@ try {
   for (const [step, count] of [[loop.children[0], 3], [nested, 3], [nested.children[0], 1], [nested.elseSteps[0], 2], [condition.children[0], 1], [condition.elseSteps[0], 0]]) {
     assert.equal(executions(step.stepId), count, `${step.name} 执行次数应符合嵌套分支`);
   }
-  await page.getByRole('button', { name: '收起底部栏', exact: true }).click();
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await page.setViewportSize({ width: 1464, height: 1200 });
   await stepButton('验收循环').scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(qa, 'control-flow-success.png'), fullPage: true });

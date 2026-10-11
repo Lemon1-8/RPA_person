@@ -49,9 +49,16 @@ it('通过独立任务进程执行已保存版本，并在重启后读取运行�
   expect(result.status).toBe('succeeded');
   expect(result.variables.value).toBe(42);
   expect(result.revision).toBe(1);
+  expect(await manager.getRunWorkflow(queued.runId)).toEqual(saved);
+  const context = await manager.getRunWorkflow(queued.runId);
+  context!.steps[0].name = '外部修改';
+  expect((await manager.getRunWorkflow(queued.runId))!.steps[0].name).toBe('设置');
   await manager.shutdown();
   const reopened = new RunManager({ dataDir }); managers.push(reopened); await reopened.initialize();
   expect(reopened.listRuns()[0].status).toBe('succeeded');
+  expect(await reopened.getRunWorkflow(queued.runId)).toEqual(saved);
+  expect(await reopened.getRunWorkflow('missing')).toBeNull();
+  await expect(reopened.getRunWorkflow('../workflows')).rejects.toThrow();
 });
 
 it('清空可选输出变量后保存，返回的已保存版本可直接运行', async () => {

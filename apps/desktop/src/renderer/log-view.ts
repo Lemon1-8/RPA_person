@@ -1,7 +1,11 @@
 import type { RunEvent } from "../../../../packages/contracts/src/index.js";
+import { stripAnsi } from "./run-feedback.js";
 
 export type LogFilter = "all" | "steps" | "output" | "failed";
 export interface LogRow { event: RunEvent; index: number }
+export function logStepName(event: RunEvent, stepNames: ReadonlyMap<string, string>): string | undefined {
+  return event.stepName ?? stepNames.get(event.stepId ?? '');
+}
 
 const terminalRunStatuses = new Set(["succeeded", "failed", "stopped", "interrupted"]);
 
@@ -35,6 +39,7 @@ export function logRows(events: RunEvent[], runId: string, showStepDetails = fal
 }
 
 export function logRowText(event: RunEvent, stepName?: string): string {
+  const message = event.message === undefined ? undefined : stripAnsi(event.message);
   if (event.type === "step") {
     if (event.status === "running") return "正在执行";
     if (event.status === "succeeded") {
@@ -47,8 +52,8 @@ export function logRowText(event: RunEvent, stepName?: string): string {
     const data = event.data as { name?: unknown };
     return typeof data.name === "string" ? `已生成文件：${data.name}` : "已生成文件";
   }
-  if (event.type === "run") return event.message ?? event.run?.error ?? (event.status === "succeeded" ? "运行完成" : event.status === "failed" ? "运行失败" : event.status === "stopped" ? "运行已停止" : event.status === "interrupted" ? "运行意外中断" : event.status === "paused" ? "运行已暂停" : "等待人工操作");
-  return event.message ?? stepName ?? "";
+  if (event.type === "run") return message ?? (event.run?.error ? stripAnsi(event.run.error) : undefined) ?? (event.status === "succeeded" ? "运行完成" : event.status === "failed" ? "运行失败" : event.status === "stopped" ? "运行已停止" : event.status === "interrupted" ? "运行意外中断" : event.status === "paused" ? "运行已暂停" : "等待人工操作");
+  return message ?? stepName ?? "";
 }
 
 export function filterLogRows(rows: LogRow[], filter: LogFilter, query: string, stepNames: ReadonlyMap<string, string>): LogRow[] {
@@ -58,7 +63,7 @@ export function filterLogRows(rows: LogRow[], filter: LogFilter, query: string, 
     if (filter === "output" && event.type !== "log" && event.type !== "artifact") return false;
     if (filter === "failed" && event.status !== "failed" && event.status !== "interrupted") return false;
     if (!term) return true;
-    const stepName = stepNames.get(event.stepId ?? "") ?? "";
+    const stepName = logStepName(event, stepNames) ?? "";
     return `${stepName} ${event.message ?? ""} ${logRowText(event, stepName)}`.toLocaleLowerCase().includes(term);
   });
 }

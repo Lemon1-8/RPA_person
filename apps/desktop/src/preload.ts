@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopApi, RunEvent } from '../../../packages/contracts/src/index.js';
 const api: DesktopApi = {
   bootstrap: () => ipcRenderer.invoke('rpa:bootstrap'),
+  getRunWorkflow: runId => ipcRenderer.invoke('rpa:run-workflow', runId),
   saveWorkflow: workflow => ipcRenderer.invoke('rpa:save', workflow),
   deleteWorkflow: workflowId => ipcRenderer.invoke('rpa:delete-workflow', workflowId),
   listSchedules: () => ipcRenderer.invoke('rpa:list-schedules'),

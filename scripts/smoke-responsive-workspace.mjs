@@ -27,7 +27,7 @@ async function resize(width, height) {
     return {
       viewport: { width: innerWidth, height: innerHeight },
       shell: box('.app-shell'), editor: box('.editor'), scroll: box('.step-scroll'), list: box('.step-list'),
-      console: box('.console'), inspector: box('.inspector'), status: box('.statusbar'),
+      console: box('.console'), inspector: box('.inspector'), library: box('.library'), workspace: box('.workspace'), status: box('.statusbar'),
       padding: parseFloat(scrollStyle.paddingLeft) + parseFloat(scrollStyle.paddingRight),
       documentWidth: document.documentElement.scrollWidth,
     };
@@ -38,6 +38,9 @@ function fits(metrics) {
   assert.ok(metrics.status.bottom <= metrics.viewport.height + 1, '底部状态栏应跟随窗口底边');
   assert.ok(metrics.inspector.right <= metrics.viewport.width + 1, '右侧参数栏不能被窗口裁切');
   assert.ok(metrics.scroll.height >= 100, '较小窗口也应保留可用的步骤编排空间');
+  assert.ok(Math.abs(metrics.inspector.height - metrics.workspace.height) <= 1, '右栏应使用工作区完整高度');
+  assert.ok(Math.abs(metrics.library.height - metrics.workspace.height) <= 1, '指令库应使用工作区完整高度');
+  assert.ok(Math.abs(metrics.workspace.bottom - metrics.status.bottom + metrics.status.height) <= 1, '工作区底边应紧邻状态栏');
   assert.ok(metrics.scroll.scrollWidth <= metrics.scroll.clientWidth + 1, '步骤编排不应横向溢出');
   const expected = metrics.scroll.clientWidth - metrics.padding;
   assert.ok(Math.abs(metrics.list.width - expected) <= 1, `步骤应填满工作区可用宽度：实际 ${metrics.list.width}，可用 ${expected}`);
@@ -78,6 +81,10 @@ try {
   await page.evaluate(flow => window.rpa.saveWorkflow(flow), flow);
   await page.reload();
   await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
+  await page.evaluate(() => { localStorage.setItem('rpa.consoleHeight', '360'); localStorage.setItem('rpa.rightPane', 'step'); });
+  await page.reload();
+  await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
+  assert.equal(await page.getByRole('region', { name: '运行监控', exact: true }).isVisible(), false, '默认编辑时应显示参数，旧底栏高度不应留下空白');
   const large = await resize(1800, 1000);
   const small = await resize(1040, 650);
   fits(large);
@@ -85,15 +92,37 @@ try {
   assert.ok(large.list.width > small.list.width + 500, '工作区宽度应随窗口显著增大');
   assert.ok(large.scroll.height > small.scroll.height + 100, '工作区高度应随窗口增大');
   await page.screenshot({ path: join(qa, 'workspace-responsive-small.png'), fullPage: true });
-  for (const area of ['左侧栏', '右侧栏', '底部栏']) await page.getByRole('button', { name: `收起${area}`, exact: true }).click();
+  await page.getByRole('button', { name: '运行结果', exact: true }).click();
+  const monitoring = await resize(1040, 650);
+  fits(monitoring);
+  assert.ok(Math.abs(monitoring.scroll.height - small.scroll.height) <= 1, '查看运行结果不应占用流程高度');
+  assert.ok(monitoring.console.left >= monitoring.inspector.left, '运行结果应留在右栏');
+  assert.ok(monitoring.console.height >= 400, '右栏日志应有完整的阅读高度');
+  const monitor = page.getByRole('region', { name: '运行监控', exact: true });
+  for (const name of ['运行日志', '变量', '下载产物', '全部运行']) {
+    await monitor.getByRole('tab', { name, exact: true }).click();
+    await monitor.getByRole('tabpanel', { name, exact: true }).waitFor();
+    assert.equal(await monitor.getByRole('tab', { name, exact: true }).getAttribute('aria-selected'), 'true');
+  }
+  await monitor.getByRole('tab', { name: '运行日志', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await monitor.getByRole('tab', { name: '变量', exact: true }).getAttribute('aria-selected'), 'true');
+  await monitor.getByRole('tab', { name: '运行日志', exact: true }).click();
+  await page.screenshot({ path: join(qa, 'three-column-results-small.png'), fullPage: true });
+  for (const area of ['左侧栏', '右侧栏']) await page.getByRole('button', { name: `收起${area}`, exact: true }).click();
   const expanded = await resize(1040, 650);
   assert.ok(expanded.list.width > small.list.width + 400, '收起侧栏后流程应使用释放的宽度');
-  assert.ok(expanded.scroll.height > small.scroll.height + 100, '收起底栏后流程应使用释放的高度');
-  for (const area of ['左侧栏', '右侧栏', '底部栏']) await page.getByRole('button', { name: `展开${area}`, exact: true }).click();
+  assert.ok(Math.abs(expanded.scroll.height - small.scroll.height) <= 1, '侧栏显示与否不应改变流程高度');
+  await page.getByRole('button', { name: '查看运行结果', exact: true }).click();
+  await monitor.waitFor();
+  await page.getByRole('button', { name: '展开左侧栏', exact: true }).click();
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   fits(await resize(1800, 1000));
   await page.screenshot({ path: join(qa, 'workspace-responsive-large.png'), fullPage: true });
+  fits(await resize(1464, 902));
+  await page.screenshot({ path: join(qa, 'three-column-editor.png'), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ status: 'passed', legacyDefaultsRemoved: true, responsiveWorkspace: true, panelsReclaimSpace: true,
+  console.log(JSON.stringify({ status: 'passed', legacyDefaultsRemoved: true, responsiveWorkspace: true, panelsReclaimSpace: true, fullHeightColumns: true, resultTabsAndKeyboard: true,
     large: { width: large.list.width, height: large.scroll.height }, small: { width: small.list.width, height: small.scroll.height } }));
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: join(qa, 'workspace-responsive-failure.png'), fullPage: true }).catch(() => {});

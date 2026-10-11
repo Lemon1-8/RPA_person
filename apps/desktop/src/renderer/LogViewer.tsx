@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Search, X } from "lucide-react";
 import type { RunEvent } from "../../../../packages/contracts/src/index.js";
 import { LogMessage } from "./LogMessage.js";
-import { filterLogRows, logRows, logRowText, type LogFilter } from "./log-view.js";
+import { filterLogRows, logRows, logRowText, logStepName, type LogFilter } from "./log-view.js";
 
 const labels: Record<string, string> = {
   running: "执行中", succeeded: "完成", failed: "失败", skipped: "跳过",
@@ -66,11 +66,11 @@ export function LogViewer({ events, runId, stepNames, emptyMessage, onSelectStep
       <div className="log-filters" role="group" aria-label="日志筛选">
         {filters.map(item => <button key={item.id} type="button" className={filter === item.id ? "active" : ""} aria-pressed={filter === item.id} onClick={() => { if (item.id === "steps") setShowStepDetails(true); setFilter(item.id); startInspecting(); }}>{item.label}</button>)}
       </div>
-      <button type="button" className="log-details-toggle" role="switch" aria-checked={showStepDetails} onClick={() => {
+      <button type="button" className="log-details-toggle" role="switch" aria-label="显示指令执行信息" title="显示指令执行信息" aria-checked={showStepDetails} onClick={() => {
         setShowStepDetails(!showStepDetails);
         if (showStepDetails && filter === "steps") setFilter("all");
         startInspecting();
-      }}><span className="log-details-track" aria-hidden="true" />显示指令执行信息</button>
+      }}><span className="log-details-track" aria-hidden="true" />执行详情</button>
       <span className="log-count">{rows.length}{rows.length !== allRows.length ? ` / ${allRows.length}` : ""} 条</span>
       {!following && rows.length > 0 && <button type="button" className="log-latest" onClick={() => { setFollowing(true); if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }}><ArrowDown size={14} />最新</button>}
     </div>
@@ -81,7 +81,7 @@ export function LogViewer({ events, runId, stepNames, emptyMessage, onSelectStep
     }}>
       {rows.length ? <div className="log-lines" role="log" aria-label="运行日志" aria-live="off">
         {rows.map(({ event, index }) => {
-          const stepName = stepNames.get(event.stepId ?? "");
+          const stepName = logStepName(event, stepNames);
           const path = eventPath(event);
           const isFailure = event.status === "failed" || event.status === "interrupted";
           const typeLabel = event.type === "step" ? labels[event.status ?? ""] ?? "步骤" : event.type === "run" ? labels[event.status ?? ""] ?? "运行" : event.type === "artifact" ? "文件" : "输出";

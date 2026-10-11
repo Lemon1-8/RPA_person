@@ -158,7 +158,7 @@ try {
   assert.equal(run.variables.finished, true);
   assert.equal(run.variables.optionalRan, undefined);
   assert.equal(run.browserOpen, false);
-  await page.getByRole('button', { name: '收起底部栏', exact: true }).click();
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await step('group').click();
   await page.locator('.step-scroll').evaluate(element => { element.scrollTop = 0; });
   await page.screenshot({ path: join(qa, 'step-comments-success.png'), fullPage: true });

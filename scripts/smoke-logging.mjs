@@ -131,6 +131,7 @@ try {
   await stepButton('打印当前项').click();
   await stepButton('日志验收循环').scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(qa, 'logging-success.png'), fullPage: true });
+  await page.getByRole('button', { name: '查看运行结果', exact: true }).click();
   await monitor.locator('.log-line').filter({ hasText: '当前项：1' }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(qa, 'logging-first-items.png'), fullPage: true });
 
@@ -157,6 +158,7 @@ try {
   await stepButton('打印当前项').click();
   await page.screenshot({ path: join(qa, 'logging-object-success.png'), fullPage: true });
 
+  await page.getByRole('button', { name: '查看运行结果', exact: true }).click();
   await detailToggle.click();
   await page.reload();
   await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();

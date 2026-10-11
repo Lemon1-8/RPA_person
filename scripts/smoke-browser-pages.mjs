@@ -48,6 +48,7 @@ async function runStep(name, expected = 'succeeded') {
   assert.equal(event.status, expected, event.run?.error);
   if (runId) assert.equal(event.runId, runId, '多网页步骤必须复用同一会话');
   runId = event.runId;
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   return event.run;
 }
 try {

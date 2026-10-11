@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterLogRows, logRows, logRowText } from '../apps/desktop/src/renderer/log-view.js';
+import { filterLogRows, logRows, logRowText, logStepName } from '../apps/desktop/src/renderer/log-view.js';
 import type { RunEvent } from '../packages/contracts/src/index.js';
 
 const event = (type: RunEvent['type'], status: string | undefined, message: string | undefined, stepId?: string, runId = 'current'): RunEvent => ({
@@ -7,6 +7,15 @@ const event = (type: RunEvent['type'], status: string | undefined, message: stri
 });
 
 describe('运行日志视图', () => {
+  it('复用运行会话并修改步骤名称后，旧日志仍保留发生时的名称', () => {
+    const first = { ...event('log', undefined, '旧输出', 'print'), stepName: '原名称' };
+    const second = { ...event('log', undefined, '新输出', 'print'), stepName: '新名称' };
+    const names = new Map([['print', '新名称']]);
+    expect(logStepName(first, names)).toBe('原名称');
+    expect(logStepName(second, names)).toBe('新名称');
+    expect(filterLogRows(logRows([first, second], 'current'), 'all', '原名称', names).map(row => row.event)).toEqual([first]);
+    expect(logStepName(event('log', undefined, '旧格式', 'print'), names)).toBe('新名称');
+  });
   it('默认隐藏所有指令的执行中、完成和跳过信息，保留实际输出和失败', () => {
     const printEvent = (status: string, message: string): RunEvent => ({
       ...event('step', status, message, 'print'), data: { durationMs: 0 },
