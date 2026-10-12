@@ -319,7 +319,7 @@ it.skipIf(process.platform !== 'win32')('两个独立进程同时争抢死租约
   const outcomes = await Promise.all(results);
   expect(outcomes.filter(result => result.succeeded)).toHaveLength(1);
   expect(outcomes.find(result => result.succeeded)?.open).toBe(true);
-  expect(outcomes.find(result => !result.succeeded)?.code).toBe('PROFILE_IN_USE');
+  expect(outcomes.find(result => !result.succeeded)?.code, JSON.stringify(outcomes)).toBe('PROFILE_IN_USE');
   const lease = JSON.parse(await readFile(lockPath, 'utf8')) as { pid: number };
   expect(children.map(child => child.pid)).toContain(lease.pid);
   expect(() => process.kill(lease.pid, 0)).not.toThrow();

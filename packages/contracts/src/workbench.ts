@@ -18,6 +18,8 @@ export interface ScheduleOccurrence {
   outcome: 'claimed' | 'started' | 'skipped'; reason?: string;
   workflowId?: string; revision?: number;
 }
+export interface RunHistoryQuery { offset?:number;limit?:number;workflowId?:string;status?:RunSnapshot['status'];from?:string;to?:string;archived?:boolean }
+export interface CleanupPreview { token:string;runIds:string[];revisions:{workflowId:string;revision:number}[];files:string[];bytes:number;protected:string[] }
 export interface WorkbenchApi {
   listDrafts(): Promise<WorkflowDraft[]>;
   saveDraft(draft: WorkflowDraft): Promise<void>;
@@ -43,4 +45,7 @@ export interface WorkbenchApi {
   archiveRun(runId: string, archived: boolean): Promise<void>;
   getRunVariables(runId: string): Promise<Record<string, unknown>>;
   getStepResult(runId: string, resultId: string): Promise<unknown>;
+  queryRuns(query:RunHistoryQuery):Promise<{runs:RunSnapshot[];total:number}>;
+  previewCleanup(runIds:string[],revisions:{workflowId:string;revision:number}[]):Promise<CleanupPreview>;
+  applyCleanup(token:string):Promise<void>;
 }

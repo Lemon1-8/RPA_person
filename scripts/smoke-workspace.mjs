@@ -87,7 +87,7 @@ try {
   await page.getByRole('button', { name: '新建定时任务', exact: true }).click();
   await page.getByLabel('任务名称', { exact: true }).fill('每日验收');
   await page.getByLabel('执行流程', { exact: true }).selectOption(flow.workflowId);
-  await page.getByLabel('每日时间', { exact: true }).fill('23:59');
+  await page.getByLabel('运行时间', { exact: true }).fill('23:59');
   await page.getByRole('button', { name: '保存定时任务', exact: true }).click();
   await page.getByRole('button', { name: '编辑定时任务 每日验收', exact: true }).waitFor();
   await page.getByRole('button', { name: '编辑定时任务 每日验收', exact: true }).click();

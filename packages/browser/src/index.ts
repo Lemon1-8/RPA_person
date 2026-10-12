@@ -379,12 +379,15 @@ export class BrowserSession {
     const timer = setTimeout(finish, 120000);
     signal?.addEventListener('abort', finish, { once: true }); page.on('close', finish); page.on('framenavigated', finish);
     const frames = page.frames();
+    let disposed=false;
     try {
       await this.queue; await this.setWindowState('normal', { pageId }); await page.bringToFront();
-      const candidates = await Promise.all(frames.map(async frame => {
+      const candidates = await Promise.race([cancelled,Promise.all(frames.map(async frame => {
         await frame.evaluate(elementPickerSource(key));
+        if(disposed) await frame.evaluate(disposeElementPicker,key).catch(()=>{});
         return frame;
-      }));
+      }))]);
+      if(!candidates) return null;
       const result = await Promise.race([cancelled, ...candidates.map(async frame => {
         const picked = await frame.evaluate(key => (window as unknown as Record<string, { result: Promise<{ selector: string; text: string; stable: boolean } | null> }>)[key].result, key);
         if (!picked) return null;
@@ -399,6 +402,7 @@ export class BrowserSession {
       })]);
       return result;
     } finally {
+      disposed=true;
       clearTimeout(timer); signal?.removeEventListener('abort', finish); page.off('close', finish); page.off('framenavigated', finish);
       await Promise.all(frames.map(frame => bounded(frame.evaluate(disposeElementPicker, key), 2000).catch(() => {})));
       this.picking = false;

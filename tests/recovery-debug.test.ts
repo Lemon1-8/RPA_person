@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm,writeFile } from 'node:fs/promises';
+import xlsx from 'xlsx';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WorkflowDefinition, StepDefinition } from '../packages/contracts/src/index.js';
@@ -9,6 +10,12 @@ afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, {
 const flow = (steps: StepDefinition[]): WorkflowDefinition => ({ schemaVersion: 1, workflowId: 'recovery-test', name: '恢复测试', revision: 1, variables: {}, elements: {}, steps, settings: { downloadDir: tmpdir(), headless: true, keepBrowserOpen: false } });
 async function dir() { const value = await mkdtemp(join(tmpdir(), 'rpa-recovery-')); directories.push(value); return value; }
 describe('调试与恢复', () => {
+  it('XLSX 原文件删除后仍用原输入快照检查并续跑',async()=>{
+    const dataDir=await dir(),path=join(dataDir,'input.xlsx');const book=xlsx.utils.book_new();xlsx.utils.book_append_sheet(book,xlsx.utils.aoa_to_sheet([['id'],[1],[2],[3],[4],[5]]),'data');await writeFile(path,xlsx.write(book,{type:'buffer',bookType:'xlsx'}));
+    const workflow=flow([{stepId:'loop',name:'表格循环',actionType:'control.forEachXlsx',params:{path,sheetName:'data',valueMode:'array',itemVariable:'row',progressKey:'{{row}}[0]'},children:[{stepId:'if',name:'中断第三项',actionType:'control.if',params:{left:'{{row}}[0]',operator:'equals',right:3},children:[{stepId:'fail',name:'失败',actionType:'core.assert',params:{actual:1,expected:2}}]},{stepId:'record',name:'记录',actionType:'variables.set',params:{name:'last',value:'{{row}}[0]'}}]}]);
+    const original=new WorkflowEngine(workflow,{dataDir,runId:'xlsx-original',attemptId:'original'});expect((await original.run()).variables.last).toBe(2);await rm(path);
+    const resumed=new WorkflowEngine(workflow,{dataDir,runId:'xlsx-resumed',attemptId:'resumed',resumeFromRunId:'xlsx-original',resumeFromAttemptId:'original'});const pending=resumed.run();await expect.poll(()=>resumed.getSnapshot().status,{timeout:10000}).toBe('waiting_manual');await resumed.control('confirm');const result=await pending;expect(result.status,result.error).toBe('succeeded');expect(result.variables.last).toBe(5);
+  });
   it('循环断点每次命中，单步执行一条后暂停，继续不丢失循环变量', async () => {
     const engine = new WorkflowEngine(flow([{ stepId: 'loop', name: '循环', actionType: 'control.forEach', params: { items: [1,2], itemVariable: 'item' }, children: [{ stepId: 'leaf', name: '记录', actionType: 'variables.set', params: { name: 'last', value: '{{item}}' } }] }, { stepId: 'after', name: '最后', actionType: 'variables.set', params: { name: 'after', value: true } }]), { dataDir: await dir(), runId: 'debug', debug: { breakpoints: ['leaf'] } });
     const pending = engine.run(); await expect.poll(() => engine.getSnapshot().status).toBe('paused');

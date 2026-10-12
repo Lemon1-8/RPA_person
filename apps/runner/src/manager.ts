@@ -1,21 +1,26 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { cp } from 'node:fs/promises';
+import { cp, stat, unlink } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeWorkflowForStorage } from '../../../packages/persistence/src/index.js';
 import { WorkbenchStore } from '../../../packages/persistence/src/workbench.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
+import { preflight } from '../../../packages/actions/src/preflight.js';
 import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type BrowserPoint, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 import { nextScheduleTime, latestScheduleTime } from './schedule.js';
 import type { EngineOptions } from '../../../packages/engine/src/index.js';
+import { mergeRunEvent } from '../../../packages/contracts/src/run-events.js';
+import { workflowDependencies } from './dependencies.js';
+import { runMetadataFiles } from './history.js';
+import type { CleanupPreview,RunHistoryQuery } from '../../../packages/contracts/src/index.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
 interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPages { resolve: (pages: BrowserPageInfo[]) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPoint { id: string; resolve: (point: BrowserPoint | null) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
-interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint; executionOptions?: Partial<EngineOptions> }
+interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint; executionOptions?: Partial<EngineOptions>;persistent?:boolean }
 async function killOwnedTree(child: ChildProcess) {
   if (!child.pid) return;
   if (process.platform === 'win32') await new Promise<void>(resolve => {
@@ -36,10 +41,46 @@ export class RunManager extends EventEmitter {
   private checkingSchedules = false;
   private emergencyStopping = false;
   private demoUrl?: string;
+  private saveTimers = new Map<string, NodeJS.Timeout>();
+  private persistState(job: Job) {
+    const id = job.run.runId;
+    if (!['running','queued'].includes(job.run.status)) {
+      clearTimeout(this.saveTimers.get(id)); this.saveTimers.delete(id);
+      void this.store.saveRun(job.run).catch(error => this.emit('storage-error',error));
+    } else if (!this.saveTimers.has(id)) this.saveTimers.set(id,setTimeout(() => {
+      this.saveTimers.delete(id); void this.store.saveRun(job.run).catch(error => this.emit('storage-error',error));
+    },500));
+  }
+  async getRunVariables(runId: string) { const job = this.jobs.get(scheduleIdentifier.parse(runId)); if (!job) throw new Error('运行不存在'); return job.persistent ? (await this.store.readRunSnapshot(runId)).variables : structuredClone(job.run.variables); }
+  queryRuns(query:RunHistoryQuery={}) {
+    const matches=[...this.jobs.values()].map(job=>job.run).filter(run=>(!query.workflowId || query.workflowId===run.workflowId) && (!query.status || query.status===run.status) && (!query.from || run.startedAt>=query.from) && (!query.to || run.startedAt<=query.to) && (query.archived===undefined || !!run.archived===query.archived)).sort((a,b)=>b.startedAt.localeCompare(a.startedAt));
+    const offset=Math.max(0,Math.floor(query.offset ?? 0)),limit=Math.max(1,Math.min(100,Math.floor(query.limit ?? 20)));
+    return {total:matches.length,runs:matches.slice(offset,offset+limit).map(run=>({...run,variables:{}}))};
+  }
+  archiveRun(runId:string,archived:boolean) { return this.serialize(async()=>{const job=this.jobs.get(scheduleIdentifier.parse(runId));if(!job || !terminal(job.run.status) || job.run.browserOpen) throw new Error('只能归档已结束且关闭会话的运行');if(typeof archived!=='boolean') throw new Error('归档状态无效');job.run.archived=archived;await this.store.saveRun(job.persistent?{...await this.store.readRunSnapshot(runId),archived}:job.run);}); }
+  private cleanups=new Map<string,{preview:CleanupPreview;at:number}>();
+  private async protectedRevisions() {
+    const keys=new Set<string>();const workflows=await this.listWorkflows();
+    const visited=new Set<string>();const visit=async(flow:WorkflowDefinition)=>{const key=`${flow.workflowId}@${flow.revision}`;keys.add(key);if(visited.has(key)) return;visited.add(key);const steps=[...flow.steps];while(steps.length){const step=steps.shift()!;steps.push(...step.children ?? [],...step.elseSteps ?? []);if(step.actionType==='workflow.call' && typeof step.params.workflowId==='string' && Number.isSafeInteger(step.params.revision)){const key=`${step.params.workflowId}@${step.params.revision}`;keys.add(key);const child=await this.store.getRevision(step.params.workflowId,Number(step.params.revision)).catch(()=>null);if(child) await visit(child);}}};
+    for(const flow of workflows) await visit(flow);
+    for(const plan of this.schedules.values()) if(plan.revision) {keys.add(`${plan.workflowId}@${plan.revision}`);const flow=await this.store.getRevision(plan.workflowId,plan.revision).catch(()=>null);if(flow) await visit(flow);}
+    return keys;
+  }
+  async previewCleanup(runIds:string[],revisions:{workflowId:string;revision:number}[]) {
+    if(this.store.issues().length) throw new Error('请先修复保存失败，再预览清理历史。');
+    if(!Array.isArray(runIds) || !Array.isArray(revisions) || runIds.length+revisions.length>1000) throw new Error('清理选择无效');
+    await this.store.flush();const protectedKeys=await this.protectedRevisions();const preview:CleanupPreview={token:randomUUID(),runIds:[],revisions:[],files:[],bytes:0,protected:[]};
+    const artifacts = [...this.jobs.values()].flatMap(job => job.run.artifacts.map(artifact => artifact.path));
+    for(const id of new Set(runIds.map(id=>scheduleIdentifier.parse(id)))) {const job=this.jobs.get(id);if(!job?.run.archived || !terminal(job.run.status) || job.run.browserOpen || [...this.jobs.values()].some(other=>!terminal(other.run.status) && other.run.resumedFromRunId===id)) {preview.protected.push(`运行 ${id} 未归档、仍占用会话或正在被续跑引用`);continue;}preview.runIds.push(id);preview.files.push(...await runMetadataFiles(this.options.dataDir,id,artifacts));}
+    for(const ref of revisions) {const id=scheduleIdentifier.parse(ref.workflowId);if(!Number.isSafeInteger(ref.revision) || ref.revision<1) throw new Error('清理修订无效');const key=`${id}@${ref.revision}`;if(protectedKeys.has(key)){preview.protected.push(`修订 ${key} 被保存流程或固定计划引用`);continue;}const path=join(this.options.dataDir,'revisions',id,`${ref.revision}.json`);try{await stat(path);preview.files.push(path);preview.revisions.push({workflowId:id,revision:ref.revision});}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT') throw error;}}
+    preview.files=[...new Set(preview.files)];for(const path of preview.files) preview.bytes+=(await stat(path)).size;
+    if(this.cleanups.size>=10) this.cleanups.delete(this.cleanups.keys().next().value!);this.cleanups.set(preview.token,{preview,at:Date.now()});return structuredClone(preview);
+  }
+  applyCleanup(token:string) {return this.serialize(async()=>{const selected=this.cleanups.get(scheduleIdentifier.parse(token));if(!selected || Date.now()-selected.at>900000) throw new Error('清理预览已失效，请重新预览');const current=await this.previewCleanup(selected.preview.runIds,selected.preview.revisions);this.cleanups.delete(current.token);if(current.protected.length || current.files.some(path=>!selected.preview.files.includes(path))) throw new Error('清理引用或文件已变化，请重新预览');for(const path of current.files) await unlink(path).catch(error=>{if(error.code!=='ENOENT') throw error;});for(const id of current.runIds) this.jobs.delete(id);this.cleanups.delete(token);});}
   setDemoUrl(value: string) { this.demoUrl = new URL(value).href; }
   async stopAll() {
     this.emergencyStopping = true; this.pending = [];
-    try { await Promise.all([...this.jobs.values()].filter(job => !terminal(job.run.status) || job.run.browserOpen).map(job => this.controlRun(job.run.runId, terminal(job.run.status) ? 'closeBrowser' : 'stop'))); }
+    try { const results=await Promise.allSettled([...this.jobs.values()].filter(job => !terminal(job.run.status) || job.run.browserOpen).map(job => this.controlRun(job.run.runId, terminal(job.run.status) ? 'closeBrowser' : 'stop')));const errors=results.filter(result=>result.status==='rejected');if(errors.length)throw new AggregateError(errors.map(result=>(result as PromiseRejectedResult).reason),'部分任务紧急停止失败'); }
     finally { this.emergencyStopping = false; }
   }
   private tools = new Map<string, { runId: string; resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
@@ -62,14 +103,14 @@ export class RunManager extends EventEmitter {
   }
   async initialize() {
     await this.store.initialize();
-    for (const run of await this.store.listRuns()) {
+    for (const run of await this.store.listRunHeaders()) {
       const browserWasOpen = run.browserOpen;
       run.browserOpen = false;
       if (!terminal(run.status)) {
         run.status = 'interrupted'; run.endedAt = new Date().toISOString(); run.error = '运行器曾退出，原浏览器现场不可恢复。';
-        await this.store.saveRun(run);
-      } else if (browserWasOpen) await this.store.saveRun(run);
-      this.jobs.set(run.runId, { run, workflow: undefined as unknown as WorkflowDefinition });
+        const persisted=await this.store.readRunSnapshot(run.runId);await this.store.saveRun({...persisted,...run,variables:persisted.variables});
+      } else if (browserWasOpen) await this.store.saveRun({...await this.store.readRunSnapshot(run.runId),browserOpen:false});
+      this.jobs.set(run.runId, { run, workflow: undefined as unknown as WorkflowDefinition,persistent:true });
     }
     const workflows = await this.listWorkflows();
     const now = this.now();
@@ -112,8 +153,18 @@ export class RunManager extends EventEmitter {
     });
     this.startQueue = operation.catch(() => {}); return operation;
   }
-  listRuns() { return [...this.jobs.values()].map(j => structuredClone(j.run)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  listRuns() { return [...this.jobs.values()].map(job=>{if(!job.persistent)return structuredClone(job.run);const saved=this.store.readRunSnapshotSync(job.run.runId);return {...saved,...job.run,variables:saved.variables};}).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  bootstrapRuns() {return [...this.jobs.values()].sort((a,b)=>b.run.startedAt.localeCompare(a.run.startedAt)).filter((job,index)=>index<50 || !terminal(job.run.status) || job.run.browserOpen).map(job=>job.persistent?this.store.readRunSnapshotSync(job.run.runId):structuredClone(job.run));}
   concurrencyLimit() { return this.options.maxConcurrent ?? 2; }
+  async preflightWorkflow(flow:WorkflowDefinition) {
+    const issues=await preflight(flow);
+    let dependencies:Record<string,WorkflowDefinition>;try{dependencies=await workflowDependencies(this.store,workflowSchema.parse(flow));}catch(error){issues.push({level:'error',message:String(error)});return issues;}
+    for(const input of flow.inputs ?? []) if(!Object.hasOwn(flow.variables,input)) issues.push({level:'error',message:`单独运行需要流程输入变量：${input}，请在默认变量中填写。`});
+    const visit=async(workflow:WorkflowDefinition,owner?:string)=>{const steps=[...workflow.steps];while(steps.length){const step=steps.shift()!;if(step.disabled)continue;steps.push(...step.children ?? [],...step.elseSteps ?? []);if(step.actionType!=='workflow.call')continue;const child=dependencies[`${step.params.workflowId}@${step.params.revision}`];if(!child)continue;const stepId=owner ?? step.stepId;const input=step.params.inputs;
+      if(input && typeof input==='object' && !Array.isArray(input)){for(const name of Object.keys(input)) if(!child.inputs?.includes(name)) issues.push({level:'error',stepId,message:`子流程 ${child.name} 未声明输入：${name}`});for(const name of child.inputs ?? []) if(!Object.hasOwn(input,name)) issues.push({level:'error',stepId,message:`子流程 ${child.name} 缺少输入：${name}`});}
+      const fields=Object.fromEntries((child.inputs ?? []).map(name=>[name,null]));for(const issue of await preflight({...child,variables:{...child.variables,...fields}})) issues.push({...issue,stepId,message:`子流程 ${child.name} v${child.revision}：${issue.message}`});await visit(child,stepId);
+    }};await visit(flow);return issues;
+  }
   async getRunWorkflow(runId: string): Promise<WorkflowDefinition | null> {
     const id = scheduleIdentifier.parse(runId);
     const workflow = this.jobs.get(id)?.workflow;
@@ -306,9 +357,10 @@ export class RunManager extends EventEmitter {
       job.run = queued; job.workflow = workflow;
       try {
         await this.store.createRun(workflow, queued);
+        const dependencies=await workflowDependencies(this.store,workflow); await this.store.saveDependencies(queued,dependencies);
         if (!job.child?.connected || !job.run.browserOpen) throw new Error('所选浏览器已关闭，请重新选择');
-        this.publish({ type: 'run', runId: browserRunId, at: new Date().toISOString(), status: 'queued', run: structuredClone(queued), data: { stepId, workflow } });
-        await this.sendRequest(job, { type: 'run-step', workflow, stepId, attemptId: queued.attemptId, debug });
+        this.publish({ type: 'run', runId: browserRunId, at: new Date().toISOString(), status: 'queued', run: structuredClone(queued), data: { stepId } });
+        await this.sendRequest(job, { type: 'run-step', workflow, stepId, attemptId: queued.attemptId, debug,workflowDependencies:dependencies });
       } catch (error) {
         job.workflow = previousWorkflow;
         job.run = { ...previousRun, browserOpen: Boolean(job.child?.connected && job.run.browserOpen) };
@@ -336,11 +388,13 @@ export class RunManager extends EventEmitter {
     const workflow = await this.getRunWorkflow(id); if (!workflow) throw new Error('原流程快照不存在，不能续跑');
     const hasProgress = (steps: typeof workflow.steps): boolean => steps.some(step => ['control.forEach','control.forEachXlsx'].includes(step.actionType) && Boolean(step.params.progressKey) || hasProgress(step.children ?? []) || hasProgress(step.elseSteps ?? []));
     if (!hasProgress(workflow.steps) || !job.run.attemptId) throw new Error('该运行没有配置业务键和进度记录，不能自动跳到中间步骤');
-    return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { resumeFromRunId: id, resumeFromAttemptId: job.run.attemptId }));
+    const dependencies = await this.store.readDependencies(job.run);
+    return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { resumeFromRunId: id, resumeFromAttemptId: job.run.attemptId,workflowDependencies:dependencies }));
   }
   private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string; runId?: string }, stepId?: string, executionOptions?: Partial<EngineOptions>): Promise<RunSnapshot> {
     if (this.emergencyStopping) throw new Error('紧急停止正在处理，请稍后再启动任务');
     if (this.shuttingDown) throw new Error('运行器正在退出');
+    executionOptions = { ...executionOptions,workflowDependencies:executionOptions?.workflowDependencies ?? await workflowDependencies(this.store,workflow) };
     if (!stepId) {
       const saved = await this.store.getRevision(workflow.workflowId, workflow.revision).catch(() => undefined);
       if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
@@ -359,13 +413,14 @@ export class RunManager extends EventEmitter {
       debug: executionOptions?.debug, resumedFromRunId: executionOptions?.resumeFromRunId,
     };
     await this.store.createRun(workflow, run);
+    await this.store.saveDependencies(run,executionOptions.workflowDependencies!);
     if (executionOptions?.resumeFromRunId && executionOptions.resumeFromAttemptId) {
       const source = join(this.options.dataDir, 'runs', scheduleIdentifier.parse(executionOptions.resumeFromRunId), 'attempts', scheduleIdentifier.parse(executionOptions.resumeFromAttemptId), 'progress');
       const target = join(this.options.dataDir, 'runs', run.runId, 'attempts', run.attemptId!, 'progress');
       await cp(source, target, { recursive: true }).catch(error => { if (error.code !== 'ENOENT') throw error; });
     }
     this.jobs.set(run.runId, { workflow: structuredClone(workflow), run, executionOptions: { demoUrl: this.demoUrl, ...executionOptions } }); this.pending.push(run.runId);
-    this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run), ...(stepId ? { data: { stepId, workflow } } : {}) });
+    this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run), ...(stepId ? { data: { stepId } } : {}) });
     this.drain(); return structuredClone(run);
   }
   private async closeRetainedBrowsersFor(workflow: WorkflowDefinition): Promise<void> {
@@ -380,6 +435,7 @@ export class RunManager extends EventEmitter {
   private publish(event: RunEvent) {
     event.eventId ??= randomUUID();
     event.attemptId ??= this.jobs.get(event.runId)?.run.attemptId;
+    this.store.prepareEvent(event);
     this.store.recordEvent(event).catch(error => this.emit('storage-error', error));
     this.emit('event', structuredClone(event));
   }
@@ -414,8 +470,8 @@ export class RunManager extends EventEmitter {
       }
       if (message.type === 'event' && message.event) {
         if (message.event.run) {
-          job.run = message.event.run;
-          this.store.saveRun(job.run).catch(error => this.emit('storage-error', error));
+          job.run = mergeRunEvent(job.run,message.event)!;
+          this.persistState(job);
         }
         this.publish(message.event);
       }
@@ -500,7 +556,7 @@ export class RunManager extends EventEmitter {
       this.on('event', listener);
     });
     if (!job.run.browserOpen) await job.finished;
-    await this.store.flush(); return structuredClone(job.run);
+    await this.store.flush().catch(error=>this.emit('storage-error',error)); return job.persistent?{...await this.store.readRunSnapshot(runId),...job.run,variables:await this.getRunVariables(runId)}:structuredClone(job.run);
   }
   async waitForBrowserClosed(runId: string): Promise<void> {
     const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
@@ -518,5 +574,6 @@ export class RunManager extends EventEmitter {
       } catch (error) { if (job.child) await killOwnedTree(job.child); }
     }));
     await Promise.all([...this.jobs.values()].map(j => j.finished)); await this.store.flush();
+    for (const [id,timer] of this.saveTimers) { clearTimeout(timer); const job = this.jobs.get(id); if (job) await this.store.saveRun(job.run); } this.saveTimers.clear(); await this.store.flush();
   }
 }

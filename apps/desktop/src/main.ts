@@ -48,7 +48,7 @@ else {
     ipcMain.handle('rpa:bootstrap', async event => {
       trusted(event);
       const workflows = await manager.listWorkflows();
-      return { workflows, actions: actionDefinitions, runs: manager.listRuns(), schedules: manager.listSchedules(), demoUrl: fixture!.url, dataDir, defaultDownloadDir, maxConcurrent: manager.concurrencyLimit() };
+      return { workflows, actions: actionDefinitions, runs: manager.bootstrapRuns(), schedules: manager.listSchedules(), demoUrl: fixture!.url, dataDir, defaultDownloadDir, maxConcurrent: manager.concurrencyLimit() };
     });
     ipcMain.handle('rpa:save', (event, workflow: WorkflowDefinition) => { trusted(event); return manager.saveWorkflow(workflow); });
     ipcMain.handle('rpa:run-workflow', (event, runId: string) => { trusted(event); return manager.getRunWorkflow(runId); });

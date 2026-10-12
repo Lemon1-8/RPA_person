@@ -1,0 +1,9 @@
+import { useEffect,useLayoutEffect,useRef,useState,type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+export function LogHistoryMenu({children}:{children:ReactNode}) {
+  const anchor=useRef<HTMLButtonElement>(null),panel=useRef<HTMLDivElement>(null);const [open,setOpen]=useState(false);const [position,setPosition]=useState<{left:number;top:number}>();
+  const place=()=>{const button=anchor.current,popup=panel.current;if(!button || !popup)return;const bounds=button.getBoundingClientRect(),height=popup.getBoundingClientRect().height,width=popup.getBoundingClientRect().width;setPosition({left:Math.max(8,Math.min(innerWidth-width-8,bounds.right-width)),top:Math.max(8,bounds.bottom+height+8<=innerHeight?bounds.bottom+4:bounds.top-height-4)});};
+  useLayoutEffect(()=>{if(open)place();else setPosition(undefined);},[open,children]);
+  useEffect(()=>{if(!open)return;const outside=(event:PointerEvent)=>{if(!panel.current?.contains(event.target as Node) && !anchor.current?.contains(event.target as Node))setOpen(false);};const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){setOpen(false);anchor.current?.focus();}};document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape);window.addEventListener('resize',place);return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);window.removeEventListener('resize',place);};},[open]);
+  return <div className="log-history-menu"><button ref={anchor} type="button" aria-expanded={open} aria-controls="log-history-popover" onClick={()=>setOpen(!open)}>历史</button>{open && createPortal(<div ref={panel} id="log-history-popover" role="region" aria-label="历史日志工具" className="log-history-popover" style={{...position,visibility:position?'visible':'hidden'}}>{children}</div>,document.body)}</div>;
+}

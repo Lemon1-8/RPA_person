@@ -4,7 +4,10 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { runDesktopInput } from '../packages/engine/src/desktop-input.js';
+import { runDesktopInput as sendDesktopInput } from '../packages/engine/src/desktop-input.js';
+
+// The operator has reserved this desktop; keep native input monitoring enabled.
+const runDesktopInput = (action: string, params: Record<string, unknown>) => sendDesktopInput(action, params, 30_000, undefined, { idleMs: 0, waitMs: 10_000 });
 
 if (process.platform !== 'win32') throw new Error('此冒烟测试需要 Windows 桌面会话');
 if (process.env.RPA_SKIP_DESKTOP_INTERACTION === '1') { console.warn('环境跳过：真实桌面取点快捷键（RPA_SKIP_DESKTOP_INTERACTION=1）'); process.exit(0); }
@@ -36,6 +39,8 @@ try {
   await inspector.getByText('将鼠标移到目标位置，按 F8 取点；30 秒后自动取消。').waitFor();
   const target = { x: 120, y: 140 };
   await runDesktopInput('desktop.mouseMove', { ...target, humanLike: false });
+  const actualPoint = await app.evaluate(({ screen }) => screen.dipToScreenPoint(screen.getCursorScreenPoint()));
+  assert.deepEqual(actualPoint, target, '原生鼠标移动必须落在请求的屏幕像素');
   await runDesktopInput('desktop.keyPress', { key: 'F8' });
   await inspector.getByText(`已填入 X: ${target.x}，Y: ${target.y}`, { exact: true }).waitFor();
   assert.equal(await inspector.getByLabel(/^横坐标 X/).inputValue(), String(target.x));
@@ -64,6 +69,12 @@ try {
   assert.equal(await inspector.getByLabel(/^先输入的错字/).inputValue(), '错');
   await page.screenshot({ path: join(qa, 'desktop-point-success.png'), fullPage: true });
   console.log('桌面取点及 X/Y 展示冒烟测试通过');
+} catch (error) {
+  if (page && !page.isClosed()) {
+    console.error('桌面取点验收失败时的参数面板：', await page.getByRole('complementary', { name: '参数与设置', exact: true }).innerText());
+    await page.screenshot({ path: join(qa, 'desktop-point-failure.png'), fullPage: true }).catch(() => {});
+  }
+  throw error;
 } finally {
   await app?.close();
   if (dirname(resolve(data)) !== resolve(tmpdir()) || !basename(data).startsWith('rpa-desktop-point-')) throw new Error('拒绝清理测试目录之外的路径');

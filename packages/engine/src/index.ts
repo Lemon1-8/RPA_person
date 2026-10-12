@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
 import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
-import { progressPath, readProgress, saveProgress, type BusinessProgress } from './progress.js';
+import { progressPath, readProgress, saveProgress,forgetProgress, type BusinessProgress } from './progress.js';
 import { runDesktopInput } from './desktop-input.js';
 import { WindowsSession } from '../../windows/src/index.js';
 import type { DesktopElementRef } from '../../contracts/src/index.js';
@@ -17,7 +17,7 @@ import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type
 const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string; demoUrl?: string }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string; demoUrl?: string; workflowDependencies?:Record<string,WorkflowDefinition> }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
 class ContainerTimeoutError extends Error {
   constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
@@ -100,8 +100,10 @@ export class WorkflowEngine {
   private elementPick?: { id: string; abort: AbortController };
   private manualStep?: StepDefinition;
   private manualDecision?: 'retry' | 'skip' | 'confirm';
+  private checkingRecovery = false;
   private stepBudget = Infinity;
   private progressScope: string[] = [];
+  private calls: { workflowId:string;stepId:string }[] = [];
   private inputPolicy() {
     return { idleMs: this.workflow.settings.foregroundIdleMs ?? 3000, waitMs: this.workflow.settings.foregroundWaitMs ?? 900000,
       onWaiting: (waiting: boolean, elapsed: number) => {
@@ -112,11 +114,11 @@ export class WorkflowEngine {
   }
   private debug?: EngineOptions['debug'];
   private warn(step: StepDefinition, message: string) {
-    this.snapshot.warnings ??= []; this.snapshot.warnings.push({ stepId: step.stepId, stepName: step.name, message, at: new Date().toISOString() }); this.snapshot.warningCount = this.snapshot.warnings.length;
+    this.snapshot.warnings ??= []; this.snapshot.warnings.push({ stepId: this.calls[0]?.stepId ?? step.stepId, stepName: step.name, message, at: new Date().toISOString() }); this.snapshot.warningCount = this.snapshot.warnings.length;
   }
   private async waitManual(step: StepDefinition, message: string): Promise<'retry' | 'skip' | 'confirm'> {
     this.manualStep = step; this.manualDecision = undefined; this.snapshot.currentStepId = step.stepId; this.snapshot.error = message;
-    this.snapshot.manualDecisionRequired = !getAction(step.actionType).metadata.safeToRetry;
+    this.snapshot.manualDecisionRequired = !getAction(step.actionType).metadata.safeToRetry || message.includes('INPUT_INTERRUPTED');
     try { await this.waitForResume(true); return this.manualDecision ?? 'retry'; }
     finally { this.manualStep = undefined; this.manualDecision = undefined; delete this.snapshot.manualDecisionRequired; }
   }
@@ -148,6 +150,7 @@ export class WorkflowEngine {
     };
   }
   getSnapshot(): RunSnapshot { return structuredClone(this.snapshot); }
+  setDependencies(dependencies:Record<string,WorkflowDefinition>) { if(!this.executionFinished) throw new Error('执行中不能替换子流程快照'); this.options.workflowDependencies=dependencies; }
   async listBrowserPages(): Promise<BrowserPageInfo[]> {
     const browser = this.browser;
     if (!browser?.isOpen()) return [];
@@ -171,7 +174,7 @@ export class WorkflowEngine {
     await pick.done.catch(() => undefined);
   }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
-    this.options.onEvent?.({ ...event, eventId: randomUUID(), attemptId: this.snapshot.attemptId, ...(event.stepId ? { stepName: this.stepNames.get(event.stepId) } : {}), runId: this.snapshot.runId, at: new Date().toISOString() });
+    this.options.onEvent?.({ ...event, eventId: randomUUID(), attemptId: this.snapshot.attemptId, ...(event.stepId ? { stepName: this.stepNames.get(event.stepId) } : {}), ...(this.calls.length ? {callStepId:this.calls[0].stepId,sourceWorkflowId:this.calls.at(-1)!.workflowId} : {}), runId: this.snapshot.runId, at: new Date().toISOString() });
   }
   private rebuildStepNumbers() {
     const numbers = new Map<string, number>();
@@ -198,8 +201,16 @@ export class WorkflowEngine {
     this.snapshot.status = status;
     if (error !== undefined) this.snapshot.error = error;
     if (['succeeded', 'failed', 'stopped'].includes(status)) this.snapshot.endedAt = new Date().toISOString();
-    this.emit({ type: 'run', run: this.getSnapshot(), status });
+    const complete = ['queued','succeeded','failed','stopped','interrupted'].includes(status);
+    const changes: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(this.snapshot.variables)) if (!Object.is(this.publishedVariables.get(key), value) || !this.publishedVariables.has(key)) changes[key] = value;
+    const deletedVariables = [...this.publishedVariables.keys()].filter(key => !Object.hasOwn(this.snapshot.variables,key));
+    this.publishedVariables = new Map(Object.entries(this.snapshot.variables));
+    const warningChanges=this.snapshot.warnings?.slice(this.publishedWarnings) ?? [];this.publishedWarnings=this.snapshot.warningCount ?? 0;
+    this.emit({ type: 'run', run: structuredClone({ ...this.snapshot, variables: complete ? this.snapshot.variables : {},warnings:complete?this.snapshot.warnings:[] }), status, variablesComplete: complete, ...(!complete ? { variableChanges:structuredClone(changes), deletedVariables,...(warningChanges.length?{warningChanges:structuredClone(warningChanges)}:{}) } : {}) });
   }
+  private publishedVariables = new Map<string, unknown>();
+  private publishedWarnings=0;
   async control(command: RunCommand): Promise<void> {
     if (this.elementPick) { if (['stop', 'closeBrowser'].includes(command)) this.elementPick.abort.abort(); else throw new Error('请先结束元素拾取'); }
     if (this.pointPick) {
@@ -208,12 +219,15 @@ export class WorkflowEngine {
     }
     if (command === 'check') {
       const step = this.manualStep; if (!step) throw new Error('当前没有待处理的失败指令');
+      if(this.checkingRecovery) throw new Error('恢复检查正在执行');
+      this.checkingRecovery=true; const priorAbort=this.stepAbort; this.stepAbort=new AbortController();
       const failedId = this.snapshot.currentStepId;
       try { for (const check of step.recoveryChecks ?? []) { const result = await this.withinStepScope(check, () => this.execute(check, validateActionParams(check.actionType, resolveValue(check.params, this.snapshot.variables) as Record<string, unknown>))); if (check.output) this.setVariable(check.output, result ?? null); this.emit({ type: 'log', stepId: step.stepId, message: `恢复检查：${check.name}`, data: result }); } }
-      finally { this.snapshot.currentStepId = failedId; this.state('waiting_manual'); }
+      finally { this.stepAbort=priorAbort;this.checkingRecovery=false;this.snapshot.currentStepId = failedId;if(!this.stopped) this.state('waiting_manual'); }
       return;
     }
     if (['retry', 'skip', 'confirm'].includes(command)) {
+      if(this.checkingRecovery) throw new Error('请等待恢复检查结束');
       if (!this.manualStep) throw new Error('当前没有等待人工的指令');
       this.manualDecision = command as 'retry' | 'skip' | 'confirm'; this.pauseRequested = false; this.resumeWaiter?.(); return;
     }
@@ -233,7 +247,7 @@ export class WorkflowEngine {
       this.pauseRequested = true;
       this.emit({ type: 'log', message: '已请求暂停，将在当前步骤完成后保留现场。' });
     } else if (command === 'resume') {
-      if (this.manualStep && !getAction(this.manualStep.actionType).metadata.safeToRetry) throw new Error('请明确选择重新执行、确认完成或跳过，不能直接重试有外部效果的指令');
+      if (this.snapshot.manualDecisionRequired) throw new Error('请明确选择重新执行、确认完成或跳过，不能直接重试有外部效果的指令');
       this.stepBudget = Infinity;
       this.pauseRequested = false; this.resumeWaiter?.();
     } else {
@@ -453,6 +467,7 @@ export class WorkflowEngine {
   private async execute(step: StepDefinition, params: Record<string, unknown>): Promise<unknown> {
     const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
+    if(step.actionType==='workflow.call') return this.callWorkflow(step,params);
     if (step.actionType === 'core.runContext') return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType === 'browser.open' && (params.url === 'rpa://demo' || this.options.demoUrl && this.workflow.workflowId === 'order-export-demo' && step.stepId === 'open' && /^http:\/\/127\.0\.0\.1:\d+\/?$/.test(String(params.url)))) {
       if (!this.options.demoUrl) throw new Error('内置示例网页尚未启动，请从桌面工作台运行');
@@ -552,24 +567,23 @@ export class WorkflowEngine {
     }
     if (step.actionType === 'control.forEach' || step.actionType === 'control.forEachXlsx') {
       const name = String(params.itemVariable); validateName(name);
+      let progress: BusinessProgress | undefined; let progressFile: string | undefined;
+      const progressKey = typeof params.progressKey === 'string' ? params.progressKey.trim() : '';
+      if(progressKey){const scope=[...this.progressScope,step.stepId];progressFile=progressPath(this.options.dataDir,this.snapshot.runId,this.snapshot.attemptId!,scope);if(this.options.resumeFromRunId && this.options.resumeFromAttemptId)progress=await readProgress(progressPath(this.options.dataDir,this.options.resumeFromRunId,this.options.resumeFromAttemptId,scope));}
       let items: unknown[];
-      if (step.actionType === 'control.forEachXlsx') {
+      if(progress)items=progress.items;
+      else if (step.actionType === 'control.forEachXlsx') {
         items = params.valueMode === 'column'
           ? readXlsxColumnValues(String(params.path), String(params.sheetName ?? ''), Number(params.columnIndex)).values
           : params.valueMode === 'array'
             ? readXlsxArrayRows(String(params.path), String(params.sheetName ?? '')).rows
             : readXlsxRows(String(params.path), String(params.sheetName ?? '')).rows;
       } else items = params.items as unknown[];
-      let progress: BusinessProgress | undefined; let progressFile: string | undefined;
-      const progressKey = typeof params.progressKey === 'string' ? params.progressKey.trim() : '';
       if (progressKey) {
-        const scope = [...this.progressScope, step.stepId]; progressFile = progressPath(this.options.dataDir, this.snapshot.runId, this.snapshot.attemptId!, scope);
-        if (this.options.resumeFromRunId && this.options.resumeFromAttemptId) progress = await readProgress(progressPath(this.options.dataDir, this.options.resumeFromRunId, this.options.resumeFromAttemptId, scope));
-        if (progress) items = progress.items;
         const keys = items.map(item => { const value = resolveValue(progressKey, { ...this.snapshot.variables, [name]: item }); if (!['string','number'].includes(typeof value) || String(value).trim() === '') throw new Error('续跑业务键必须是非空文本或数字'); return String(value); });
         if (new Set(keys).size !== keys.length) throw new Error('续跑业务键重复，不能可靠识别已处理项目');
         if (progress && JSON.stringify(keys) !== JSON.stringify(progress.keys)) throw new Error('业务键模板与原输入不一致，禁止续跑');
-        progress ??= { items, keys, completed: [], pending: [] }; await saveProgress(progressFile, progress);
+        progress ??= { items, keys, completed: [], pending: [] }; await saveProgress(progressFile!, progress);
       }
       if (items.length > 10_000) throw new Error('循环最多支持 10000 行，请缩小工作表范围');
       const had = Object.hasOwn(this.snapshot.variables, name); const previous = this.snapshot.variables[name];
@@ -600,10 +614,26 @@ export class WorkflowEngine {
     }
     throw new Error(`未实现动作：${step.actionType}`);
   }
+  private async callWorkflow(step:StepDefinition,params:Record<string,unknown>) {
+    const id=String(params.workflowId); const key=`${id}@${params.revision}`; const child=this.options.workflowDependencies?.[key];
+    if(!child) throw new Error(`子流程固定修订不存在：${key}`);
+    if(id===this.workflow.workflowId || this.calls.some(call=>call.workflowId===id) || this.calls.length>=20) throw new Error('子流程存在循环调用或超过深度上限');
+    const input=params.inputs as Record<string,unknown>;
+    for(const name of Object.keys(input)) if(!child.inputs?.includes(name)) throw new Error(`子流程未声明输入：${name}`);
+    for(const name of child.inputs ?? []) { validateName(name); if(!Object.hasOwn(input,name)) throw new Error(`缺少子流程输入：${name}`); }
+    const parent={variables:this.snapshot.variables,elements:this.scopedElements,desktopElements:this.scopedDesktopElements,settings:this.scopedSettings,numbers:this.stepNumbers,names:this.stepNames,stepId:this.snapshot.currentStepId};
+    this.snapshot.variables={...structuredClone(child.variables),...structuredClone(input)};
+    this.scopedElements=child.elements; this.scopedDesktopElements=child.desktopElements ?? {}; this.scopedSettings={downloadDir:child.settings.downloadDir,pythonExecutable:child.settings.pythonExecutable ?? parent.settings.pythonExecutable};
+    this.stepNumbers=new Map(); this.stepNames=new Map();
+    const visit=(steps:StepDefinition[])=>{for(const entry of steps) { this.stepNumbers.set(entry.stepId,this.stepNumbers.size+1);this.stepNames.set(entry.stepId,entry.name);visit(entry.children ?? []);visit(entry.elseSteps ?? []);}};visit(child.steps);
+    this.calls.push({workflowId:id,stepId:step.stepId}); this.progressScope.push(`call:${step.stepId}:${key}`);
+    try { return await this.withinDeadline(step,async()=>{ await this.executeSteps(child.steps);return Object.fromEntries((child.outputs ?? []).map(name=>[name,jsonClone(readVariable(this.snapshot.variables,name))])); }); }
+    finally { this.calls.pop();this.progressScope.pop();this.snapshot.variables=parent.variables;this.scopedElements=parent.elements;this.scopedDesktopElements=parent.desktopElements;this.scopedSettings=parent.settings;this.stepNumbers=parent.numbers;this.stepNames=parent.names;this.snapshot.currentStepId=parent.stepId; }
+  }
   private async executeSteps(steps: StepDefinition[]) {
     for (const step of steps) {
       await yieldLoop();
-      if (!step.disabled && this.debug?.breakpoints.includes(step.stepId)) this.pauseRequested = true;
+      if (!step.disabled && !this.calls.length && this.debug?.breakpoints.includes(step.stepId)) this.pauseRequested = true;
       this.checkStop(); await this.waitForResume();
       this.remainingTimeout(30_000);
       if (step.disabled) {
@@ -644,6 +674,7 @@ export class WorkflowEngine {
             error = caught; this.checkStop();
             try { this.checkDeadline(caught); }
             catch (expired) { error = expired; break; }
+            if (String(caught).includes('INPUT_INTERRUPTED')) break;
             if (attempt < attempts) {
               this.emit({ type: 'log', stepId: step.stepId, message: `步骤失败，准备第 ${attempt + 1} 次尝试：${String(caught)}` });
               const delay = step.retry?.delayMs ?? 500;
@@ -666,7 +697,7 @@ export class WorkflowEngine {
               if (path) this.emit({ type: 'log', stepId: step.stepId, message: '已保存失败截图', data: { path } });
             } catch { /* Capture failure must not replace the action error. */ }
           }
-          if (step.onError === 'continue') {
+          if (step.onError === 'continue' && !message.includes('INPUT_INTERRUPTED')) {
             this.warn(step, message);
             this.emit({ type: 'log', stepId: step.stepId, message: '已忽略失败，继续执行后续指令。', data: this.stepData(step) });
             delete this.snapshot.error;
@@ -726,7 +757,7 @@ export class WorkflowEngine {
     this.snapshot.stepId = stepId;
     delete this.options.resumeFromRunId; delete this.options.resumeFromAttemptId; delete this.snapshot.resumedFromRunId;
     this.debug = debug; this.snapshot.debug = debug;
-    if (attemptId) this.snapshot.attemptId = attemptId;
+    if (attemptId || reusing) this.snapshot.attemptId = attemptId ?? randomUUID();
     this.consumed = true;
     const executeAt = (index: number): Promise<void> => index === path.length - 1
       ? this.executeSteps([path[index]])
@@ -741,7 +772,7 @@ export class WorkflowEngine {
     this.executionFinished = false;
     this.stopped = false;
     this.pauseRequested = false;
-    this.snapshot.startedAt = new Date().toISOString(); this.snapshot.warnings = []; this.snapshot.warningCount = 0;
+    this.snapshot.startedAt = new Date().toISOString(); this.snapshot.warnings = []; this.snapshot.warningCount = 0;this.publishedWarnings=0;
     delete this.snapshot.endedAt;
     delete this.snapshot.error;
     delete this.snapshot.currentStepId;
@@ -755,6 +786,7 @@ export class WorkflowEngine {
     this.snapshot.browserOpen = this.browser?.isOpen() ?? false;
     this.executionFinished = true;
     this.state(finalStatus, finalError);
+    forgetProgress(join(this.options.dataDir,'runs',this.snapshot.runId,'attempts',this.snapshot.attemptId!,'progress'));
     return this.getSnapshot();
   }
 }

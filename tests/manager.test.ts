@@ -213,8 +213,10 @@ it('运行中暂停会停在步骤边界，继续后只执行剩余步骤', asyn
   const run = await manager.runWorkflow(saved); await started;
   await manager.controlRun(run.runId, 'pause');
   const pausedEvent = await paused;
-  expect(pausedEvent.run?.variables.firstCompleted).toBe(true);
-  expect(pausedEvent.run?.variables).not.toHaveProperty('lastCompleted');
+  expect(pausedEvent.variablesComplete).toBe(false);
+  const pausedVariables=await manager.getRunVariables(run.runId);
+  expect(pausedVariables.firstCompleted).toBe(true);
+  expect(pausedVariables).not.toHaveProperty('lastCompleted');
   await expect(manager.runWorkflow(saved)).rejects.toThrow('同一流程');
 
   await manager.controlRun(run.runId, 'resume');

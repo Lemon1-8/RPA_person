@@ -5,11 +5,12 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { desktopInteractionAvailable, startWindowsFixture } from '../tests/fixtures/windows.js';
-import { runDesktopInput } from '../packages/engine/src/desktop-input.js';
+import { runDesktopInput as sendDesktopInput } from '../packages/engine/src/desktop-input.js';
 import { WindowsSession } from '../packages/windows/src/index.js';
 import type { DesktopApi, WorkflowDefinition } from '../packages/contracts/src/index.js';
 
 declare global { interface Window { rpa: DesktopApi } }
+const runDesktopInput = (action: string, params: Record<string, unknown>) => sendDesktopInput(action, params, 30_000, undefined, { idleMs: 0, waitMs: 10_000 });
 const data = await mkdtemp(join(tmpdir(), 'rpa-windows-smoke-'));
 const qa = resolve('.rpa/qa'); await mkdir(qa, { recursive: true });
 const require = createRequire(import.meta.url);
@@ -23,7 +24,8 @@ async function waitForStep(page: Page, stepId: string, excluded: string[] = []) 
     if (run) return run;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  throw new Error(`等待桌面步骤 ${stepId} 完成超时`);
+  const state = await page.evaluate(() => window.rpa.bootstrap());
+  throw new Error(`等待桌面步骤 ${stepId} 完成超时；运行：${JSON.stringify(state.runs.map(run => ({ runId: run.runId, stepId: run.stepId, status: run.status, error: run.error })))}；界面提示：${await page.locator('[role="alert"]').allTextContents()}`);
 }
 try {
   const interactive = await desktopInteractionAvailable();
@@ -45,6 +47,7 @@ try {
   await page.evaluate(flow => window.rpa.saveWorkflow(flow), flow); await page.reload();
   await page.getByRole('heading', { name: flow.name, exact: true }).waitFor();
   await page.getByRole('button', { name: '步骤 1：填写软件', exact: true }).click();
+  await page.getByRole('complementary', { name: '参数与设置', exact: true }).getByRole('button', { name: '步骤参数', exact: true }).click();
   await page.getByRole('button', { name: '捕获或编辑桌面元素', exact: true }).click();
   await page.getByLabel('桌面元素保存范围').selectOption('workflow');
   if (interactive) {
@@ -72,6 +75,7 @@ try {
   await page.getByRole('button', { name: '单独运行 读取软件', exact: true }).click();
   const read = await waitForStep(page, 'read');
   assert.equal(read.status, 'succeeded', read.error); assert.equal(read.variables.softwareText, '界面验收成功');
+  await page.getByRole('button', { name: '步骤编辑', exact: true }).click();
   await page.getByRole('button', { name: '捕获或编辑桌面元素', exact: true }).click();
   await page.getByLabel('桌面元素保存范围').selectOption('workflow');
   if (interactive) {

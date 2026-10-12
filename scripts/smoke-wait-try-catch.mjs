@@ -77,7 +77,7 @@ try {
   const initial = await bootstrap();
   const flow = {
     ...initial.workflows[0], name: '等待与异常捕获验收',
-    variables: { delaySeconds: 0.12, error: '原有错误变量' }, elements: {},
+    variables: { delaySeconds: 0.12, invalidWaitSeconds: 3601, error: '原有错误变量' }, elements: {},
     settings: { downloadDir: join(data, 'downloads'), headless: true, keepBrowserOpen: false },
     steps: [
       { stepId: 'loop', name: '异常验收循环', actionType: 'control.forEach', params: { items: [1], itemVariable: 'item' }, children: [] },
@@ -195,6 +195,14 @@ try {
 
   await watchEvents();
   const previous = new Set((await bootstrap()).runs.map(run => run.runId));
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  await page.locator('.preflight-report').filter({hasText:'变量尚未声明：missingWaitSeconds'}).waitFor();
+  assert.equal((await bootstrap()).runs.some(item => item.workflowId === flow.workflowId && !previous.has(item.runId)), false, '确定缺失的变量必须在启动前阻止运行');
+  // A declared runtime value still exercises retries and Catch without a structural error.
+  await stepButton('主动失败').click();
+  await inspector.getByRole('button', { name: '步骤参数', exact: true }).click();
+  await inspector.getByLabel('等待时长（秒）', { exact: true }).fill('invalidWaitSeconds');
+  await save();
   await page.getByRole('button', { name: '运行', exact: true }).click();
   const run = await waitForRun(flow.workflowId, previous, terminal);
   assert.equal(run.status, 'succeeded', run.error);

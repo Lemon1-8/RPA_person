@@ -17,7 +17,7 @@ afterEach(async () => {
   for (const directory of directories.splice(0)) {
     const target = resolve(directory);
     if (dirname(target) !== resolve(tmpdir()) || !basename(target).startsWith('rpa-schedules-')) throw new Error('拒绝清理非测试目录');
-    await rm(target, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true, maxRetries:5,retryDelay:100 });
   }
 });
 

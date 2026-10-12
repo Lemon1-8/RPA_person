@@ -1,12 +1,11 @@
 import { dialog, globalShortcut, ipcMain, Notification, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { RunManager } from '../../runner/src/manager.js';
-import { preflight } from '../../../packages/actions/src/preflight.js';
 
 export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserWindow | undefined, trusted: (event: IpcMainInvokeEvent) => void) {
   const handle = (channel: string, action: (...args: any[]) => unknown) => ipcMain.handle(channel, (event, ...args) => { trusted(event); return action(...args); });
   handle('rpa:drafts', () => manager.store.listDrafts());
-  handle('rpa:preflight', flow => preflight(flow));
+  handle('rpa:preflight', flow => manager.preflightWorkflow(flow));
   handle('rpa:debug', (flow, breakpoints, fromStepId) => manager.debugRun(flow, breakpoints, fromStepId));
   handle('rpa:recover', id => manager.recoverRun(id));
   handle('rpa:draft-save', draft => manager.store.saveDraft(draft));
@@ -19,6 +18,12 @@ export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserW
   handle('rpa:storage-issues', () => manager.store.issues());
   handle('rpa:storage-retry', () => manager.store.retryFailed());
   handle('rpa:occurrences', id => manager.store.listOccurrences(id));
+  handle('rpa:run-variables', id => manager.getRunVariables(id));
+  handle('rpa:step-result', (id,resultId) => manager.store.getStepResult(id,resultId));
+  handle('rpa:archive', (id,archived) => manager.archiveRun(id,archived));
+  handle('rpa:history', query => manager.queryRuns(query));
+  handle('rpa:cleanup-preview', (ids,revisions) => manager.previewCleanup(ids,revisions));
+  handle('rpa:cleanup-apply', token => manager.applyCleanup(token));
   handle('rpa:element-pick', (runId, pageId, requestId) => manager.queryBrowserTool(runId, 'pickElement', { pageId, requestId }));
   handle('rpa:element-cancel', (runId, requestId) => manager.queryBrowserTool(runId, 'cancelElement', { requestId }));
   handle('rpa:element-validate', (runId, element) => manager.queryBrowserTool(runId, 'validateElement', { element }));

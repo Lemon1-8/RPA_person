@@ -62,8 +62,10 @@ it('单步复用同一真实浏览器、网页现场和变量，记录每次配�
   expect(runner.listRuns()).toHaveLength(1); expect(await runner.listWorkflows()).toHaveLength(0);
   const events = (await readFile(join(dataDir, 'runs', opened.runId, 'events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as RunEvent);
   expect(events.filter(event => event.type === 'step' && event.status === 'running').map(event => event.stepId)).toEqual(['open', 'fill', 'read', 'copy']);
-  const configurations = events.filter(event => event.status === 'queued').map(event => event.data as { stepId: string; workflow: WorkflowDefinition });
-  expect(configurations.map(config => config.workflow.revision)).toEqual([0, 0, 0, 7]);
+  const attempts=await runner.store.listAttempts(opened.runId);
+  const configurations = events.filter(event => event.status === 'queued').map(event => attempts.find(attempt=>attempt.attemptId===event.attemptId)!.workflow);
+  expect(configurations.map(workflow => workflow.revision)).toEqual([0, 0, 0, 7]);
+  expect(events.filter(event=>event.status==='queued').every(event=>!(event.data as Record<string,unknown>).workflow)).toBe(true);
   await expect(runner.runStep(workflow, 'copy', 'missing')).rejects.toThrow('不存在');
   await expect(runner.runStep({ ...workflow, workflowId: 'other' }, 'copy', opened.runId)).rejects.toThrow('当前流程');
   await expect(runner.runStep({ ...workflow, settings: { ...workflow.settings, profileId: 'other-profile' } }, 'copy', opened.runId)).rejects.toThrow('配置已改变');

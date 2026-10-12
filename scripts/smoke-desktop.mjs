@@ -51,7 +51,8 @@ try {
   assert.match(await readFile(file.path, 'utf8'), /跨语言订单/);
   await page.getByRole('tab', { name: '变量', exact: true }).click();
   const runtimeVariables = page.getByRole('tabpanel', { name: '变量', exact: true });
-  assert.deepEqual(await runtimeVariables.locator('dt code').allTextContents(), Object.keys(after.runs[0].variables), '窄栏必须列出实际运行变量');
+  await runtimeVariables.locator('.value-viewer > section > strong').first().waitFor();
+  assert.deepEqual(await runtimeVariables.locator('.value-viewer > section > strong').allTextContents(), Object.keys(after.runs[0].variables), '窄栏必须列出实际运行变量');
   await page.getByRole('tab', { name: '全部运行', exact: true }).click();
   const history = page.getByRole('list', { name: '历史运行记录', exact: true });
   await history.getByRole('button').filter({ hasText: firstRunId.slice(0, 8) }).click();

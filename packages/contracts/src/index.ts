@@ -72,6 +72,9 @@ export interface RunEvent {
   stepName?: string;
   eventId?: string; sequence?: number; attemptId?: string;
   variableChanges?: Record<string, unknown>; deletedVariables?: string[];
+  warningChanges?: RunWarning[];
+  variablesComplete?: boolean;
+  callStepId?: string; sourceWorkflowId?: string;
   status?: string; message?: string; data?: unknown; run?: RunSnapshot;
 }
 export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser' | 'step' | 'skip' | 'confirm' | 'retry' | 'check';
@@ -150,7 +153,7 @@ export const workflowSchema: z.ZodType<WorkflowDefinition> = z.object({
     for (const s of steps) {
       if (ids.has(s.stepId)) ctx.addIssue({ code: 'custom', message: `重复步骤标识：${s.stepId}` });
       ids.add(s.stepId); count++;
-      visit(s.children ?? [], depth + 1); visit(s.elseSteps ?? [], depth + 1);
+      visit(s.children ?? [], depth + 1); visit(s.elseSteps ?? [], depth + 1);visit(s.recoveryChecks ?? [],depth+1);
     }
   }; visit(flow.steps, 0);
   if (count > 1000) ctx.addIssue({ code: 'custom', message: '流程最多 1000 个步骤' });

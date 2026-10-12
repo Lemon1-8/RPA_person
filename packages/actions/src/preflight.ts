@@ -19,7 +19,7 @@ export async function preflight(input: WorkflowDefinition): Promise<PreflightIss
       try {
         const action = getAction(step.actionType);
         const refs = step.actionType === 'script.run' ? [] : references({ ...step.params, progressKey: undefined });
-        for (const ref of refs) if (![...declared].some(name => name === ref || ref.startsWith(`${name}.`))) add('error', `变量尚未声明：${ref}`);
+        for (const ref of refs) if (![...declared].some(name => name === ref || ref.startsWith(`${name}.`))) add(available.has('__script_dynamic__')?'warning':'error', `变量尚未声明：${ref}${available.has('__script_dynamic__')?'，请确认前置脚本会产生该值':''}`);
         const params = { ...step.params };
         for (const field of action.metadata.fields) if (references(params[field.key]).length) {
           params[field.key] = field.type === 'number' ? 1 : field.type === 'json' ? action.metadata.defaults[field.key] ?? {} : field.type === 'boolean' ? true : '__runtime__';
@@ -50,12 +50,13 @@ export async function preflight(input: WorkflowDefinition): Promise<PreflightIss
       await visit(step.children ?? [], inside, targets, true);
       const otherwise = new Set(declared); if (step.actionType === 'control.tryCatch') otherwise.add(String(step.params.errorVariable));
       await visit(step.elseSteps ?? [], otherwise, targets, true);
+      await visit(step.recoveryChecks ?? [],new Set(declared),targets,true);
       for (const branchName of new Set([...inside, ...otherwise])) if (!declared.has(branchName) && branchName !== step.params.itemVariable && branchName !== step.params.errorVariable) { available.add(branchName); add('warning', `分支输出 ${branchName} 可能未产生。`); }
       if (step.output) available.add(step.output);
       if (step.actionType === 'variables.set' && typeof step.params.name === 'string') available.add(step.params.name);
-      if (step.actionType === 'script.run') add('warning', '脚本可能动态读写变量；第三方依赖需在本地环境中自行准备。');
+      if (step.actionType === 'script.run') { available.add('__script_dynamic__');add('warning', '脚本可能动态读写变量；第三方依赖需在本地环境中自行准备。'); }
     }
   };
-  await visit(workflow.steps, new Set(Object.keys(workflow.variables)), new Set([...Object.keys(workflow.elements), ...Object.keys(workflow.desktopElements ?? {})]));
+  await visit(workflow.steps, new Set([...Object.keys(workflow.variables),...workflow.inputs ?? []]), new Set([...Object.keys(workflow.elements), ...Object.keys(workflow.desktopElements ?? {})]));
   return issues;
 }

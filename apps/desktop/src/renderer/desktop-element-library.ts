@@ -37,7 +37,7 @@ export function inheritedDesktopElements(workflow: WorkflowDefinition, stepId?: 
     for (const step of steps) {
       const current = { ...inherited, ...step.desktopElements };
       if (step.stepId === stepId) { result = current; return true; }
-      if (visit(step.children ?? [], current) || visit(step.elseSteps ?? [], current)) return true;
+      if (visit(step.children ?? [], current) || visit(step.elseSteps ?? [], current) || visit(step.recoveryChecks ?? [], current)) return true;
     }
     return false;
   };
@@ -48,7 +48,7 @@ export function inheritedDesktopElements(workflow: WorkflowDefinition, stepId?: 
 export function changeDesktopElement(workflow: WorkflowDefinition, ownerId: string | undefined, oldName: string | undefined, name: string | undefined, element?: DesktopElementRef): WorkflowDefinition {
   const next = structuredClone(workflow);
   const owners: StepDefinition[] = [];
-  const find = (steps: StepDefinition[]) => { for (const step of steps) { owners.push(step); find(step.children ?? []); find(step.elseSteps ?? []); } };
+  const find = (steps: StepDefinition[]) => { for (const step of steps) { owners.push(step); find(step.children ?? []); find(step.elseSteps ?? []); find(step.recoveryChecks ?? []); } };
   find(next.steps);
   const owner = ownerId ? owners.find(step => step.stepId === ownerId) : next;
   if (!owner) throw new Error('元素所属指令不存在');
@@ -74,6 +74,7 @@ export function changeDesktopElement(workflow: WorkflowDefinition, ownerId: stri
         }
       }
       visit(step.children ?? [], current, renamedBinding, position); visit(step.elseSteps ?? [], current, renamedBinding, position);
+      visit(step.recoveryChecks ?? [], current, renamedBinding, position);
     }
   };
   visit(next.steps);

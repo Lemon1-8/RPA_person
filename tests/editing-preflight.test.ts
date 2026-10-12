@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { tmpdir } from 'node:os';
 import { editSelectedSteps, listSteps } from '../apps/desktop/src/renderer/step-editing.js';
+import { changeDesktopElement } from '../apps/desktop/src/renderer/desktop-element-library.js';
+import { changeWebElement, webElementReferences } from '../apps/desktop/src/renderer/web-element-library.js';
 import { preflight } from '../packages/actions/src/preflight.js';
 import type { StepDefinition, WorkflowDefinition } from '../packages/contracts/src/index.js';
 const step: StepDefinition = { stepId: 'set', name: '设置', actionType: 'variables.set', params: { name: 'value', value: 1 } };
@@ -9,6 +11,16 @@ const workflow = (steps: StepDefinition[]): WorkflowDefinition => ({ schemaVersi
 describe('编辑和运行前检查', () => {
   it('Python中文脚本只检查语法，不受Windows默认编码影响也不执行代码', async () => { const issues = await preflight(workflow([{ stepId: 'python', name: '中文脚本', actionType: 'script.run', params: { language: 'python', code: 'print("中文脚本")\nraise RuntimeError("不应执行")' } }])); expect(issues.filter(issue => issue.level === 'error')).toEqual([]); });
   it('批量复制只复制顶层选择，重新生成整个子树标识', () => { const result = editSelectedSteps([container], ['if','set'], 'copy'); expect(result).toHaveLength(2); expect(new Set(listSteps(result).map(step => step.stepId)).size).toBe(4); });
+  it('复制带人工恢复检查的步骤时也重新生成检查项标识并保留配置', () => { const original = { ...step, recoveryChecks: [{ stepId: 'verify', name: '只读核查', actionType: 'core.assert', params: { actual: true, expected: true } }] }; const result = editSelectedSteps([original], ['set'], 'copy'); expect(new Set(listSteps(result).map(step => step.stepId)).size).toBe(4); expect(result[1].recoveryChecks?.[0].params).toEqual(original.recoveryChecks[0].params); expect(result[0]).toEqual(original); });
+  it('元素重命名同步恢复检查的引用，仍拒绝删除被引用的元素', () => { const element = { backend: 'uia' as const, window: {}, path: [] }; const original = { ...workflow([{ ...step, recoveryChecks: [{ stepId: 'check', name: '读取现场', actionType: 'windows.text', params: { selector: '@原元素' } }] }]), desktopElements: { 原元素: element } }; expect(() => changeDesktopElement(original, undefined, '原元素', undefined)).toThrow('读取现场'); const renamed = changeDesktopElement(original, undefined, '原元素', '新元素', element); expect(renamed.steps[0].recoveryChecks?.[0].params.selector).toBe('@新元素'); expect(original.steps[0].recoveryChecks?.[0].params.selector).toBe('@原元素'); });
+  it('全局网页元素更新结构化引用和恢复检查，保留局部绑定与脚本原文并列出人工检查位置', () => {
+    const read: StepDefinition = { stepId: 'web', name: '网页读取', actionType: 'browser.text', params: { selector: '@旧元素' }, recoveryChecks: [{ stepId: 'check', name: '恢复检查', actionType: 'browser.text', params: { selector: '@旧元素' } }] };
+    const original = { ...workflow([read, { ...read, stepId: 'local', params: { ...read.params }, recoveryChecks: undefined, elements: { 旧元素: { selector: '#local' } } }, { stepId: 'script', name: '脚本位置', actionType: 'script.run', params: { code: 'rpa.call("browser.text", {selector:"@旧元素"})' } }, { stepId: 'desktop', name: '软件读取', actionType: 'windows.text', params: { selector: '@旧元素' } }]), elements: { 旧元素: { selector: '#old' } } };
+    expect(webElementReferences(original, undefined, '旧元素').map(item => item.stepId)).toEqual(['web', 'check', 'script']);
+    const renamed = changeWebElement(original, undefined, '旧元素', '新元素', { selector: '#new' });
+    expect(renamed.elements).toEqual({ 新元素: { selector: '#new' } }); expect(renamed.steps[0].params.selector).toBe('@新元素'); expect(renamed.steps[0].recoveryChecks?.[0].params.selector).toBe('@新元素'); expect(renamed.steps[1].params.selector).toBe('@旧元素'); expect(renamed.steps[2].params.code).toBe(original.steps[2].params.code); expect(renamed.steps[3].params.selector).toBe('@旧元素');
+    const collision = { ...original, steps: [{ ...read, elements: { 新元素: { selector: '#unrelated' } } }] }; expect(() => changeWebElement(collision, undefined, '旧元素', '新元素', { selector: '#new' })).toThrow('局部元素覆盖'); expect(original.steps[0].params.selector).toBe('@旧元素');
+  });
   it('跨分支移动完整子树，拒绝移入自身后代', () => { const result = editSelectedSteps([container, { ...container, stepId: 'other', children: [] }], ['set'], 'move', 'other:children'); expect(result[0].children).toEqual([]); expect(result[1].children?.[0].stepId).toBe('set'); expect(() => editSelectedSteps([container], ['if'], 'move', 'set')).toThrow('自身'); });
   it('批量删除容器及后代，同时保留未选步骤', () => { const result = editSelectedSteps([container, { ...step, stepId: 'after' }], ['if','set'], 'delete'); expect(result.map(step => step.stepId)).toEqual(['after']); });
   it('整流程检测确定错误，注释步骤不产生参数错误', async () => { const issues = await preflight(workflow([{ ...step, params: { name: '', value: 1 } }, { ...step, stepId: 'disabled', disabled: true, params: {} }])); expect(issues.filter(issue => issue.level === 'error')).toHaveLength(1); expect(issues[0].stepId).toBe('set'); });

@@ -41,12 +41,13 @@ async function main() {
     const run = await manager.runWorkflow(saved);
     const result = await manager.waitForRun(run.runId);
     console.log(JSON.stringify(result, null, 2));
-    if (result.warningCount) console.log(`完成但有警告：${result.warningCount} 项，请检查 warnings。`);
+    if (result.warningCount) console.log(`${result.status==='succeeded'?'完成但有警告':'运行警告'}：${result.warningCount} 项，请检查 warnings。`);
+    for(const issue of manager.store.issues()) console.error(`记录保存失败：${issue.message}`);
     if (result.status !== 'succeeded') process.exitCode = 1;
     if (result.browserOpen) {
       console.log('流程已结束，浏览器已保留。关闭浏览器窗口或按 Ctrl+C 退出；下次可用 --close-browser 自动关闭。');
       await manager.waitForBrowserClosed(run.runId);
     }
-  } finally { await manager.shutdown(); await server?.close(); }
+  } finally { await manager.shutdown().catch(error=>{if(!manager.store.issues().length) throw error;console.error(`记录保存未完成：${String(error)}`);});await server?.close(); }
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

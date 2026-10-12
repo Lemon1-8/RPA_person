@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useReducer, useRef, useState, lazy, Suspense, type ReactNode } from "react";
 import {
   AlertCircle,
   Braces,
@@ -54,7 +54,12 @@ import type {
   WorkflowSchedule,
 } from "../../../../packages/contracts/src/index.js";
 import { WorkflowsPage } from "./WorkflowsPage.js";
-import { SchedulesPage } from "./SchedulesPage.js";
+const SchedulesPage=lazy(()=>import("./SchedulesPage.js").then(module=>({default:module.SchedulesPage})));
+import { mergeRunEvent } from "../../../../packages/contracts/src/run-events.js";
+import { AttemptRecords } from './AttemptRecords.js';
+import { cacheRunEvents } from './event-cache.js';
+import { WarningRecords } from './WarningRecords.js';
+const RunHistory=lazy(()=>import("./RunHistory.js").then(module=>({default:module.RunHistory})));
 import { StepTree } from "./StepTree.js";
 import { ControlFlowFields, getControlStepErrors } from "./ControlFlowFields.js";
 import { NoteFields, getNoteStepErrors } from "./NoteFields.js";
@@ -72,9 +77,9 @@ import { editorReducer, emptyEditorState } from "./editor-history.js";
 import { explainError, runRecovery } from "./run-feedback.js";
 import { DraftContext } from './DraftContext.js';
 import { RevisionHistory } from './RevisionHistory.js';
-import { WebElements } from './WebElements.js';
+const WebElements=lazy(()=>import('./WebElements.js').then(module=>({default:module.WebElements})));
 import { ValueViewer } from './ValueViewer.js';
-import { ScriptEditor } from './ScriptEditor.js';
+const ScriptEditor=lazy(()=>import('./ScriptEditor.js').then(module=>({default:module.ScriptEditor})));
 import { editSelectedSteps } from './step-editing.js';
 import type { PreflightIssue } from '../../../../packages/contracts/src/index.js';
 import type { WorkflowDraft, StorageIssue } from '../../../../packages/contracts/src/index.js';
@@ -173,6 +178,7 @@ function copyStep(step: StepDefinition): StepDefinition {
     stepId: uuid(),
     ...(step.children ? { children: step.children.map(copyStep) } : {}),
     ...(step.elseSteps ? { elseSteps: step.elseSteps.map(copyStep) } : {}),
+    ...(step.recoveryChecks ? { recoveryChecks: step.recoveryChecks.map(copyStep) } : {}),
   };
 }
 
@@ -358,6 +364,7 @@ export function App() {
   const [actions, setActions] = useState<ActionDefinition[]>([]);
   const [runs, setRuns] = useState<RunSnapshot[]>([]);
   const [runId, setRunId] = useState("");
+  const currentRunId=useRef(runId);currentRunId.current=runId;
   const [runScope, setRunScope] = useState<"workflow" | "all">("workflow");
   const [runWorkflows, setRunWorkflows] = useState<Record<string, WorkflowDefinition>>({});
   const [stepBrowserTargets, setStepBrowserTargets] = useState<Record<string, string>>({});
@@ -439,6 +446,7 @@ export function App() {
   ].includes(action.type)).map(action => advancedActions.has(action.type) ? { ...action, category: '高级采集与校验' } : action), [actions]);
   const run = runs.find((item) => item.runId === runId);
   const runWorkflow = runWorkflows[runId];
+  useEffect(() => { if(!api || !run || runTab!=="variables" || !terminalStatuses.has(run.status)) return; let alive=true;const attemptId=run.attemptId;void api.getRunVariables(runId).then(variables=>{if(alive)setRuns(previous=>previous.map(item=>item.runId===runId && item.attemptId===attemptId && terminalStatuses.has(item.status)?{...item,variables}:item));}).catch(catchError);return()=>{alive=false;}; },[runId,runTab,run?.status,run?.attemptId]);
   const stepNames = useMemo(() => new Map(flatten(runWorkflow?.steps ?? []).map(item => [item.step.stepId, item.step.name])), [runWorkflow]);
   const scopedRuns = runScope === "all" ? runs : runs.filter(item => item.workflowId === workflowId);
   const recovery = runRecovery(run, events);
@@ -514,7 +522,7 @@ export function App() {
       if (!disposed && value) setRunWorkflows(previous => ({ ...previous, [runId]: value }));
     }).catch(() => { /* Missing historical context never borrows names from the current draft. */ });
     return () => { disposed = true; };
-  }, [runId, run?.revision, run?.stepId]);
+  }, [runId, run?.revision, run?.stepId,run?.attemptId]);
   useEffect(() => { if (!api || !runId) { setAttempts([]); return; } let alive = true; void api.listAttempts(runId).then(value => { if (alive) setAttempts(value); }).catch(cause => setError(String(cause))); return () => { alive = false; }; }, [runId, run?.attemptId, run?.status]);
   const recoveryKey = recovery && `${runId}:${run?.status}:${recovery.stepId ?? ""}`;
   useEffect(() => {
@@ -553,21 +561,14 @@ export function App() {
       );
       return;
     }
-    let mounted = true;
+    let mounted = true;let eventTimer:ReturnType<typeof setTimeout>|undefined;const pendingEvents:RunEvent[]=[];
+    const flushEvents=()=>{clearTimeout(eventTimer);eventTimer=undefined;if(!mounted)return;const batch=pendingEvents.splice(0);if(!batch.length)return;setEvents(previous=>cacheRunEvents(previous,batch,currentRunId.current));
+      setRuns(previous=>{const map=new Map(previous.map(run=>[run.runId,run]));for(const event of batch) if(event.run)map.set(event.runId,mergeRunEvent(map.get(event.runId),event)!);return [...map.values()].sort((a,b)=>b.startedAt.localeCompare(a.startedAt)).map((item,index)=>index>=20 && item.runId!==currentRunId.current && terminalStatuses.has(item.status) && Object.keys(item.variables).length ? {...item,variables:{}} : item);});
+      for(const event of batch) if(event.type==='run' && event.status==='queued' && event.data && typeof event.data==='object' && 'workflow' in event.data){const definition=event.data.workflow as WorkflowDefinition;if(definition?.workflowId && Array.isArray(definition.steps))setRunWorkflows(previous=>({...previous,[event.runId]:definition}));}
+    };
     const off = api.onEvent((event) => {
       if (!mounted) return;
-      setEvents((previous) => [...previous, event]);
-      if (event.data && typeof event.data === "object" && "workflow" in event.data) {
-        const definition = event.data.workflow as WorkflowDefinition;
-        if (definition?.workflowId && Array.isArray(definition.steps)) setRunWorkflows(previous => ({ ...previous, [event.runId]: definition }));
-      }
-      if (event.run) {
-        const snapshot = event.run;
-        setRuns((previous) => [
-          snapshot,
-          ...previous.filter((item) => item.runId !== snapshot.runId),
-        ]);
-      }
+      pendingEvents.push(event);if(event.run && !['running','queued'].includes(event.run.status))flushEvents();else eventTimer ??=setTimeout(flushEvents,50);
     });
     api
       .bootstrap()
@@ -608,6 +609,7 @@ export function App() {
       .finally(() => mounted && setLoading(false));
     return () => {
       mounted = false;
+      clearTimeout(eventTimer);
       off();
     };
   }, []);
@@ -642,10 +644,11 @@ export function App() {
     const values = { ...(previous[workflowId] ?? {}) }; if (text === undefined) delete values[key]; else values[key] = text;
     return { ...previous, [workflowId]: values };
   });
-  const restoreDraft = (draft: WorkflowDraft) => {
+  const restoreDraft = async (draft: WorkflowDraft) => {
     const current = workflows.find(flow => flow.workflowId === draft.workflowId);
     const conflict = !!current && current.revision !== draft.baseRevision;
     const restored = conflict ? { ...draft.workflow, workflowId: uuid(), revision: 0, name: `${draft.workflow.name} 恢复副本` } : draft.workflow;
+    if(conflict && api) { await api.saveDraft({...draft,workflowId:restored.workflowId,workflow:restored,baseRevision:0,updatedAt:new Date().toISOString()});await api.discardDraft(draft.workflowId); }
     setWorkflows(previous => [...previous.filter(flow => flow.workflowId !== restored.workflowId), restored]);
     setWorkflowId(restored.workflowId); setSelectedId(draft.selectedId); setView('editor'); setInspector('step'); setRightPane('step');
     setDraftTexts(previous => ({ ...previous, [restored.workflowId]: draft.fieldTexts }));
@@ -1085,7 +1088,7 @@ export function App() {
         </div>
       </header>
 
-      {!!pendingDrafts.length && <div className="draft-recovery" role="region" aria-label="草稿恢复">{pendingDrafts.map(draft => <div key={draft.workflowId}><span>未保存草稿：{draft.workflow.name} · {new Date(draft.updatedAt).toLocaleString('zh-CN')}{workflows.some(flow => flow.workflowId === draft.workflowId && flow.revision !== draft.baseRevision) ? ' · 保存版本已变化，将恢复为副本' : ''}</span><button onClick={() => restoreDraft(draft)}>恢复草稿</button><button onClick={() => void api?.discardDraft(draft.workflowId).then(() => setPendingDrafts(previous => previous.filter(item => item.workflowId !== draft.workflowId))).catch(cause => setError(String(cause)))}>放弃草稿</button></div>)}</div>}
+      {!!pendingDrafts.length && <div className="draft-recovery" role="region" aria-label="草稿恢复">{pendingDrafts.map(draft => <div key={draft.workflowId}><span>未保存草稿：{draft.workflow.name} · {new Date(draft.updatedAt).toLocaleString('zh-CN')}{workflows.some(flow => flow.workflowId === draft.workflowId && flow.revision !== draft.baseRevision) ? ' · 保存版本已变化，将恢复为副本' : ''}</span><button onClick={() => void restoreDraft(draft).catch(catchError)}>恢复草稿</button><button onClick={() => void api?.discardDraft(draft.workflowId).then(() => setPendingDrafts(previous => previous.filter(item => item.workflowId !== draft.workflowId))).catch(cause => setError(String(cause)))}>放弃草稿</button></div>)}</div>}
       {!!storageIssues.length && <div className="alert" role="alert"><AlertCircle size={17}/><span>保存异常：{storageIssues.map(issue => issue.message).join('；')}</span><button onClick={() => void api?.retryStorage().then(setStorageIssues).catch(cause => setError(String(cause)))}>重试保存</button></div>}
       {error && (
         <div className="alert" role="alert">
@@ -1128,7 +1131,7 @@ export function App() {
         </div>
       </nav>
       {view === "workflows" && <WorkflowsPage workflows={workflows} saved={saved} busy={loading || !!busy || !api} onCreate={createWorkflow} onOpen={openWorkflow} onSettings={id => openWorkflow(id, "settings")} onCopy={duplicateWorkflow} onDelete={deleteWorkflow} />}
-      {view === "schedules" && api && <SchedulesPage api={api} workflows={workflows} runs={runs} initial={schedules} onError={catchError} />}
+      {view === "schedules" && api && <Suspense fallback={<p>正在读取调度界面…</p>}><SchedulesPage api={api} workflows={workflows} runs={runs} initial={schedules} onError={catchError} /></Suspense>}
                   {view === "settings" && workflow && (
               <main className="management-page settings-page" aria-label="流程运行设置" key={workflowId}><div className="settings-content"><button className="text-button" onClick={() => setView("editor")}><ChevronRight size={15} />返回流程编辑器</button>
                 <h2 className="panel-title">运行设置</h2>
@@ -1306,7 +1309,7 @@ export function App() {
                     </button>
                   </div>
                 )}
-                {api && <RevisionHistory api={api} workflow={workflow} onError={catchError} onRestore={persisted => { setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) })); setNotice(`已恢复为 v${persisted.revision}`); }} />}
+                {api && <RevisionHistory api={api} workflow={workflow} beforeRestore={() => flushDrafts.current()} onError={catchError} onRestore={persisted => { setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) })); setNotice(`已恢复为 v${persisted.revision}`); }} />}
                 {demoUrl && (
                   <div className="environment-info">
                     <span>受控演示页</span>
@@ -1316,7 +1319,7 @@ export function App() {
                     </small>
                   </div>
                 )}
-              <details className="advanced"><summary>流程默认变量与元素（供所有指令继承）</summary><p className="help-text">每条指令可在右侧配置自己的覆盖值。此处保留已有流程的默认配置。</p><JsonEditor label="流程默认变量 JSON" value={workflow.variables} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-variables", valid)} onChange={value => updateWorkflow(item => ({ ...item, variables: value as WorkflowDefinition["variables"] }))} /><JsonEditor label="流程默认元素 JSON" value={workflow.elements} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-elements", valid)} onChange={value => updateWorkflow(item => ({ ...item, elements: value as WorkflowDefinition["elements"] }))} /></details></div></main>
+              <details className="advanced"><summary>流程默认变量、元素与子流程声明</summary><JsonEditor label="子流程输入声明（JSON变量名数组）" value={workflow.inputs ?? []} disabled={!!busy} onValidity={valid => markValid("workflow-inputs",valid)} onChange={value => updateWorkflow(item => ({...item,inputs:value as string[]}))}/><JsonEditor label="子流程输出声明（JSON变量名数组）" value={workflow.outputs ?? []} disabled={!!busy} onValidity={valid => markValid("workflow-outputs",valid)} onChange={value => updateWorkflow(item => ({...item,outputs:value as string[]}))}/><p className="help-text">每条指令可在右侧配置自己的覆盖值。此处保留已有流程的默认配置。</p><JsonEditor label="流程默认变量 JSON" value={workflow.variables} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-variables", valid)} onChange={value => updateWorkflow(item => ({ ...item, variables: value as WorkflowDefinition["variables"] }))} /><JsonEditor label="流程默认元素 JSON" value={workflow.elements} objectOnly disabled={!!busy} onValidity={valid => markValid("workflow-elements", valid)} onChange={value => updateWorkflow(item => ({ ...item, elements: value as WorkflowDefinition["elements"] }))} /></details></div></main>
             )}
 
       <div className={`workspace${panels.left ? "" : " left-collapsed"}${panels.right ? "" : " right-collapsed"}`} hidden={view !== "editor"}>
@@ -1704,7 +1707,7 @@ export function App() {
                           value={String(selected.step.params.path ?? "")} disabled={!!busy}
                           onChange={value => setParam("path", value)} />
                       ) : field.key === 'code' && workflow ? (
-                        <ScriptEditor api={api} workflow={workflow} stepId={selectedId} value={String(selected.step.params.code ?? '')} disabled={!!busy} onChange={value => setParam('code', value)}/>
+                        <Suspense fallback={<p>正在读取脚本编辑器…</p>}><ScriptEditor api={api} workflow={workflow} stepId={selectedId} value={String(selected.step.params.code ?? '')} disabled={!!busy} onChange={value => setParam('code', value)}/></Suspense>
                       ) : field.type === "json" ? (
                         <JsonEditor
                           key={parameterEdits[field.key] ?? 0}
@@ -2027,7 +2030,7 @@ export function App() {
             {inspector === "elements" && selected && selected.step.actionType !== "core.note" && (
               <>
                 {workflow && <DesktopElements key={`${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? "desktop-element" : "")} onChange={next => updateWorkflow(() => next)} />}
-                {workflow && <WebElements key={`web:${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} runId={pageBrowserId} pageId={coordinatePage?.pageId ?? '$current'} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? 'web-element' : '')} onChange={next => updateWorkflow(() => next)}/>}
+                {workflow && <Suspense fallback={<p>正在读取网页元素工具…</p>}><WebElements key={`web:${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} runId={pageBrowserId} pageId={coordinatePage?.pageId ?? '$current'} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? 'web-element' : '')} onChange={next => updateWorkflow(() => next)}/></Suspense>}
                 <h2 className="panel-title">元素引用</h2>
                 <p className="help-text">
                   当前指令通过 @元素名 引用自己的元素；子步骤继承，其他指令不受影响。
@@ -2171,8 +2174,8 @@ export function App() {
             {run?.waitingReason && <p className="resource-wait" role="status">{run.waitingReason}</p>}
             {run?.debug && run.status === 'paused' && <div className="run-debug-actions"><button disabled={!!busy} onClick={() => void control('step')}>执行下一步</button><button disabled={!!busy} onClick={() => void control('resume')}>继续调试</button></div>}
             {run?.status === 'waiting_manual' && <details className="manual-decisions"><summary>人工恢复决策</summary><div><button disabled={!!busy} onClick={() => void control('check')}>执行恢复检查</button><button disabled={!!busy} onClick={() => { if (confirm('已确认本步骤的业务结果完成？该操作不会自动生成缺失的输出变量。')) void control('confirm'); }}>确认已完成并继续</button><button disabled={!!busy} onClick={() => { if (confirm('明确重新执行可能产生外部效果的步骤？请先检查已有结果。')) void control('retry'); }}>明确重新执行</button><button disabled={!!busy} onClick={() => { if (confirm('跳过该步骤并记录警告？该业务项仍需核对。')) void control('skip'); }}>跳过并记录警告</button></div></details>}
-            {run && terminalStatuses.has(run.status) && <details className="attempt-tools"><summary>执行尝试与数据续跑 · {attempts.length} 次</summary><button disabled={!!busy} onClick={() => { if (!confirm('使用原修订和原输入重建会话？未知业务项需要检查后决定，未配置业务键的流程无法续跑。')) return; setBusy('recover'); void api?.recoverRun(run.runId).then(snapshot => { setRunId(snapshot.runId); setRuns(previous => [snapshot, ...previous]); showRunPanel(); }).catch(catchError).finally(() => setBusy('')); }}>检查后建立数据续跑</button>{attempts.map(attempt => <details key={attempt.attemptId}><summary>{new Date(attempt.run.startedAt).toLocaleString('zh-CN')} · v{attempt.run.revision} · {statusLabels[attempt.run.status]} · {attempt.attemptId.slice(0, 8)}</summary><pre>{JSON.stringify({ steps: attempt.workflow.steps, warnings: attempt.run.warnings, variables: attempt.run.variables }, null, 2)}</pre></details>)}</details>}
-            {!!run?.warningCount && <details className="run-warning"><summary>完成但有警告 · {run.warningCount} 项</summary>{run.warnings?.map((warning, index) => <p key={index}><button onClick={() => locateRunStep(warning.stepId)}>{warning.stepName}</button>：{warning.message}</p>)}</details>}
+            {run && terminalStatuses.has(run.status) && <details className="attempt-tools"><summary>执行尝试与数据续跑 · {attempts.length} 次</summary><button disabled={!!busy} onClick={() => { if (!confirm('使用原修订和原输入重建会话？未知业务项需要检查后决定，未配置业务键的流程无法续跑。')) return; setBusy('recover'); void api?.recoverRun(run.runId).then(snapshot => { setRunId(snapshot.runId); setRuns(previous => [snapshot, ...previous]); showRunPanel(); }).catch(catchError).finally(() => setBusy('')); }}>检查后建立数据续跑</button><AttemptRecords attempts={attempts}/></details>}
+            {!!run?.warningCount && <WarningRecords key={`${runId}:${run.attemptId}`} warnings={run.warnings ?? []} status={run.status} onSelect={locateRunStep}/>}
             {recovery && run && <div className="run-recovery" role="region" aria-label="运行恢复">
               <div className="run-recovery-copy"><strong>{recovery.canResume ? "需要人工处理" : run.status === "interrupted" ? "运行已中断" : "运行失败"}{recovery.stepId ? ` · ${stepNames.get(recovery.stepId) ?? recovery.stepId}` : ""}</strong>
                 <p title={run.error ?? recovery.reason}>{recovery.reason}</p>
@@ -2195,6 +2198,7 @@ export function App() {
               {runTab === "logs" && <LogViewer
                 events={events}
                 runId={runId}
+                attempts={attempts.map(attempt=>({attemptId:attempt.attemptId,label:`${new Date(attempt.run.startedAt).toLocaleString('zh-CN')} · ${attempt.attemptId.slice(0,8)}`}))}
                 stepNames={stepNames}
                 emptyMessage={run?.error ?? (run ? "该运行暂无实时日志。历史运行的状态、变量与产物可在对应面板查看。" : "运行流程后，在这里查看步骤进度和执行日志。")}
                 onSelectStep={locateRunStep}
@@ -2202,14 +2206,7 @@ export function App() {
               />}
               {runTab === "variables" &&
                 (run && Object.keys(run.variables).length ? (
-                  <><ValueViewer variables={run.variables}/><dl className="runtime-values" hidden>
-                    {Object.entries(run.variables).map(([name, value]) => (
-                      <div key={name}>
-                        <dt><code>{name}</code><span>{value === null ? "null" : Array.isArray(value) ? "array" : typeof value}</span></dt>
-                        <dd><code className="variable-value">{toText(value)}</code></dd>
-                      </div>
-                    ))}
-                  </dl></>
+                  <ValueViewer variables={run.variables}/>
                 ) : (
                   <div className="console-empty"><Braces size={23} /><span>所选运行尚未产生变量。</span></div>
                 ))}
@@ -2227,25 +2224,7 @@ export function App() {
                 ) : (
                   <div className="console-empty"><Download size={23} /><span>下载成功后，文件路径和大小将在这里显示。</span></div>
                 ))}
-              {runTab === "runs" &&
-                (runs.length ? (
-                  <ul className="runtime-history" aria-label="历史运行记录">
-                    {runs.map(item => (
-                      <li key={item.runId}>
-                        <button className={`run-select${runId === item.runId ? " selected-row" : ""}`} onClick={() => { setRunScope("all"); setRunId(item.runId); setRunTab("logs"); }}>
-                          <span className="runtime-history-heading"><strong>{item.workflowName}{item.stepId ? " · 单条运行" : ""}</strong><Status status={item.status} /></span>
-                          <span className="runtime-history-meta"><code>{item.runId.slice(0, 8)}</code><span>v{item.revision}</span><time dateTime={item.startedAt}>{new Date(item.startedAt).toLocaleString("zh-CN", { hour12: false })}</time></span>
-                          {item.browserOpen && terminalStatuses.has(item.status) && <RetainedBrowserStatus />}
-                          {item.currentStepId && !item.error && <span>当前步骤 · <code>{item.currentStepId}</code></span>}
-                          {item.error && <span className="error-text">{explainError(item.error).message}</span>}
-                          {!!item.warningCount && <span className="warning-text">完成但有警告 · {item.warningCount} 项</span>}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="console-empty"><Layers size={23} /><span>还没有运行记录。保存流程后，点击顶部「运行」。</span></div>
-                ))}
+              {runTab === "runs" && api && <Suspense fallback={<p>正在读取历史…</p>}><RunHistory api={api} workflows={workflows} onError={catchError} onSelect={item => { setRunScope("all");setRunId(item.runId);setRunTab("logs");setRuns(previous => previous.some(run=>run.runId===item.runId) ? previous : [item,...previous]); }}/></Suspense>}
             </div>
           </section>
         </aside>

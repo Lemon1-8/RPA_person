@@ -1,6 +1,6 @@
 import type { StepDefinition } from '../../../../packages/contracts/src/index.js';
-export function listSteps(steps: StepDefinition[]): StepDefinition[] { return steps.flatMap(step => [step, ...listSteps(step.children ?? []), ...listSteps(step.elseSteps ?? [])]); }
-const copy = (step: StepDefinition): StepDefinition => ({ ...structuredClone(step), stepId: crypto.randomUUID(), ...(step.children ? { children: step.children.map(copy) } : {}), ...(step.elseSteps ? { elseSteps: step.elseSteps.map(copy) } : {}) });
+export function listSteps(steps: StepDefinition[]): StepDefinition[] { return steps.flatMap(step => [step, ...listSteps(step.children ?? []), ...listSteps(step.elseSteps ?? []), ...listSteps(step.recoveryChecks ?? [])]); }
+const copy = (step: StepDefinition): StepDefinition => ({ ...structuredClone(step), stepId: crypto.randomUUID(), ...(step.children ? { children: step.children.map(copy) } : {}), ...(step.elseSteps ? { elseSteps: step.elseSteps.map(copy) } : {}), ...(step.recoveryChecks ? { recoveryChecks: step.recoveryChecks.map(copy) } : {}) });
 export function editSelectedSteps(steps: StepDefinition[], ids: string[], command: 'copy' | 'delete' | 'move', target = ''): StepDefinition[] {
   const selected = new Set(ids);
   const roots: StepDefinition[] = [];
