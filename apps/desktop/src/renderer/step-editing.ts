@@ -6,7 +6,7 @@ export function editSelectedSteps(steps: StepDefinition[], ids: string[], comman
   const roots: StepDefinition[] = [];
   const collect = (items: StepDefinition[]) => { for (const step of items) { if (selected.has(step.stepId)) roots.push(step); else { collect(step.children ?? []); collect(step.elseSteps ?? []); } } };
   collect(steps);
-  if (command === 'move' && roots.some(step => listSteps([step]).some(child => child.stepId === target))) throw new Error('不能移动到自身或自己的子步骤');
+  if (command === 'move' && roots.some(step => listSteps([step]).some(child => child.stepId === target.split(':')[0]))) throw new Error('不能移动到自身或自己的子步骤');
   const rootIds = new Set(roots.map(step => step.stepId));
   const rewrite = (items: StepDefinition[]): StepDefinition[] => items.flatMap(step => {
     if (rootIds.has(step.stepId)) return command === 'copy' ? [step, { ...copy(step), name: `${step.name} 副本` }] : [];

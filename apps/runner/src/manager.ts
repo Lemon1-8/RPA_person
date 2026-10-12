@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { cp } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeWorkflowForStorage } from '../../../packages/persistence/src/index.js';
@@ -8,12 +9,13 @@ import { WorkbenchStore } from '../../../packages/persistence/src/workbench.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
 import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type BrowserPoint, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 import { nextScheduleTime } from './schedule.js';
+import type { EngineOptions } from '../../../packages/engine/src/index.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
 interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPages { resolve: (pages: BrowserPageInfo[]) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPoint { id: string; resolve: (point: BrowserPoint | null) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
-interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint }
+interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint; executionOptions?: Partial<EngineOptions> }
 async function killOwnedTree(child: ChildProcess) {
   if (!child.pid) return;
   if (process.platform === 'win32') await new Promise<void>(resolve => {
@@ -32,6 +34,12 @@ export class RunManager extends EventEmitter {
   private schedules = new Map<string, WorkflowSchedule>();
   private scheduleTimer?: NodeJS.Timeout;
   private checkingSchedules = false;
+  private emergencyStopping = false;
+  async stopAll() {
+    this.emergencyStopping = true; this.pending = [];
+    try { await Promise.all([...this.jobs.values()].filter(job => !terminal(job.run.status) || job.run.browserOpen).map(job => this.controlRun(job.run.runId, terminal(job.run.status) ? 'closeBrowser' : 'stop'))); }
+    finally { this.emergencyStopping = false; }
+  }
   private tools = new Map<string, { runId: string; resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   queryBrowserTool(runId: string, method: 'pickElement' | 'cancelElement' | 'validateElement', params: Record<string, unknown>): Promise<unknown> {
     const job = this.jobs.get(scheduleIdentifier.parse(runId)); if (!job?.child?.connected) return Promise.reject(new Error('浏览器会话不存在'));
@@ -103,6 +111,7 @@ export class RunManager extends EventEmitter {
     this.startQueue = operation.catch(() => {}); return operation;
   }
   listRuns() { return [...this.jobs.values()].map(j => structuredClone(j.run)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  concurrencyLimit() { return this.options.maxConcurrent ?? 2; }
   async getRunWorkflow(runId: string): Promise<WorkflowDefinition | null> {
     const id = scheduleIdentifier.parse(runId);
     const workflow = this.jobs.get(id)?.workflow;
@@ -242,7 +251,7 @@ export class RunManager extends EventEmitter {
     const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
     return this.serialize(() => this.startWorkflow(workflow));
   }
-  runStep(input: WorkflowDefinition, stepId: string, browserRunId?: string): Promise<RunSnapshot> {
+  runStep(input: WorkflowDefinition, stepId: string, browserRunId?: string, debug?: EngineOptions['debug']): Promise<RunSnapshot> {
     const workflow = workflowSchema.parse(input); validateActions(workflow);
     const path = findStepPath(workflow, scheduleIdentifier.parse(stepId));
     const selected = path?.at(-1);
@@ -264,14 +273,14 @@ export class RunManager extends EventEmitter {
         || workflow.settings.headless !== job.workflow.settings.headless) throw new Error('浏览器配置已改变，请关闭原浏览器后重新运行');
       const previousRun = job.run;
       const previousWorkflow = job.workflow;
-      const queued: RunSnapshot = { ...job.run, workflowName: workflow.name, revision: workflow.revision, stepId, status: 'queued', attemptId: randomUUID(), startedAt: new Date().toISOString(), warnings: [], warningCount: 0 };
+      const queued: RunSnapshot = { ...job.run, workflowName: workflow.name, revision: workflow.revision, stepId, status: 'queued', attemptId: randomUUID(), startedAt: new Date().toISOString(), warnings: [], warningCount: 0, debug };
       delete queued.endedAt; delete queued.error; delete queued.currentStepId;
       job.run = queued; job.workflow = workflow;
       try {
         await this.store.createRun(workflow, queued);
         if (!job.child?.connected || !job.run.browserOpen) throw new Error('所选浏览器已关闭，请重新选择');
         this.publish({ type: 'run', runId: browserRunId, at: new Date().toISOString(), status: 'queued', run: structuredClone(queued), data: { stepId, workflow } });
-        await this.sendRequest(job, { type: 'run-step', workflow, stepId, attemptId: queued.attemptId });
+        await this.sendRequest(job, { type: 'run-step', workflow, stepId, attemptId: queued.attemptId, debug });
       } catch (error) {
         job.workflow = previousWorkflow;
         job.run = { ...previousRun, browserOpen: Boolean(job.child?.connected && job.run.browserOpen) };
@@ -282,10 +291,30 @@ export class RunManager extends EventEmitter {
       return structuredClone(job.run);
     });
   }
-  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string }, stepId?: string): Promise<RunSnapshot> {
+  debugRun(input: WorkflowDefinition, breakpoints: string[], fromStepId?: string): Promise<RunSnapshot> {
+    const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
+    const debug = { breakpoints: breakpoints.map(id => scheduleIdentifier.parse(id)), fromStepId };
+    if (fromStepId) {
+      if (!workflow.steps.some(step => step.stepId === fromStepId)) return Promise.reject(new Error('调试起点必须是顶层步骤'));
+      const existing = [...this.jobs.values()].find(job => job.run.workflowId === workflow.workflowId && terminal(job.run.status) && job.run.browserOpen);
+      if (!existing) return Promise.reject(new Error('从指定步骤调试需要已保留的浏览器会话，请先单条打开网页并准备变量'));
+      return this.runStep(workflow, fromStepId, existing.run.runId, debug);
+    }
+    return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { debug }));
+  }
+  async recoverRun(runId: string): Promise<RunSnapshot> {
+    const id = scheduleIdentifier.parse(runId); const job = this.jobs.get(id);
+    if (!job || !terminal(job.run.status)) throw new Error('请先结束原运行，再建立数据续跑');
+    const workflow = await this.getRunWorkflow(id); if (!workflow) throw new Error('原流程快照不存在，不能续跑');
+    const hasProgress = (steps: typeof workflow.steps): boolean => steps.some(step => ['control.forEach','control.forEachXlsx'].includes(step.actionType) && Boolean(step.params.progressKey) || hasProgress(step.children ?? []) || hasProgress(step.elseSteps ?? []));
+    if (!hasProgress(workflow.steps) || !job.run.attemptId) throw new Error('该运行没有配置业务键和进度记录，不能自动跳到中间步骤');
+    return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { resumeFromRunId: id, resumeFromAttemptId: job.run.attemptId }));
+  }
+  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string }, stepId?: string, executionOptions?: Partial<EngineOptions>): Promise<RunSnapshot> {
+    if (this.emergencyStopping) throw new Error('紧急停止正在处理，请稍后再启动任务');
     if (this.shuttingDown) throw new Error('运行器正在退出');
     if (!stepId) {
-      const saved = (await this.listWorkflows()).find(w => w.workflowId === workflow.workflowId);
+      const saved = await this.store.getRevision(workflow.workflowId, workflow.revision).catch(() => undefined);
       if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
       await this.closeRetainedBrowsersFor(workflow);
     }
@@ -299,9 +328,15 @@ export class RunManager extends EventEmitter {
       status: 'queued', startedAt: new Date().toISOString(), variables: structuredClone(workflow.variables), artifacts: [], browserOpen: false,
       ...schedule, stepId,
       attemptId: randomUUID(), warnings: [], warningCount: 0,
+      debug: executionOptions?.debug, resumedFromRunId: executionOptions?.resumeFromRunId,
     };
     await this.store.createRun(workflow, run);
-    this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
+    if (executionOptions?.resumeFromRunId && executionOptions.resumeFromAttemptId) {
+      const source = join(this.options.dataDir, 'runs', scheduleIdentifier.parse(executionOptions.resumeFromRunId), 'attempts', scheduleIdentifier.parse(executionOptions.resumeFromAttemptId), 'progress');
+      const target = join(this.options.dataDir, 'runs', run.runId, 'attempts', run.attemptId!, 'progress');
+      await cp(source, target, { recursive: true }).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
+    this.jobs.set(run.runId, { workflow: structuredClone(workflow), run, executionOptions }); this.pending.push(run.runId);
     this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run), ...(stepId ? { data: { stepId, workflow } } : {}) });
     this.drain(); return structuredClone(run);
   }
@@ -328,6 +363,8 @@ export class RunManager extends EventEmitter {
       if (job.run.status !== 'queued') continue;
       this.launch(job);
     }
+    const occupied = [...this.jobs.values()].filter(job => job.child).map(job => `${job.run.workflowName}${terminal(job.run.status) ? '（保留浏览器）' : ''}`);
+    for (const id of this.pending) { const run = this.jobs.get(id)?.run; if (run?.status === 'queued') { const reason = `并发上限 ${limit}，占用者：${occupied.join('、') || '正在准备资源'}`; if (run.waitingReason !== reason) { run.waitingReason = reason; this.publish({ type: 'run', runId: id, at: new Date().toISOString(), run: structuredClone(run), status: 'queued' }); } } }
   }
   private launch(job: Job) {
     const root = this.options.rootDir ?? process.env.RPA_ROOT ?? process.cwd();
@@ -392,7 +429,7 @@ export class RunManager extends EventEmitter {
       }
       job.exit?.(); this.drain();
     });
-    child.send({ type: 'start', workflow: job.workflow, stepId: job.run.stepId, options: { dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor, attemptId: job.run.attemptId } }, error => { if (error) job.run.error = error.message; });
+    child.send({ type: 'start', workflow: job.workflow, stepId: job.run.stepId, options: { ...job.executionOptions, dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor, attemptId: job.run.attemptId } }, error => { if (error) job.run.error = error.message; });
   }
   private async sendRequest(job: Job, message: Record<string, unknown>): Promise<void> {
     if (!job.child?.connected) throw new Error('任务进程未连接');

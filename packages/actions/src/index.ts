@@ -165,11 +165,11 @@ add('control.if', '条件分支', '流程控制', '满足条件执行子步骤�
   [json('left', '左值（JSON）'), { key: 'operator', label: '比较方式', type: 'select', options: [{ label: '等于', value: 'equals' }, { label: '不等于', value: 'notEquals' }, { label: '为真', value: 'truthy' }], required: true }, json('right', '右值（JSON）')],
   { left: true, operator: 'truthy', right: null }, z.object({ left: z.unknown(), operator: z.enum(['equals', 'notEquals', 'truthy']), right: z.unknown().optional() }));
 add('control.forEach', '遍历列表', '流程控制', '逐项执行子步骤，循环结束恢复同名变量。最多 10000 项。', false,
-  [json('items', '列表或变量引用（JSON）'), text('itemVariable', '当前项变量')], { items: [], itemVariable: 'item' }, z.object({ items: z.array(z.unknown()).max(10_000), itemVariable: z.string().min(1) }));
+  [json('items', '列表或变量引用（JSON）'), text('itemVariable', '当前项变量'), text('progressKey', '续跑业务键模板', false, '{{item.id}}')], { items: [], itemVariable: 'item' }, z.object({ items: z.array(z.unknown()).max(10_000), itemVariable: z.string().min(1), progressKey: z.string().optional() }));
 add('control.forEachXlsx', '遍历 XLSX', '文件', '逐行遍历 XLSX；当前行是数组，可用 {{row}}[0]、{{row}}[1] 读取该行的单元格。首行不参与循环，最多 10000 行。', false,
   [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), text('sheetName', '工作表名称', false, '留空读取第一个工作表'), text('itemVariable', '当前项变量')],
   { path: '', sheetName: '', itemVariable: 'row', valueMode: 'array', columnIndex: 0 },
-  z.object({ path: xlsxFilePath, sheetName: sheetName.optional(), itemVariable: nonBlank,
+  z.object({ path: xlsxFilePath, sheetName: sheetName.optional(), itemVariable: nonBlank, progressKey: z.string().optional(),
     valueMode: z.enum(['row', 'array', 'column']).optional(), columnIndex: z.number().int().min(0).max(16_383).optional() })
     .refine(params => params.valueMode !== 'column' || params.columnIndex !== undefined, { path: ['columnIndex'], message: '单列值模式请选择列下标' }));
 add('control.tryCatch', 'Try / Catch', '流程控制', '先执行 Try 内的指令；成功时跳过 Catch，失败时跳过 Try 剩余指令并执行 Catch，处理完成后继续后续步骤。\n\nCatch 内可通过 {{error.message}}、{{error.stepId}}、{{error.stepName}} 和 {{error.actionType}} 读取异常。异常变量名可修改，仅在 Catch 内有效，结束后恢复原来的同名变量。\n\nTry 内的指令完成配置的重试后才进入 Catch，不会先按“失败后暂停”等待。Catch 自身失败会继续向外抛出；用户停止、本容器或祖先容器的总超时不能在本 Catch 中处理。', false,
@@ -209,6 +209,7 @@ export function validateActions(workflow: WorkflowDefinition) {
       const action = getAction(step.actionType);
       if (!action.metadata.safeToRetry && (step.retry?.maxAttempts ?? 1) > 1) throw new Error(`“${step.name}”有外部效果，当前版本不允许自动重试。`);
       if (!action.metadata.safeToRetry && step.onError === 'pause') throw new Error(`“${step.name}”有外部效果，当前版本仅支持读取和校验动作失败后暂停。`);
+      for (const check of step.recoveryChecks ?? []) { if (!getAction(check.actionType).metadata.safeToRetry || check.children?.length || check.elseSteps?.length) throw new Error('恢复检查只能包含只读或内部校验指令'); }
       if (!['control.if', 'control.forEach', 'control.forEachXlsx', 'control.tryCatch'].includes(step.actionType) && ((step.children?.length ?? 0) || (step.elseSteps?.length ?? 0))) throw new Error(`“${step.name}”不是容器动作，不能包含子步骤。`);
       if (['control.forEach', 'control.forEachXlsx'].includes(step.actionType) && step.elseSteps?.length) throw new Error('循环不支持否则分支');
       visit(step.children ?? []); visit(step.elseSteps ?? []);

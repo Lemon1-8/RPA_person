@@ -148,7 +148,7 @@ try {
   await recovery.waitFor({ state: 'hidden' });
   await selectFlow(a.workflowId);
   const latest = (await bootstrap()).workflows.find(flow => flow.workflowId === a.workflowId);
-  await page.evaluate(flow => window.rpa.saveWorkflow(flow), { ...latest, steps: [{ stepId: 'fail', name: '失败指令', actionType: 'core.wait', params: { durationSeconds: '{{notDefined}}' }, onError: 'fail' }] });
+  await page.evaluate(flow => window.rpa.saveWorkflow(flow), { ...latest, steps: [{ stepId: 'fail', name: '失败指令', actionType: 'core.assert', params: { actual: 1, expected: 2 }, onError: 'fail' }] });
   await page.reload();
   await page.getByLabel('当前流程', { exact: true }).waitFor();
   await selectFlow(a.workflowId);

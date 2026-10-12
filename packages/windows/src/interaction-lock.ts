@@ -7,17 +7,29 @@ $mutex=New-Object System.Threading.Mutex($false,'Local\PersonalRpaDesktopInput')
 $owned=$false
 try {
   try { $owned=$mutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { $owned=$true }
+  Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class RpaIdle {
+  [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint size,tick; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput input);
+  public static uint Idle() { LastInput value=new LastInput(); value.size=(uint)Marshal.SizeOf(typeof(LastInput)); if(!GetLastInputInfo(ref value)) throw new Exception("无法读取用户空闲状态"); return unchecked((uint)Environment.TickCount-value.tick); }
+}
+'@
+  while ([RpaIdle]::Idle() -lt $env:RPA_INPUT_IDLE_MS) { Start-Sleep -Milliseconds 50 }
   [Console]::Out.WriteLine('ready')
   [void][Console]::In.ReadToEnd()
 } finally { if ($owned) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
 `;
+export interface InputPolicy { idleMs?: number; waitMs?: number; onWaiting?(waiting: boolean, elapsedMs: number): void }
 
 /** One OS mutex covers activation and the complete physical input operation. */
-export async function withDesktopInteraction<T>(timeoutMs: number, signal: AbortSignal | undefined, action: (remainingMs: number) => Promise<T>): Promise<T> {
+export async function withDesktopInteraction<T>(timeoutMs: number, signal: AbortSignal | undefined, action: (remainingMs: number) => Promise<T>, policy?: InputPolicy): Promise<T> {
   if (process.platform !== 'win32') throw new Error('电脑操作仅支持 Windows');
   if (signal?.aborted) throw new Error('电脑交互操作已取消');
   const started = Date.now();
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-MTA', '-EncodedCommand', Buffer.from(lockScript, 'utf16le').toString('base64')], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  let waiting = true;
+  policy?.onWaiting?.(true, 0);
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-MTA', '-EncodedCommand', Buffer.from(lockScript, 'utf16le').toString('base64')], { windowsHide: true, env: { ...process.env, RPA_INPUT_IDLE_MS: String(policy?.idleMs ?? 0) }, stdio: ['pipe', 'pipe', 'pipe'] });
   const abort = () => child.kill();
   signal?.addEventListener('abort', abort, { once: true });
   try {
@@ -25,7 +37,7 @@ export async function withDesktopInteraction<T>(timeoutMs: number, signal: Abort
       let output = ''; let error = ''; let finished = false;
       const finish = (cause?: Error) => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener('abort', cancel); cause ? reject(cause) : resolve(); };
       const cancel = () => finish(new Error('电脑交互锁等待已取消'));
-      const timer = setTimeout(() => { child.kill(); finish(new Error('电脑交互锁等待超时')); }, timeoutMs);
+      const timer = setTimeout(() => { child.kill(); finish(new Error('电脑交互资源等待超时')); }, policy?.waitMs ?? timeoutMs);
       child.stdout.on('data', chunk => { output += String(chunk); if (output.includes('ready')) finish(); });
       child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-1500); });
       child.once('error', cause => finish(cause));
@@ -35,10 +47,13 @@ export async function withDesktopInteraction<T>(timeoutMs: number, signal: Abort
     });
     signal?.removeEventListener('abort', abort);
     signal?.throwIfAborted();
-    const remaining = timeoutMs - (Date.now() - started);
+    policy?.onWaiting?.(false, Date.now() - started);
+    waiting = false;
+    const remaining = policy ? timeoutMs : timeoutMs - (Date.now() - started);
     if (remaining <= 0) throw new Error('电脑交互锁等待超时');
     return await action(remaining);
   } finally {
+    if (waiting) policy?.onWaiting?.(false, Date.now() - started);
     signal?.removeEventListener('abort', abort);
     child.stdin.end();
     if (child.exitCode === null) {

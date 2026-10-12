@@ -28,7 +28,7 @@ function observeExecution(pending: Promise<unknown>) {
     console.error(error); process.exitCode = 1; finished = true; releaseWorkerWhenClosed();
   });
 }
-process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string; attemptId?: string; method?: string; params?: Record<string, unknown> }) => {
+process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string; attemptId?: string; method?: string; params?: Record<string, unknown>; debug?: EngineOptions['debug'] }) => {
   if (message.type === 'browser-tool') {
     controls++;
     void (async () => {
@@ -82,7 +82,7 @@ process.on('message', (message: { type: string; requestId?: string; pickId?: str
     let error: string | undefined;
     try {
       if (!engine || !finished) throw new Error('任务执行器尚未就绪或正在运行');
-      const pending = engine.runSingleStep(message.stepId!, message.workflow!, message.attemptId);
+      const pending = engine.runSingleStep(message.stepId!, message.workflow!, message.attemptId, message.debug);
       finished = false;
       observeExecution(pending);
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }

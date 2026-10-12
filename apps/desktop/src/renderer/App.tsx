@@ -347,6 +347,8 @@ export function App() {
   const [draftTexts, setDraftTexts] = useState<Record<string, Record<string, string>>>({});
   const [storageIssues, setStorageIssues] = useState<StorageIssue[]>([]);
   const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
+  const [breakpoints, setBreakpoints] = useState<Record<string, string[]>>({});
+  const [attempts, setAttempts] = useState<import('../../../../packages/contracts/src/index.js').RunAttempt[]>([]);
   const draftQueue = useRef<Promise<unknown>>(Promise.resolve());
   const flushDrafts = useRef<() => Promise<void>>(async () => {});
   const firstDraftEditAt = useRef<number | undefined>(undefined);
@@ -378,6 +380,7 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [deleteNotice, setDeleteNotice] = useState<{ workflowId: string; count: number }>();
   const [dataDir, setDataDir] = useState("");
+  const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [downloadDir, setDownloadDir] = useState("");
   const [demoUrl, setDemoUrl] = useState("");
   const [saved, setSaved] = useState<Record<string, string>>({});
@@ -512,6 +515,7 @@ export function App() {
     }).catch(() => { /* Missing historical context never borrows names from the current draft. */ });
     return () => { disposed = true; };
   }, [runId, run?.revision, run?.stepId]);
+  useEffect(() => { if (!api || !runId) { setAttempts([]); return; } let alive = true; void api.listAttempts(runId).then(value => { if (alive) setAttempts(value); }).catch(cause => setError(String(cause))); return () => { alive = false; }; }, [runId, run?.attemptId, run?.status]);
   const recoveryKey = recovery && `${runId}:${run?.status}:${recovery.stepId ?? ""}`;
   useEffect(() => {
     if (!recoveryKey) return;
@@ -592,6 +596,7 @@ export function App() {
           ),
         );
         setDataDir(state.dataDir);
+        setMaxConcurrent(state.maxConcurrent ?? 2);
         setDownloadDir(state.defaultDownloadDir);
         setDemoUrl(state.demoUrl);
       })
@@ -616,7 +621,8 @@ export function App() {
     void api.getStorageIssues().then(setStorageIssues).catch(cause => setError(String(cause)));
     const offIssues = api.onStorageIssues(setStorageIssues);
     const offFlush = api.onFlushDrafts(() => flushDrafts.current());
-    return () => { offIssues(); offFlush(); };
+    const offFocus = api.onFocusRun(id => { setRunScope('all'); setRunId(id); setView('editor'); setRightPane('run'); setPanels(previous => ({ ...previous, right: true })); });
+    return () => { offIssues(); offFlush(); offFocus(); };
   }, []);
   flushDrafts.current = async () => {
     if (!api || loading) return;
@@ -813,6 +819,14 @@ export function App() {
       setBusy("");
     }
   }
+  async function startDebug(fromStepId?: string) {
+    if (!api || !workflow || busy) return; setBusy('debug'); setError('');
+    try {
+      const checks = await api.preflight(workflow); setPreflightIssues(checks); if (checks.some(issue => issue.level === 'error')) throw new Error('请修正运行前检查错误');
+      const persisted = await api.saveWorkflow(workflow); setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) }));
+      const snapshot = await api.debugRun(persisted, breakpoints[workflowId] ?? [], fromStepId); setRunId(snapshot.runId); setRuns(previous => [snapshot, ...previous.filter(run => run.runId !== snapshot.runId)]); showRunPanel();
+    } catch (error) { catchError(error); } finally { setBusy(''); }
+  }
 
   async function runSingleStep(stepId: string) {
     if (!api || !workflow || cannotRunStep) return;
@@ -854,7 +868,7 @@ export function App() {
       actionType: action.type,
       params: clone(action.defaults),
       ...(["core.wait", "core.note"].includes(action.type) ? {} : { timeoutMs: 30000 }),
-      ...(action.type === "core.note" ? {} : { onError: "fail" as const }),
+      ...(action.type === "core.note" ? {} : { onError: action.safeToRetry ? 'fail' as const : 'manual' as const }),
       ...(["control.if", "control.forEach", "control.forEachXlsx", "control.tryCatch"].includes(action.type) ? { children: [] } : {}),
       ...(["control.if", "control.tryCatch"].includes(action.type) ? { elseSteps: [] } : {}),
     };
@@ -1041,7 +1055,7 @@ export function App() {
           <button
             className="top-run-control"
             title={`控制当前流程的所选运行${run?.workflowId === workflowId ? ` · ${run.runId.slice(0, 8)}` : ""}；当前步骤完成后暂停`}
-            disabled={!currentActiveRun || !!busy || run?.status === "queued"}
+            disabled={!currentActiveRun || !!busy || run?.status === "queued" || run?.manualDecisionRequired}
             onClick={() =>
               void control(
                 run?.status === "paused" || run?.status === "waiting_manual"
@@ -1275,6 +1289,8 @@ export function App() {
                   />
                   <small>Python 步骤调用本地环境，不自动安装依赖。</small>
                 </label>
+                <label className="field"><span>操作电脑前的用户空闲时间（秒）</span><input type="number" min="0" max="60" value={(workflow.settings.foregroundIdleMs ?? 3000) / 1000} disabled={!!busy} onChange={event => updateWorkflow(value => ({ ...value, settings: { ...value.settings, foregroundIdleMs: Number(event.target.value) * 1000 } }))}/></label>
+                <label className="field"><span>前台资源最长等待（分钟）</span><input type="number" min="1" max="60" value={(workflow.settings.foregroundWaitMs ?? 900000) / 60000} disabled={!!busy} onChange={event => updateWorkflow(value => ({ ...value, settings: { ...value.settings, foregroundWaitMs: Number(event.target.value) * 60000 } }))}/><small>等待不消耗动作超时。用户输入或窗口变化后，请检查现场并选择人工恢复决策。Ctrl+Alt+F12 停止全部任务。</small></label>
                 {dataDir && (
                   <div className="environment-info">
                     <span>本地数据目录</span>
@@ -1411,6 +1427,7 @@ export function App() {
               <IconButton label="撤销编辑" title="撤销编辑（Ctrl+Z；输入框内使用文本撤销）" disabled={!canUndo || !!busy} onClick={() => restoreEdit("undo")}><Undo2 size={16} /></IconButton>
               <IconButton label="重做编辑" title="重做编辑（Ctrl+Y 或 Ctrl+Shift+Z）" disabled={!canRedo || !!busy} onClick={() => restoreEdit("redo")}><Redo2 size={16} /></IconButton>
             </div>
+            <details className="debug-tools"><summary>调试</summary><div><button disabled={!!busy || workflowRunning} onClick={() => void startDebug()}>按断点调试</button><button disabled={!!busy || workflowRunning || !workflow?.steps.some(step => step.stepId === selectedId)} onClick={() => void startDebug(selectedId)}>从选中顶层步骤调试</button><button disabled={!selectedId || !!busy} onClick={() => setBreakpoints(previous => { const current = previous[workflowId] ?? []; return { ...previous, [workflowId]: current.includes(selectedId) ? current.filter(id => id !== selectedId) : [...current, selectedId] }; })}>{breakpoints[workflowId]?.includes(selectedId) ? '取消当前断点' : '设置当前断点'}</button><p>断点：{breakpoints[workflowId]?.map(id => steps.find(item => item.step.stepId === id)?.step.name ?? id).join('、') || '无'}</p></div></details>
             <button
               className="text-button"
               disabled={!workflow}
@@ -1919,12 +1936,13 @@ export function App() {
                         onChange={(event) =>
                           updateSelected((step) => ({
                             ...step,
-                            onError: event.target.value as "fail" | "pause" | "continue",
+                            onError: event.target.value as StepDefinition['onError'],
                           }))
                         }
                       >
                         <option value="fail">结束运行并记录错误</option>
                         <option value="continue">忽略失败，继续执行</option>
+                        <option value="manual">等待人工选择重做、确认或跳过</option>
                         <option
                           value="pause"
                           disabled={!selectedAction?.safeToRetry}
@@ -1933,6 +1951,8 @@ export function App() {
                         </option>
                       </select>
                     </label>
+                    {['control.forEach', 'control.forEachXlsx'].includes(selected.step.actionType) && <label className="field"><span>续跑业务键模板</span><input aria-label="续跑业务键模板" value={String(selected.step.params.progressKey ?? '')} placeholder="例如 {{item.orderId}} 或 {{row}}[0]" disabled={!!busy} onChange={event => setParam('progressKey', event.target.value || undefined)}/><small>每项必须产生唯一非空文本或数字；完成后记录进度，重启检查后可续跑。</small></label>}
+                    <JsonEditor label="恢复前检查（JSON步骤数组）" value={selected.step.recoveryChecks ?? []} disabled={!!busy} onValidity={valid => markValid('recovery-checks', valid)} onChange={value => updateSelected(step => ({ ...step, recoveryChecks: value as StepDefinition[] }))} hint="仅允许读取或校验动作；配置检查步骤和输出变量后，可在等待人工时执行。"/>
                     <label className="field">
                       <span>最多尝试次数</span>
                       <input
@@ -2148,16 +2168,20 @@ export function App() {
                 {run.workflowId !== workflowId && <span className="run-other-flow">正在查看其他流程</span>}</>
                 : <span>{runScope === "workflow" ? `「${workflow?.name ?? "当前流程"}」尚无运行记录` : "选择一条运行记录查看执行情况"}</span>}
             </div>
+            {run?.waitingReason && <p className="resource-wait" role="status">{run.waitingReason}</p>}
+            {run?.debug && run.status === 'paused' && <div className="run-debug-actions"><button disabled={!!busy} onClick={() => void control('step')}>执行下一步</button><button disabled={!!busy} onClick={() => void control('resume')}>继续调试</button></div>}
+            {run?.status === 'waiting_manual' && <details className="manual-decisions"><summary>人工恢复决策</summary><div><button disabled={!!busy} onClick={() => void control('check')}>执行恢复检查</button><button disabled={!!busy} onClick={() => { if (confirm('已确认本步骤的业务结果完成？该操作不会自动生成缺失的输出变量。')) void control('confirm'); }}>确认已完成并继续</button><button disabled={!!busy} onClick={() => { if (confirm('明确重新执行可能产生外部效果的步骤？请先检查已有结果。')) void control('retry'); }}>明确重新执行</button><button disabled={!!busy} onClick={() => { if (confirm('跳过该步骤并记录警告？该业务项仍需核对。')) void control('skip'); }}>跳过并记录警告</button></div></details>}
+            {run && terminalStatuses.has(run.status) && <details className="attempt-tools"><summary>执行尝试与数据续跑 · {attempts.length} 次</summary><button disabled={!!busy} onClick={() => { if (!confirm('使用原修订和原输入重建会话？未知业务项需要检查后决定，未配置业务键的流程无法续跑。')) return; setBusy('recover'); void api?.recoverRun(run.runId).then(snapshot => { setRunId(snapshot.runId); setRuns(previous => [snapshot, ...previous]); showRunPanel(); }).catch(catchError).finally(() => setBusy('')); }}>检查后建立数据续跑</button>{attempts.map(attempt => <details key={attempt.attemptId}><summary>{new Date(attempt.run.startedAt).toLocaleString('zh-CN')} · v{attempt.run.revision} · {statusLabels[attempt.run.status]} · {attempt.attemptId.slice(0, 8)}</summary><pre>{JSON.stringify({ steps: attempt.workflow.steps, warnings: attempt.run.warnings, variables: attempt.run.variables }, null, 2)}</pre></details>)}</details>}
             {!!run?.warningCount && <details className="run-warning"><summary>完成但有警告 · {run.warningCount} 项</summary>{run.warnings?.map((warning, index) => <p key={index}><button onClick={() => locateRunStep(warning.stepId)}>{warning.stepName}</button>：{warning.message}</p>)}</details>}
             {recovery && run && <div className="run-recovery" role="region" aria-label="运行恢复">
               <div className="run-recovery-copy"><strong>{recovery.canResume ? "需要人工处理" : run.status === "interrupted" ? "运行已中断" : "运行失败"}{recovery.stepId ? ` · ${stepNames.get(recovery.stepId) ?? recovery.stepId}` : ""}</strong>
                 <p title={run.error ?? recovery.reason}>{recovery.reason}</p>
-                <small>{recovery.canResume ? "处理后继续会重试失败指令，使用本次运行参数；修改草稿须停止后重跑。" : "修改草稿后重新运行将从头开始；单条运行只执行该指令。"}</small>
+                <small>{run.manualDecisionRequired ? "指令可能部分完成，请先检查现场，再展开人工恢复决策。" : recovery.canResume ? "处理后继续会重试失败指令，使用本次运行参数；修改草稿须停止后重跑。" : "修改草稿后重新运行将从头开始；单条运行只执行该指令。"}</small>
               </div>
               <div className="run-recovery-actions">
                 {recovery.stepId && <button disabled={!!busy} onClick={() => locateRunStep(recovery.stepId!)}>定位失败步骤</button>}
                 {run.browserOpen && runWorkflow && !runWorkflow.settings.headless && <button disabled={!!busy} onClick={() => void control("show")}><Eye size={14} />显示浏览器</button>}
-                {recovery.canResume ? <button className="primary" disabled={!!busy} onClick={() => void control("resume")}><Play size={14} />处理后继续</button>
+                {recovery.canResume ? <button className="primary" disabled={!!busy || !!run.manualDecisionRequired} onClick={() => void control("resume")}><Play size={14} />{run.manualDecisionRequired ? "请选择恢复决策" : "处理后继续"}</button>
                   : <button disabled={!!busy || !workflows.some(flow => flow.workflowId === run.workflowId)} onClick={() => openWorkflow(run.workflowId)}>编辑后重新运行</button>}
               </div>
             </div>}
@@ -2245,6 +2269,7 @@ export function App() {
             </>
           )}
           <span className="footer-divider">·</span>JSON 流程 v1
+          <span className="footer-divider">·</span>并发上限 {maxConcurrent}
         </span>
       </footer>
     </div>

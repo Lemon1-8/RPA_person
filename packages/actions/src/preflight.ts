@@ -18,7 +18,7 @@ export async function preflight(input: WorkflowDefinition): Promise<PreflightIss
       const add = (level: 'error' | 'warning', message: string) => issues.push({ stepId: step.stepId, level, message });
       try {
         const action = getAction(step.actionType);
-        const refs = step.actionType === 'script.run' ? [] : references(step.params);
+        const refs = step.actionType === 'script.run' ? [] : references({ ...step.params, progressKey: undefined });
         for (const ref of refs) if (![...declared].some(name => name === ref || ref.startsWith(`${name}.`))) add('error', `变量尚未声明：${ref}`);
         const params = { ...step.params };
         for (const field of action.metadata.fields) if (references(params[field.key]).length) {

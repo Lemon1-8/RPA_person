@@ -4,7 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { strict as assert } from 'node:assert';
-import { runDesktopInput } from '../packages/engine/src/desktop-input.js';
+import { runDesktopInput as sendDesktopInput } from '../packages/engine/src/desktop-input.js';
+const runDesktopInput = (action: string, params: Record<string, unknown>) => sendDesktopInput(action, params, 30000, undefined, { idleMs: 0, waitMs: 10000 });
 
 if (process.platform !== 'win32') throw new Error('此冒烟测试需要 Windows 桌面会话');
 if (process.env.RPA_SKIP_DESKTOP_INTERACTION === '1') { console.warn('环境跳过：真实前台键鼠（RPA_SKIP_DESKTOP_INTERACTION=1）'); process.exit(0); }
@@ -36,19 +37,25 @@ try {
   await runDesktopInput('desktop.keyboardType', { text: '键鼠', delayMs: 0 });
   assert.equal(await search.inputValue(), '键鼠');
   await runDesktopInput('desktop.keyPress', { key: 'Control+A' });
+  await app.evaluate(({ clipboard }) => clipboard.writeText('用户原有剪贴板'));
   await runDesktopInput('desktop.keyboardType', { text: '粘贴成功', inputMode: 'paste' });
   assert.equal(await search.inputValue(), '粘贴成功');
+  assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), '用户原有剪贴板');
   await runDesktopInput('desktop.keyPress', { key: 'Control+A' });
   await runDesktopInput('desktop.keyboardType', { text: '纠正', simulateTypo: true, typoText: '错', delayMs: 15 });
   assert.equal(await search.inputValue(), '纠正');
   const destination = { x: x + 420, y: y + 180 };
-  const sampling = app.evaluate(({ screen }) => new Promise<Array<{ x: number; y: number }>>(resolveSamples => {
+  await app.evaluate(({ screen }) => {
     const points: Array<{ x: number; y: number }> = [];
     const timer = setInterval(() => points.push(screen.dipToScreenPoint(screen.getCursorScreenPoint())), 8);
-    setTimeout(() => { clearInterval(timer); resolveSamples(points); }, 1500);
-  }));
+    (globalThis as any).rpaInputSamples = { points, timer };
+  });
   await runDesktopInput('desktop.mouseMove', { ...destination, humanLike: true });
-  const samples = await sampling;
+  const samples = await app.evaluate(() => {
+    const samples = (globalThis as any).rpaInputSamples;
+    clearInterval(samples.timer); delete (globalThis as any).rpaInputSamples;
+    return samples.points as Array<{ x: number; y: number }>;
+  });
   const distance = Math.hypot(destination.x - x, destination.y - y);
   const maxArc = Math.max(...samples.map(point =>
     Math.abs((destination.x - x) * (point.y - y) - (destination.y - y) * (point.x - x)) / distance));

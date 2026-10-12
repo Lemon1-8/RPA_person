@@ -31,6 +31,7 @@ export interface WorkbenchApi {
   retryStorage(): Promise<StorageIssue[]>;
   onStorageIssues(listener: (issues: StorageIssue[]) => void): () => void;
   onFlushDrafts(listener: () => Promise<void>): () => void;
+  onFocusRun(listener: (runId: string) => void): () => void;
   preflight(workflow: WorkflowDefinition): Promise<PreflightIssue[]>;
   pickBrowserElement(runId: string, pageId: string, requestId: string): Promise<BrowserElementCapture | null>;
   cancelBrowserElement(runId: string, requestId: string): Promise<void>;

@@ -2271,3 +2271,12 @@ button.danger { color: var(--danger); }
 .script-code textarea { flex: 1; min-width: 0; line-height: 20px; }
 .script-editor.expanded .script-code { height: 65%; }
 .script-tools button { font-size: 12px; min-height: 28px; }
+.debug-tools { position: relative; font-size: 12px; }
+.debug-tools summary { cursor: pointer; padding: 8px; }
+.debug-tools > div { position: absolute; top: 100%; right: 0; width: 290px; padding: 12px; display: grid; gap: 8px; z-index: 10; background: white; border: 1px solid #c7dcd7; box-shadow: 0 4px 14px #18223826; }
+.manual-decisions, .attempt-tools { margin: 6px 10px; font-size: 12px; flex-shrink: 0; max-height: 140px; overflow: auto; }
+.manual-decisions > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.manual-decisions button, .run-debug-actions button { font-size: 12px; min-height: 28px; padding: 3px 6px; }
+.resource-wait { padding: 6px 12px; margin: 0; font-size: 12px; color: #765200; background: #fff6d7; }
+.attempt-tools pre { max-height: 240px; overflow: auto; }
+.manual-decisions { margin: 0 6px; line-height: 18px; }

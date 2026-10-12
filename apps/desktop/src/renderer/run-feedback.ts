@@ -7,6 +7,7 @@ export function explainError(cause: unknown): { message: string; detail?: string
   const waitTimeout = /locator\.waitFor: Timeout (\d+)ms exceeded/.exec(message);
   if (waitTimeout) message = `等待网页元素超时（${waitTimeout[1]} 毫秒）。请检查选择器和目标网页，或先完成登录。`;
   else if (/\b(?:EACCES|EPERM)\b/.test(message)) message = '所选路径无法访问。请更换目录或调整访问权限后重试。';
+  else if (message.includes('INPUT_INTERRUPTED')) message = '已让出键鼠：检测到用户操作或目标窗口变化。步骤可能部分完成，请检查业务结果后明确选择继续方式。';
   return { message: message || '操作未完成，请重试。', detail: message !== detail ? detail : undefined };
 }
 

@@ -2,10 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { desktopElementSchema, type DesktopElementRef, type DesktopElementSnapshot, type DesktopElementValidation } from '../../contracts/src/index.js';
 import { runDesktopInputUnlocked } from '../../engine/src/desktop-input.js';
-import { withDesktopInteraction } from './interaction-lock.js';
+import { withDesktopInteraction, type InputPolicy } from './interaction-lock.js';
 import { windowsHostScript } from './host.js';
 
 export class WindowsSession {
+  constructor(private inputPolicy: InputPolicy = { idleMs: 3000, waitMs: 900000 }) {}
   private child?: ChildProcessWithoutNullStreams;
   private sequence = 0;
   private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
@@ -52,26 +53,27 @@ export class WindowsSession {
     });
   }
   call(method: string, params: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal): Promise<unknown> {
-    const deadline = Date.now() + timeoutMs;
+    let deadline = Date.now() + timeoutMs;
     const abort = new AbortController();
     this.operations.add(abort);
     const cancel = () => abort.abort(new Error('Windows 元素操作已取消'));
     let rejectAbort!: () => void;
     const cancelled = new Promise<never>((_resolve, reject) => { rejectAbort = () => reject(abort.signal.reason); abort.signal.addEventListener('abort', rejectAbort, { once: true }); });
-    const timer = setTimeout(() => abort.abort(new Error(`Windows 元素操作超时（${timeoutMs} ms）`)), timeoutMs);
+    let timer = setTimeout(() => abort.abort(new Error(`Windows 元素操作超时（${timeoutMs} ms）`)), timeoutMs);
     signal?.addEventListener('abort', cancel, { once: true });
     if (signal?.aborted) cancel();
     const operation = this.queue.then(async () => {
       abort.signal.throwIfAborted();
       const remaining = () => { const value = deadline - Date.now(); if (value <= 0) throw new Error('Windows 元素操作排队超时'); return value; };
       if (['windows.click', 'windows.fill'].includes(method) && params.mode === 'simulate') {
+        clearTimeout(timer);
         return withDesktopInteraction(remaining(), abort.signal, async () => {
           const point = await this.request('prepare', { element: params.element, focus: method === 'windows.fill' }, remaining(), abort.signal) as { x: number; y: number; expectedWindow: number };
           if (method === 'windows.fill') {
             await runDesktopInputUnlocked('desktop.elementFill', { ...point, text: params.value, append: params.append }, remaining(), abort.signal);
           } else await runDesktopInputUnlocked('desktop.mouseClick', { ...point, button: 'left', clickCount: 1, humanLike: true }, remaining(), abort.signal);
           return { ok: true };
-        });
+        }, { ...this.inputPolicy, onWaiting: (waiting, elapsed) => { if (!waiting) { deadline += elapsed; timer = setTimeout(() => abort.abort(new Error('Windows 模拟操作超时')), Math.max(1, deadline - Date.now())); } this.inputPolicy?.onWaiting?.(waiting, elapsed); } });
       }
       return this.request(method, params, remaining(), abort.signal);
     });

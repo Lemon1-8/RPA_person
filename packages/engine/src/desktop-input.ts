@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import { withDesktopInteraction } from '../../windows/src/interaction-lock.js';
+import type { InputPolicy } from '../../windows/src/interaction-lock.js';
+import { inputGuardMembers } from '../../windows/src/input-guard.js';
+import { randomUUID } from 'node:crypto';
 
 const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
   $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
@@ -15,6 +17,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 
 public static class RpaDesktopInput {
+${inputGuardMembers}
   [StructLayout(LayoutKind.Sequential)] struct KeyInput {
     public ushort vk, scan;
     public uint flags, time;
@@ -46,20 +49,32 @@ public static class RpaDesktopInput {
   static IntPtr expectedWindow;
   public static void Guard(long handle) { expectedWindow = new IntPtr(handle); EnsureTarget(); }
   static void EnsureTarget() {
+    CheckOwnership();
     if (expectedWindow != IntPtr.Zero && GetForegroundWindow() != expectedWindow)
       throw new InvalidOperationException("UNAVAILABLE: 目标窗口已失去前台焦点，已停止模拟操作");
   }
 
   static void Cursor(int x, int y) {
-    if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法移动鼠标，请检查桌面会话");
+    EnsureTarget();
+    Input[] inputs = new Input[1]; inputs[0].type=0;
+    ownedX=x; ownedY=y;
+    inputs[0].data.mouse.x=(int)Math.Round((x-GetSystemMetrics(76))*65535.0/Math.Max(1,GetSystemMetrics(78)-1));
+    inputs[0].data.mouse.y=(int)Math.Round((y-GetSystemMetrics(77))*65535.0/Math.Max(1,GetSystemMetrics(79)-1));
+    inputs[0].data.mouse.flags=0xC001;
+    inputs[0].data.mouse.extra=new IntPtr((long)ownerMarker.ToUInt64());
+    if(SendInput(1,inputs,Marshal.SizeOf(typeof(Input)))!=1) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法移动鼠标，请检查桌面会话");
   }
   static void Mouse(uint flags, int value = 0) {
+    EnsureTarget();
+    if ((flags & 0x02)!=0) heldMouse |= 0x04; if ((flags & 0x08)!=0) heldMouse |= 0x10; if ((flags & 0x20)!=0) heldMouse |= 0x40;
     Input[] inputs = new Input[1];
     inputs[0].type = 0;
     inputs[0].data.mouse.data = unchecked((uint)value);
     inputs[0].data.mouse.flags = flags;
+    inputs[0].data.mouse.extra = new IntPtr((long)ownerMarker.ToUInt64());
     if (SendInput(1, inputs, Marshal.SizeOf(typeof(Input))) != 1)
       throw new Win32Exception(Marshal.GetLastWin32Error(), "鼠标操作失败，请检查桌面会话权限");
+    heldMouse &= ~flags;
   }
   public static void Probe() { }
   public static void Move(int x, int y, bool humanLike) {
@@ -85,12 +100,12 @@ public static class RpaDesktopInput {
       double inverse = 1 - eased;
       Cursor((int)Math.Round(inverse * inverse * inverse * start.x + 3 * inverse * inverse * eased * c1x + 3 * inverse * eased * eased * c2x + eased * eased * eased * x),
         (int)Math.Round(inverse * inverse * inverse * start.y + 3 * inverse * inverse * eased * c1y + 3 * inverse * eased * eased * c2y + eased * eased * eased * y));
-      if (frame < frames) Thread.Sleep(duration / frames);
+      if (frame < frames) Pause(duration / frames);
     }
   }
   public static void Click(int x, int y, string button, int count, bool humanLike) {
     Move(x, y, humanLike);
-    if (humanLike) Thread.Sleep(70);
+    if (humanLike) Pause(70);
     EnsureTarget();
     if (expectedWindow != IntPtr.Zero && GetAncestor(WindowFromPoint(new Point { x=x, y=y }),2) != expectedWindow)
       throw new InvalidOperationException("UNAVAILABLE: 点击位置已被遮挡或目标窗口已移动");
@@ -98,16 +113,17 @@ public static class RpaDesktopInput {
     uint up = button == "right" ? 0x0010u : button == "middle" ? 0x0040u : 0x0004u;
     for (int i = 0; i < count; i++) {
       Mouse(down);
+      if(expectedWindow==IntPtr.Zero) { initialForeground=GetAncestor(WindowFromPoint(new Point { x=x, y=y }),2); if(cancelEvent.WaitOne(30)) throw new InvalidOperationException("INPUT_CANCELLED: 电脑输入已取消"); }
       Mouse(up);
-      if (i + 1 < count) Thread.Sleep(80);
+      if (i + 1 < count) Pause(80);
     }
   }
   public static void Wheel(int dx, int dy) {
     if (dy != 0) Mouse(0x0800u, dy);
     if (dx != 0) Mouse(0x1000u, dx);
   }
-  static void KeyDown(byte key) { keybd_event(key, 0, 0, UIntPtr.Zero); }
-  static void KeyUp(byte key) { keybd_event(key, 0, 2, UIntPtr.Zero); }
+  static void KeyDown(byte key) { EnsureTarget(); heldKeys.Add(key); keybd_event(key, 0, 0, ownerMarker); }
+  static void KeyUp(byte key) { keybd_event(key, 0, 2, ownerMarker); heldKeys.Remove(key); }
   static byte KeyCode(string value, out bool shift) {
     shift = false;
     if (value.Length == 1) {
@@ -169,24 +185,27 @@ public static class RpaDesktopInput {
       inputs[0].type = 1;
       inputs[0].data.key.scan = character;
       inputs[0].data.key.flags = 0x0004u;
+      inputs[0].data.key.extra = new IntPtr((long)ownerMarker.ToUInt64());
       inputs[1].type = 1;
       inputs[1].data.key.scan = character;
       inputs[1].data.key.flags = 0x0006u;
+      inputs[1].data.key.extra = new IntPtr((long)ownerMarker.ToUInt64());
       if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2)
         throw new Win32Exception(Marshal.GetLastWin32Error(), "键盘输入失败，请检查前台窗口权限或锁屏状态");
-      if (delayMs > 0) Thread.Sleep(delayMs);
+      if (delayMs > 0) Pause(delayMs);
     }
   }
   public static void Backspace(int count) {
-    for (int i = 0; i < count; i++) { Press("Backspace"); Thread.Sleep(45); }
+    for (int i = 0; i < count; i++) { Press("Backspace"); Pause(45); }
   }
   public static void Paste(string text) {
     Press("Control+V");
-    Thread.Sleep(120);
+    Pause(120);
   }
 }
 '@
   $p = $payload.params
+  [RpaDesktopInput]::BeginOwnership([string]$payload.cancelEvent)
   if ($null -ne $p.expectedWindow) { [RpaDesktopInput]::Guard([long]$p.expectedWindow) }
   switch ($payload.action) {
     'probe' { [RpaDesktopInput]::Probe() }
@@ -212,7 +231,12 @@ public static class RpaDesktopInput {
       }
       if ($p.inputMode -eq 'paste') {
         if ([string]$p.text -ne '') {
+          Add-Type -AssemblyName System.Windows.Forms
+          $originalClipboard = New-Object System.Windows.Forms.DataObject
+          $originalData = [System.Windows.Forms.Clipboard]::GetDataObject()
+          if ($null -ne $originalData) { foreach ($format in $originalData.GetFormats($false)) { $originalClipboard.SetData($format, $false, $originalData.GetData($format, $false)) } }
           Set-Clipboard -Value ([string]$p.text)
+          $ownedClipboardSequence = [RpaDesktopInput]::GetClipboardSequenceNumber()
           [RpaDesktopInput]::Paste([string]$p.text)
         }
       }
@@ -223,12 +247,22 @@ public static class RpaDesktopInput {
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
   exit 1
+} finally {
+  if ($null -ne $originalClipboard -and [RpaDesktopInput]::GetClipboardSequenceNumber() -eq $ownedClipboardSequence) { try { [System.Windows.Forms.Clipboard]::SetDataObject($originalClipboard, $true) } catch {} }
+  if ('RpaDesktopInput' -as [type]) { [RpaDesktopInput]::EndOwnership() }
 }
 `;
 
 /** Send input to the foreground Windows desktop, never through a browser session. */
-export function runDesktopInput(action: string, params: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal): Promise<{ ok: true }> {
-  return withDesktopInteraction(timeoutMs, signal, remaining => runDesktopInputUnlocked(action, params, remaining, signal));
+export function runDesktopInput(action: string, params: Record<string, unknown>, timeoutMs = 30_000, signal?: AbortSignal, policy?: InputPolicy): Promise<{ ok: true }> {
+  if (action === 'probe') return runDesktopInputUnlocked(action, params, timeoutMs, signal);
+  if (action === 'desktop.keyPress' && typeof params.key === 'string') {
+    const parts = params.key.split('+').filter(Boolean).map(value => value.trim()); const last = parts.at(-1) ?? '';
+    const keys = new Set(['enter','return','tab','escape','esc','backspace','delete','del','insert','space','home','end','pageup','pagedown','arrowleft','left','arrowup','up','arrowright','right','arrowdown','down']);
+    if (last.length !== 1 && !keys.has(last.toLowerCase()) && !/^F(?:[1-9]|1\d|2[0-4])$/i.test(last)) return Promise.reject(new Error(`不支持的按键：${last}`));
+    if (parts.slice(0, -1).some(value => !['control','ctrl','controlormeta','shift','alt','meta','win','windows'].includes(value.toLowerCase()))) return Promise.reject(new Error('不支持的修饰键'));
+  }
+  return withDesktopInteraction(timeoutMs, signal, remaining => runDesktopInputUnlocked(action, params, remaining, signal), policy ?? { idleMs: 3000, waitMs: 900000 });
 }
 
 /** Caller must own the desktop interaction lock while activating and sending input. */
@@ -236,26 +270,36 @@ export function runDesktopInputUnlocked(action: string, params: Record<string, u
   if (process.platform !== 'win32') return Promise.reject(new Error('电脑键鼠操作仅支持 Windows'));
   if (signal?.aborted) return Promise.reject(new Error('电脑键鼠操作已取消'));
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+    const loader = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::InputEncoding=New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); Invoke-Expression ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadLine())))";
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', Buffer.from(loader, 'utf16le').toString('base64')], {
       windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'],
     });
     let error = '';
+    const cancelEvent = `Local\\RpaInputCancel${randomUUID().replaceAll('-', '')}`;
+    let cancellation: Error | undefined; let killTimer: NodeJS.Timeout | undefined;
     let settled = false;
     const finish = (cause?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
       signal?.removeEventListener('abort', abort);
       if (cause) reject(cause); else resolve({ ok: true });
     };
-    const abort = () => { child.kill(); finish(new Error('电脑键鼠操作已取消')); };
-    const timer = setTimeout(() => { child.kill(); finish(new Error(`电脑键鼠操作超时（${timeoutMs} ms）`)); }, timeoutMs);
+    const cancel = (cause: Error) => {
+      if (cancellation) return; cancellation = cause;
+      const source = `$e=[System.Threading.EventWaitHandle]::OpenExisting('${cancelEvent}'); [void]$e.Set(); $e.Dispose()`;
+      const helper = spawn('powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(source,'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' }); helper.on('error', () => {});
+      killTimer = setTimeout(() => { child.kill(); }, 1500);
+    };
+    const abort = () => cancel(new Error('电脑键鼠操作已取消'));
+    const timer = setTimeout(() => cancel(new Error(`电脑键鼠操作超时（${timeoutMs} ms）`)), timeoutMs);
     child.stderr.on('data', data => { if (error.length < 4000) error += String(data); });
     child.stdin.on('error', cause => { if (!settled) { child.kill(); finish(cause); } });
     child.on('error', cause => finish(cause));
-    child.on('exit', code => finish(code === 0 ? undefined : new Error(error.trim() || `电脑键鼠操作失败（退出码 ${code}）`)));
+    child.on('exit', code => finish(cancellation ?? (code === 0 ? undefined : new Error(error.trim() || `电脑键鼠操作失败（退出码 ${code}）`))));
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    else child.stdin.end(JSON.stringify({ action, params }));
+    else child.stdin.end(`${Buffer.from(script, 'utf16le').toString('base64')}\n${JSON.stringify({ action, params, cancelEvent })}`);
   });
 }

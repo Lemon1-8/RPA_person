@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
 import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
+import { progressPath, readProgress, saveProgress, type BusinessProgress } from './progress.js';
 import { runDesktopInput } from './desktop-input.js';
 import { WindowsSession } from '../../windows/src/index.js';
 import type { DesktopElementRef } from '../../contracts/src/index.js';
@@ -16,7 +17,7 @@ import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type
 const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
 class ContainerTimeoutError extends Error {
   constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
@@ -97,6 +98,28 @@ export class WorkflowEngine {
   private stepNumbers = new Map<string, number>();
   private stepNames = new Map<string, string>();
   private elementPick?: { id: string; abort: AbortController };
+  private manualStep?: StepDefinition;
+  private manualDecision?: 'retry' | 'skip' | 'confirm';
+  private stepBudget = Infinity;
+  private progressScope: string[] = [];
+  private inputPolicy() {
+    return { idleMs: this.workflow.settings.foregroundIdleMs ?? 3000, waitMs: this.workflow.settings.foregroundWaitMs ?? 900000,
+      onWaiting: (waiting: boolean, elapsed: number) => {
+        if (waiting) this.snapshot.waitingReason = '等待前台资源及用户键鼠空闲';
+        else { delete this.snapshot.waitingReason; for (const deadline of this.deadlines) deadline.expiresAt += elapsed; }
+        this.state(this.snapshot.status);
+      } };
+  }
+  private debug?: EngineOptions['debug'];
+  private warn(step: StepDefinition, message: string) {
+    this.snapshot.warnings ??= []; this.snapshot.warnings.push({ stepId: step.stepId, stepName: step.name, message, at: new Date().toISOString() }); this.snapshot.warningCount = this.snapshot.warnings.length;
+  }
+  private async waitManual(step: StepDefinition, message: string): Promise<'retry' | 'skip' | 'confirm'> {
+    this.manualStep = step; this.manualDecision = undefined; this.snapshot.currentStepId = step.stepId; this.snapshot.error = message;
+    this.snapshot.manualDecisionRequired = !getAction(step.actionType).metadata.safeToRetry;
+    try { await this.waitForResume(true); return this.manualDecision ?? 'retry'; }
+    finally { this.manualStep = undefined; this.manualDecision = undefined; delete this.snapshot.manualDecisionRequired; }
+  }
   async browserTool(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === 'cancelElement') { const pick = this.elementPick; if (pick && pick.id === params.requestId) pick.abort.abort(); return null; }
     if (!this.executionFinished || !this.browser?.isOpen()) throw new Error('请先结束运行并保留浏览器');
@@ -108,6 +131,7 @@ export class WorkflowEngine {
     finally { if (this.elementPick?.abort === abort) this.elementPick = undefined; }
   }
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
+    this.debug = options.debug;
     this.workflow = workflowSchema.parse(workflow);
     validateActions(this.workflow);
     this.rebuildStepNumbers();
@@ -120,6 +144,7 @@ export class WorkflowEngine {
       scheduleId: options.scheduleId, scheduledFor: options.scheduledFor,
       variables: structuredClone(workflow.variables),
       attemptId: options.attemptId ?? randomUUID(), warnings: [], warningCount: 0,
+      resumedFromRunId: options.resumeFromRunId, debug: options.debug,
     };
   }
   getSnapshot(): RunSnapshot { return structuredClone(this.snapshot); }
@@ -181,6 +206,21 @@ export class WorkflowEngine {
       if (command === 'stop' || command === 'closeBrowser') await this.cancelBrowserPoint(this.pointPick.id);
       else throw new Error('请先完成或取消取点');
     }
+    if (command === 'check') {
+      const step = this.manualStep; if (!step) throw new Error('当前没有待处理的失败指令');
+      const failedId = this.snapshot.currentStepId;
+      try { for (const check of step.recoveryChecks ?? []) { const result = await this.withinStepScope(check, () => this.execute(check, validateActionParams(check.actionType, resolveValue(check.params, this.snapshot.variables) as Record<string, unknown>))); if (check.output) this.setVariable(check.output, result ?? null); this.emit({ type: 'log', stepId: step.stepId, message: `恢复检查：${check.name}`, data: result }); } }
+      finally { this.snapshot.currentStepId = failedId; this.state('waiting_manual'); }
+      return;
+    }
+    if (['retry', 'skip', 'confirm'].includes(command)) {
+      if (!this.manualStep) throw new Error('当前没有等待人工的指令');
+      this.manualDecision = command as 'retry' | 'skip' | 'confirm'; this.pauseRequested = false; this.resumeWaiter?.(); return;
+    }
+    if (command === 'step') {
+      if (this.manualStep || this.snapshot.status !== 'paused') throw new Error('单步只能用于调试暂停');
+      this.stepBudget = 1; this.pauseRequested = false; this.resumeWaiter?.(); return;
+    }
     if (command === 'closeBrowser') {
       if (!this.executionFinished) throw new Error('任务执行中，请先停止任务再关闭浏览器');
       await this.browser?.close();
@@ -193,6 +233,8 @@ export class WorkflowEngine {
       this.pauseRequested = true;
       this.emit({ type: 'log', message: '已请求暂停，将在当前步骤完成后保留现场。' });
     } else if (command === 'resume') {
+      if (this.manualStep && !getAction(this.manualStep.actionType).metadata.safeToRetry) throw new Error('请明确选择重新执行、确认完成或跳过，不能直接重试有外部效果的指令');
+      this.stepBudget = Infinity;
       this.pauseRequested = false; this.resumeWaiter?.();
     } else {
       if (!this.browser?.isOpen()) throw new Error('当前任务没有打开的浏览器');
@@ -377,7 +419,7 @@ export class WorkflowEngine {
         delete input.selector;
       }
       const params = validateActionParams(method, input);
-      this.windows ??= new WindowsSession();
+      this.windows ??= new WindowsSession(this.inputPolicy());
       return this.windows.call(method, params, timeoutMs, signal);
     }
     if (!method.startsWith('browser.')) throw new Error(`不支持的 RPC 方法：${method}`);
@@ -412,7 +454,7 @@ export class WorkflowEngine {
     const signal = this.stepAbort!.signal;
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType.startsWith('windows.')) return this.dispatch(step.actionType, params, timeout, signal);
-    if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal);
+    if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal, this.inputPolicy());
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
     if (step.actionType === 'core.note') return null;
     if (step.actionType === 'core.wait') {
@@ -512,15 +554,37 @@ export class WorkflowEngine {
             ? readXlsxArrayRows(String(params.path), String(params.sheetName ?? '')).rows
             : readXlsxRows(String(params.path), String(params.sheetName ?? '')).rows;
       } else items = params.items as unknown[];
+      let progress: BusinessProgress | undefined; let progressFile: string | undefined;
+      const progressKey = typeof params.progressKey === 'string' ? params.progressKey.trim() : '';
+      if (progressKey) {
+        const scope = [...this.progressScope, step.stepId]; progressFile = progressPath(this.options.dataDir, this.snapshot.runId, this.snapshot.attemptId!, scope);
+        if (this.options.resumeFromRunId && this.options.resumeFromAttemptId) progress = await readProgress(progressPath(this.options.dataDir, this.options.resumeFromRunId, this.options.resumeFromAttemptId, scope));
+        if (progress) items = progress.items;
+        const keys = items.map(item => { const value = resolveValue(progressKey, { ...this.snapshot.variables, [name]: item }); if (!['string','number'].includes(typeof value) || String(value).trim() === '') throw new Error('续跑业务键必须是非空文本或数字'); return String(value); });
+        if (new Set(keys).size !== keys.length) throw new Error('续跑业务键重复，不能可靠识别已处理项目');
+        if (progress && JSON.stringify(keys) !== JSON.stringify(progress.keys)) throw new Error('业务键模板与原输入不一致，禁止续跑');
+        progress ??= { items, keys, completed: [], pending: [] }; await saveProgress(progressFile, progress);
+      }
       if (items.length > 10_000) throw new Error('循环最多支持 10000 行，请缩小工作表范围');
       const had = Object.hasOwn(this.snapshot.variables, name); const previous = this.snapshot.variables[name];
       let count = 0;
       try {
         await this.withinDeadline(step, async () => {
-          for (const item of items) {
+          for (const [index, item] of items.entries()) {
             await yieldLoop(); this.checkStop(); this.remainingTimeout(timeout);
             this.setVariable(name, item);
-            await this.executeSteps(step.children ?? []); count++;
+            const key = progress?.keys[index];
+            if (key && progress?.completed.includes(key)) { this.emit({ type: 'log', stepId: step.stepId, message: `续跑跳过已完成项目：${key}` }); count++; continue; }
+            if (key && progress?.pending.includes(key)) {
+              const decision = await this.waitManual(step, `业务项 ${key} 可能部分完成，请检查后确认完成、明确重做或停止。`);
+              if (decision === 'confirm') { progress.completed.push(key); progress.pending = progress.pending.filter(value => value !== key); await saveProgress(progressFile!, progress); count++; continue; }
+              if (decision === 'skip') { this.warn(step, `人工跳过未确认项目：${key}`); continue; }
+            }
+            const warnings = this.snapshot.warningCount ?? 0;
+            if (key && progress) { progress.pending = [...new Set([...progress.pending, key])]; await saveProgress(progressFile!, progress); this.progressScope.push(`${step.stepId}:${key}`); }
+            try { await this.executeSteps(step.children ?? []); count++; }
+            finally { if (key) this.progressScope.pop(); }
+            if (key && progress && warnings === this.snapshot.warningCount) { progress.completed.push(key); progress.pending = progress.pending.filter(value => value !== key); await saveProgress(progressFile!, progress); }
           }
         });
       } finally {
@@ -533,6 +597,7 @@ export class WorkflowEngine {
   private async executeSteps(steps: StepDefinition[]) {
     for (const step of steps) {
       await yieldLoop();
+      if (!step.disabled && this.debug?.breakpoints.includes(step.stepId)) this.pauseRequested = true;
       this.checkStop(); await this.waitForResume();
       this.remainingTimeout(30_000);
       if (step.disabled) {
@@ -554,10 +619,13 @@ export class WorkflowEngine {
             const result = await this.withinStepScope(step, async () => {
               this.emit({ type: 'step', stepId: step.stepId, status: 'running', message: step.name, data: this.stepData(step, { attempt }) });
               const input = { ...step.params };
+              const progressKey = input.progressKey; delete input.progressKey;
               if (step.actionType === 'browser.closePage' && input.closeMode === 'all') delete input.pageId;
               // Scripts use the SDK for variables; notes preserve all text literally.
               const raw = ['script.run', 'core.note'].includes(step.actionType) ? input : resolveValue(input, this.snapshot.variables) as Record<string, unknown>;
               const params = validateActionParams(step.actionType, raw);
+              if (progressKey !== undefined) params.progressKey = progressKey;
+              if (Number.isFinite(this.stepBudget)) { this.stepBudget--; if (this.stepBudget === 0) this.pauseRequested = true; }
               return this.execute(step, params);
             });
             this.checkStop();
@@ -593,18 +661,17 @@ export class WorkflowEngine {
             } catch { /* Capture failure must not replace the action error. */ }
           }
           if (step.onError === 'continue') {
-            this.snapshot.warnings ??= [];
-            this.snapshot.warnings.push({ stepId: step.stepId, stepName: step.name, message, at: new Date().toISOString() });
-            this.snapshot.warningCount = this.snapshot.warnings.length;
+            this.warn(step, message);
             this.emit({ type: 'log', stepId: step.stepId, message: '已忽略失败，继续执行后续指令。', data: this.stepData(step) });
             delete this.snapshot.error;
             this.state('running');
             completed = true;
             break;
           }
-          if (!this.errorBoundaryDepth && step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry) {
+          if (message.includes('INPUT_INTERRUPTED') || !this.errorBoundaryDepth && (step.onError === 'manual' || step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry)) {
             this.checkDeadline(error);
-            await this.waitForResume(true);
+            const decision = await this.waitManual(step, message);
+            if (decision !== 'retry') { if (decision === 'skip') this.warn(step, `人工跳过：${message}`); this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: decision === 'confirm' ? '人工确认已完成' : '人工跳过（有警告）', data: this.stepData(step) }); completed = true; }
           } else throw new StepExecutionError(step, error);
         }
       }
@@ -613,9 +680,11 @@ export class WorkflowEngine {
   run(): Promise<RunSnapshot> {
     if (this.consumed) throw new Error('每个执行器只能运行一次');
     this.consumed = true;
-    return this.runExecution(() => this.executeSteps(this.workflow.steps), false);
+    const start = this.debug?.fromStepId ? this.workflow.steps.findIndex(step => step.stepId === this.debug!.fromStepId) : 0;
+    if (start < 0) throw new Error('从指定位置运行只支持顶层步骤');
+    return this.runExecution(() => this.executeSteps(this.workflow.steps.slice(start)), false);
   }
-  runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow, attemptId?: string): Promise<RunSnapshot> {
+  runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow, attemptId?: string, debug?: EngineOptions['debug']): Promise<RunSnapshot> {
     if (this.pointPick) throw new Error('请先完成或取消取点');
     const workflow = workflowSchema.parse(input);
     validateActions(workflow);
@@ -649,6 +718,8 @@ export class WorkflowEngine {
     this.snapshot.workflowName = workflow.name;
     this.snapshot.revision = workflow.revision;
     this.snapshot.stepId = stepId;
+    delete this.options.resumeFromRunId; delete this.options.resumeFromAttemptId; delete this.snapshot.resumedFromRunId;
+    this.debug = debug; this.snapshot.debug = debug;
     if (attemptId) this.snapshot.attemptId = attemptId;
     this.consumed = true;
     const executeAt = (index: number): Promise<void> => index === path.length - 1
@@ -656,7 +727,8 @@ export class WorkflowEngine {
       : this.withinStepScope(path[index], () => executeAt(index + 1));
     return this.runExecution(async () => {
       if (this.browser && popupPolicyChanged) await this.browser.call('browser.popupGuard', { mode: workflow.settings.popupPolicy ?? 'smart' });
-      await executeAt(0);
+      if (debug?.fromStepId) { const start = workflow.steps.findIndex(step => step.stepId === debug.fromStepId); if (start < 0) throw new Error('调试起点必须是顶层步骤'); await this.executeSteps(workflow.steps.slice(start)); }
+      else await executeAt(0);
     }, true);
   }
   private async runExecution(execute: () => Promise<void>, keepBrowserOpen: boolean): Promise<RunSnapshot> {

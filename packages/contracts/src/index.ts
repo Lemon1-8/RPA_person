@@ -13,7 +13,7 @@ export interface StepDefinition {
   stepId: string; name: string; actionType: string; params: Record<string, unknown>; output?: string;
   disabled?: boolean;
   recoveryChecks?: StepDefinition[];
-  timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause' | 'continue';
+  timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause' | 'continue' | 'manual';
   variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
   desktopElements?: Record<string, DesktopElementRef>;
   settings?: { downloadDir?: string; pythonExecutable?: string };
@@ -64,6 +64,8 @@ export interface RunSnapshot {
   scheduleId?: string; scheduledFor?: string; stepId?: string;
   attemptId?: string; warnings?: RunWarning[]; warningCount?: number; waitingReason?: string;
   resumedFromRunId?: string; archived?: boolean;
+  debug?: { breakpoints: string[]; fromStepId?: string };
+  manualDecisionRequired?: boolean;
 }
 export interface RunEvent {
   type: 'run' | 'step' | 'log' | 'artifact'; runId: string; at: string; stepId?: string;
@@ -82,6 +84,7 @@ export interface BootstrapData {
   workflows: WorkflowDefinition[]; actions: ActionDefinition[]; runs: RunSnapshot[];
   schedules: WorkflowSchedule[];
   demoUrl: string; dataDir: string; defaultDownloadDir: string;
+  maxConcurrent?: number;
 }
 export interface DesktopApi extends WorkbenchApi {
   bootstrap(): Promise<BootstrapData>;
@@ -127,7 +130,7 @@ const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
     downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径').optional(),
     pythonExecutable: z.string().min(1).optional(),
   }).optional(),
-  onError: z.enum(['fail', 'pause', 'continue']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
+  onError: z.enum(['fail', 'pause', 'continue', 'manual']).optional(), children: z.array(stepSchema).optional(), elseSteps: z.array(stepSchema).optional(),
 }).transform(step => {
   if (step.actionType !== 'browser.click') return step;
   // Retired click options must disappear before variable resolution and storage comparisons.

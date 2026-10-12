@@ -1,4 +1,4 @@
-import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+import { dialog, globalShortcut, ipcMain, Notification, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { RunManager } from '../../runner/src/manager.js';
 import { preflight } from '../../../packages/actions/src/preflight.js';
@@ -7,6 +7,8 @@ export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserW
   const handle = (channel: string, action: (...args: any[]) => unknown) => ipcMain.handle(channel, (event, ...args) => { trusted(event); return action(...args); });
   handle('rpa:drafts', () => manager.store.listDrafts());
   handle('rpa:preflight', flow => preflight(flow));
+  handle('rpa:debug', (flow, breakpoints, fromStepId) => manager.debugRun(flow, breakpoints, fromStepId));
+  handle('rpa:recover', id => manager.recoverRun(id));
   handle('rpa:draft-save', draft => manager.store.saveDraft(draft));
   handle('rpa:draft-discard', id => manager.store.discardDraft(id));
   handle('rpa:revisions', id => manager.store.listRevisions(id));
@@ -26,6 +28,26 @@ export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserW
     await manager.store.exportEvents(id, result.filePath); return result.filePath;
   });
   manager.store.health.on('change', issues => window()?.webContents.send('rpa:storage-issues', issues));
+  const lastStatus = new Map<string, string>();
+  const notify = (title: string, body: string, runId?: string) => {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({ title, body });
+    notification.on('click', () => { window()?.show(); window()?.focus(); if (runId) window()?.webContents.send('rpa:focus-run', runId); }); notification.show();
+  };
+  manager.on('event', event => {
+    if (!event.run) return;
+    const key = `${event.run.attemptId ?? event.run.runId}:${event.run.status}:${event.run.currentStepId ?? ''}`;
+    if (lastStatus.get(event.runId) === key) return; lastStatus.set(event.runId, key);
+    if (['failed','waiting_manual','interrupted'].includes(event.run.status)) notify(`${event.run.workflowName} · ${event.run.status === 'waiting_manual' ? '等待人工' : '运行异常'}`, event.run.error ?? '请打开工作台查看运行记录', event.runId);
+  });
+  let notifiedIssues = new Set<string>();
+  manager.store.health.on('change', issues => { for (const issue of issues) if (!notifiedIssues.has(issue.id)) notify('运行记录或草稿保存失败', issue.message); notifiedIssues = new Set(issues.map((issue: { id: string }) => issue.id)); });
+  const emergency = () => { void manager.stopAll().catch(error => notify('紧急停止未完成', String(error))); };
+  if (!globalShortcut.register('Control+Alt+F12', emergency)) {
+    // A visible startup issue is retained without pretending this is a disk fault.
+    const getIssues = manager.store.issues.bind(manager.store);
+    manager.store.issues = () => [...getIssues(), ...(!globalShortcut.isRegistered('Control+Alt+F12') ? [{ id: 'emergency-shortcut', at: new Date().toISOString(), message: 'Ctrl+Alt+F12 紧急停止快捷键注册失败，请释放冲突后重新启动工作台。' }] : [])];
+  }
 }
 
 export function flushRendererDrafts(window: BrowserWindow | undefined): Promise<void> {

@@ -20,6 +20,7 @@ const api: DesktopApi = {
     const receive = (_event: Electron.IpcRendererEvent, token: string) => { void listener().then(() => ipcRenderer.send('rpa:drafts-flushed', token), error => ipcRenderer.send('rpa:drafts-flushed', token, String(error))); };
     ipcRenderer.on('rpa:flush-drafts', receive); return () => ipcRenderer.removeListener('rpa:flush-drafts', receive);
   },
+  onFocusRun: listener => { const receive = (_event: Electron.IpcRendererEvent, id: string) => listener(id); ipcRenderer.on('rpa:focus-run', receive); return () => ipcRenderer.removeListener('rpa:focus-run', receive); },
   preflight: flow => ipcRenderer.invoke('rpa:preflight', flow),
   pickBrowserElement: (runId, pageId, requestId) => ipcRenderer.invoke('rpa:element-pick', runId, pageId, requestId),
   cancelBrowserElement: (runId, requestId) => ipcRenderer.invoke('rpa:element-cancel', runId, requestId),
