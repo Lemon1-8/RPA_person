@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell, Tray } from 'electron';
 import { resolve, join, dirname, basename, isAbsolute } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { actionDefinitions } from '../../../packages/actions/src/index.js';
@@ -7,6 +7,7 @@ import { createDemoWorkflow } from '../../../examples/demo.js';
 import { startFixtureServer } from '../../../tests/fixtures/server.js';
 import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
 import { DesktopElementService } from './desktop-elements.js';
+import { createApplicationIcon } from './icons.js';
 import { registerWorkbenchIpc, flushRendererDrafts } from './workbench-ipc.js';
 import type { DesktopPoint, RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
@@ -146,6 +147,7 @@ else {
     window = new BrowserWindow({
       width: 1480, height: 940, minWidth: 1040, minHeight: 680, show: false, backgroundColor: '#f6f7f8',
       title: 'Personal RPA · 自动化工作台',
+      icon: createApplicationIcon('window'),
       webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
     window.setMenuBarVisibility(false);
@@ -153,7 +155,7 @@ else {
     window.webContents.on('will-navigate', event => event.preventDefault());
     window.on('close', event => { if (!quitting) { event.preventDefault(); window?.hide(); } });
     window.once('ready-to-show', () => window?.show());
-    const icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAIElEQVQ4T2Nk+P//PwMlgImBQjDwHwwGjBoANQwYGBgAAHFtAx/iRA4gAAAAAElFTkSuQmCC');
+    const icon = createApplicationIcon();
     tray = new Tray(icon); tray.setToolTip('Personal RPA · 关闭窗口后继续运行');
     tray.setContextMenu(Menu.buildFromTemplate([{ label: '打开工作台', click: () => window?.show() }, { type: 'separator' }, { label: '退出并停止任务', click: () => app.quit() }]));
     tray.on('double-click', () => window?.show());

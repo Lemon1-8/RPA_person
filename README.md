@@ -27,6 +27,7 @@ npm start
 
 开发模式：`npm run dev`，React 界面热更新；修改主进程／执行器后重新启动开发命令。
 
+桌面图标位于 `apps/desktop/assets/`，托盘提供 16–64 像素的多种缩放表示，窗口和任务栏使用 256 像素图片。修改 `icon.svg` 后运行 `node scripts/generate-desktop-icons.mjs` 生成 PNG，再构建并重新启动工作台。构建会复制图标资源；`node scripts/smoke-desktop-icons.mjs` 验证真实 Electron 解码、可见像素、缩放以及损坏或缺失资源，已纳入桌面冒烟测试。
 
 ### 第一次使用
 
