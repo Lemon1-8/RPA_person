@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   Braces,
@@ -70,6 +70,9 @@ import { LogViewer } from "./LogViewer.js";
 import { getBrowserPageErrors, getInheritedPageTarget } from "./page-options.js";
 import { editorReducer, emptyEditorState } from "./editor-history.js";
 import { explainError, runRecovery } from "./run-feedback.js";
+import { DraftContext } from './DraftContext.js';
+import { RevisionHistory } from './RevisionHistory.js';
+import type { WorkflowDraft, StorageIssue } from '../../../../packages/contracts/src/index.js';
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
 const terminalStatuses = new Set([
@@ -254,17 +257,25 @@ function JsonEditor({
   disabled?: boolean;
 }) {
   const serialized = JSON.stringify(value === undefined ? {} : value, null, 2);
-  const [draft, setDraft] = useState(serialized);
+  const drafts = useContext(DraftContext);
+  const draftKey = `${drafts.scope}:${label}`;
+  const [draft, setDraft] = useState(drafts.texts[draftKey] ?? serialized);
   const [error, setError] = useState("");
   const ownValue = useRef(serialized);
   useEffect(() => {
+    if (drafts.texts[draftKey] !== undefined) {
+      const text = drafts.texts[draftKey]; setDraft(text);
+      try { const parsed = JSON.parse(text); if (objectOnly && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) throw new Error(); setError(''); onValidity(true); }
+      catch { setError('JSON 格式无效，请检查引号、逗号及括号。'); onValidity(false); }
+      return;
+    }
     if (ownValue.current !== serialized) {
       setDraft(serialized);
       ownValue.current = serialized;
     }
     setError("");
     onValidity(true);
-  }, [serialized]);
+  }, [serialized, draftKey, drafts.texts[draftKey]]);
   return (
     <label className="field">
       <span>{label}</span>
@@ -278,6 +289,7 @@ function JsonEditor({
         onChange={(event) => {
           const text = event.target.value;
           setDraft(text);
+          drafts.write(draftKey, text);
           try {
             const parsed: unknown = JSON.parse(text);
             if (
@@ -290,6 +302,7 @@ function JsonEditor({
             ownValue.current = JSON.stringify(parsed, null, 2);
             setError("");
             onValidity(true);
+            drafts.write(draftKey, undefined);
             onChange(parsed);
           } catch (cause) {
             setError(
@@ -321,6 +334,12 @@ export function App() {
     } catch { return { left: true, right: true }; }
   });
   const [editorState, dispatchEditor] = useReducer(editorReducer, emptyEditorState);
+  const [pendingDrafts, setPendingDrafts] = useState<WorkflowDraft[]>([]);
+  const [draftTexts, setDraftTexts] = useState<Record<string, Record<string, string>>>({});
+  const [storageIssues, setStorageIssues] = useState<StorageIssue[]>([]);
+  const draftQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const flushDrafts = useRef<() => Promise<void>>(async () => {});
+  const firstDraftEditAt = useRef<number | undefined>(undefined);
   const workflows = editorState.workflows;
   const setWorkflows = (update: WorkflowDefinition[] | ((previous: WorkflowDefinition[]) => WorkflowDefinition[])) => dispatchEditor({ type: "sync", update });
   const [workflowId, setWorkflowId] = useState("");
@@ -529,7 +548,7 @@ export function App() {
     let mounted = true;
     const off = api.onEvent((event) => {
       if (!mounted) return;
-      setEvents((previous) => [...previous.slice(-3999), event]);
+      setEvents((previous) => [...previous, event]);
       if (event.data && typeof event.data === "object" && "workflow" in event.data) {
         const definition = event.data.workflow as WorkflowDefinition;
         if (definition?.workflowId && Array.isArray(definition.steps)) setRunWorkflows(previous => ({ ...previous, [event.runId]: definition }));
@@ -587,6 +606,41 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("rpa.panels", JSON.stringify(panels));
   }, [panels]);
+  useEffect(() => {
+    if (!api) return;
+    void api.listDrafts().then(setPendingDrafts).catch(cause => setError(String(cause)));
+    void api.getStorageIssues().then(setStorageIssues).catch(cause => setError(String(cause)));
+    const offIssues = api.onStorageIssues(setStorageIssues);
+    const offFlush = api.onFlushDrafts(() => flushDrafts.current());
+    return () => { offIssues(); offFlush(); };
+  }, []);
+  flushDrafts.current = async () => {
+    if (!api || loading) return;
+    const drafts = workflows.filter(flow => !pendingDrafts.some(draft => draft.workflowId === flow.workflowId) && (saved[flow.workflowId] !== JSON.stringify(flow) || Object.keys(draftTexts[flow.workflowId] ?? {}).length));
+    const snapshots = drafts.map(flow => ({ workflowId: flow.workflowId, baseRevision: flow.revision, updatedAt: new Date().toISOString(), workflow: clone(flow), selectedId: flow.workflowId === workflowId ? selectedId : '', fieldTexts: draftTexts[flow.workflowId] ?? {} }));
+    const operation = draftQueue.current.then(async () => { for (const draft of snapshots) await api!.saveDraft(draft); });
+    draftQueue.current = operation.catch(() => {}); await operation;
+  };
+  useEffect(() => {
+    if (loading) return;
+    firstDraftEditAt.current ??= Date.now();
+    const delay = Math.max(0, Math.min(1000, 5000 - (Date.now() - firstDraftEditAt.current)));
+    const timer = setTimeout(() => { firstDraftEditAt.current = undefined; void flushDrafts.current().catch(cause => setError(`草稿保存失败：${String(cause)}`)); }, delay);
+    return () => clearTimeout(timer);
+  }, [workflows, draftTexts, saved, loading]);
+  const writeDraftText = (key: string, text?: string) => setDraftTexts(previous => {
+    const values = { ...(previous[workflowId] ?? {}) }; if (text === undefined) delete values[key]; else values[key] = text;
+    return { ...previous, [workflowId]: values };
+  });
+  const restoreDraft = (draft: WorkflowDraft) => {
+    const current = workflows.find(flow => flow.workflowId === draft.workflowId);
+    const conflict = !!current && current.revision !== draft.baseRevision;
+    const restored = conflict ? { ...draft.workflow, workflowId: uuid(), revision: 0, name: `${draft.workflow.name} 恢复副本` } : draft.workflow;
+    setWorkflows(previous => [...previous.filter(flow => flow.workflowId !== restored.workflowId), restored]);
+    setWorkflowId(restored.workflowId); setSelectedId(draft.selectedId); setView('editor'); setInspector('step'); setRightPane('step');
+    setDraftTexts(previous => ({ ...previous, [restored.workflowId]: draft.fieldTexts }));
+    setPendingDrafts(previous => previous.filter(item => item.workflowId !== draft.workflowId));
+  };
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 5000);
@@ -715,6 +769,8 @@ export function App() {
         ...previous,
         [persisted.workflowId]: JSON.stringify(persisted),
       }));
+      setDraftTexts(previous => ({ ...previous, [persisted.workflowId]: {} }));
+      await draftQueue.current; await api.discardDraft(persisted.workflowId);
       if (thenRun) {
         const snapshot = await api.runWorkflow(persisted);
         setRunWorkflows(previous => ({ ...previous, [snapshot.runId]: persisted }));
@@ -926,6 +982,7 @@ export function App() {
   ];
 
   return (
+    <DraftContext.Provider value={{ texts: draftTexts[workflowId] ?? {}, scope: `${selectedId}:${inspector}`, write: writeDraftText }}>
     <div className={`app-shell${recovery ? " has-recovery" : ""}`}>
       <header className="topbar">
         <div className="brand">
@@ -1005,6 +1062,8 @@ export function App() {
         </div>
       </header>
 
+      {!!pendingDrafts.length && <div className="draft-recovery" role="region" aria-label="草稿恢复">{pendingDrafts.map(draft => <div key={draft.workflowId}><span>未保存草稿：{draft.workflow.name} · {new Date(draft.updatedAt).toLocaleString('zh-CN')}{workflows.some(flow => flow.workflowId === draft.workflowId && flow.revision !== draft.baseRevision) ? ' · 保存版本已变化，将恢复为副本' : ''}</span><button onClick={() => restoreDraft(draft)}>恢复草稿</button><button onClick={() => void api?.discardDraft(draft.workflowId).then(() => setPendingDrafts(previous => previous.filter(item => item.workflowId !== draft.workflowId))).catch(cause => setError(String(cause)))}>放弃草稿</button></div>)}</div>}
+      {!!storageIssues.length && <div className="alert" role="alert"><AlertCircle size={17}/><span>保存异常：{storageIssues.map(issue => issue.message).join('；')}</span><button onClick={() => void api?.retryStorage().then(setStorageIssues).catch(cause => setError(String(cause)))}>重试保存</button></div>}
       {error && (
         <div className="alert" role="alert">
           <AlertCircle size={17} />
@@ -1221,6 +1280,7 @@ export function App() {
                     </button>
                   </div>
                 )}
+                {api && <RevisionHistory api={api} workflow={workflow} onError={catchError} onRestore={persisted => { setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) })); setNotice(`已恢复为 v${persisted.revision}`); }} />}
                 {demoUrl && (
                   <div className="environment-info">
                     <span>受控演示页</span>
@@ -2073,6 +2133,7 @@ export function App() {
                 {run.workflowId !== workflowId && <span className="run-other-flow">正在查看其他流程</span>}</>
                 : <span>{runScope === "workflow" ? `「${workflow?.name ?? "当前流程"}」尚无运行记录` : "选择一条运行记录查看执行情况"}</span>}
             </div>
+            {!!run?.warningCount && <details className="run-warning"><summary>完成但有警告 · {run.warningCount} 项</summary>{run.warnings?.map((warning, index) => <p key={index}><button onClick={() => locateRunStep(warning.stepId)}>{warning.stepName}</button>：{warning.message}</p>)}</details>}
             {recovery && run && <div className="run-recovery" role="region" aria-label="运行恢复">
               <div className="run-recovery-copy"><strong>{recovery.canResume ? "需要人工处理" : run.status === "interrupted" ? "运行已中断" : "运行失败"}{recovery.stepId ? ` · ${stepNames.get(recovery.stepId) ?? recovery.stepId}` : ""}</strong>
                 <p title={run.error ?? recovery.reason}>{recovery.reason}</p>
@@ -2138,6 +2199,7 @@ export function App() {
                           {item.browserOpen && terminalStatuses.has(item.status) && <RetainedBrowserStatus />}
                           {item.currentStepId && !item.error && <span>当前步骤 · <code>{item.currentStepId}</code></span>}
                           {item.error && <span className="error-text">{explainError(item.error).message}</span>}
+                          {!!item.warningCount && <span className="warning-text">完成但有警告 · {item.warningCount} 项</span>}
                         </button>
                       </li>
                     ))}
@@ -2171,5 +2233,6 @@ export function App() {
         </span>
       </footer>
     </div>
+    </DraftContext.Provider>
   );
 }

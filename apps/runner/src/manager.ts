@@ -3,7 +3,8 @@ import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { isDeepStrictEqual } from 'node:util';
-import { FileStore, normalizeWorkflowForStorage } from '../../../packages/persistence/src/index.js';
+import { normalizeWorkflowForStorage } from '../../../packages/persistence/src/index.js';
+import { WorkbenchStore } from '../../../packages/persistence/src/workbench.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
 import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type BrowserPoint, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 import { nextScheduleTime } from './schedule.js';
@@ -23,7 +24,7 @@ async function killOwnedTree(child: ChildProcess) {
 }
 export interface ManagerOptions { dataDir: string; maxConcurrent?: number; rootDir?: string; workerPath?: string; now?: () => Date; schedulePollMs?: number; autoStartSchedules?: boolean }
 export class RunManager extends EventEmitter {
-  readonly store: FileStore;
+  readonly store: WorkbenchStore;
   private jobs = new Map<string, Job>();
   private pending: string[] = [];
   private shuttingDown = false;
@@ -35,7 +36,7 @@ export class RunManager extends EventEmitter {
     super();
     const concurrency = options.maxConcurrent ?? 2;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error('并发数须为 1–16 的整数');
-    this.store = new FileStore(options.dataDir);
+    this.store = new WorkbenchStore(options.dataDir);
   }
   async initialize() {
     await this.store.initialize();
@@ -250,14 +251,14 @@ export class RunManager extends EventEmitter {
         || workflow.settings.headless !== job.workflow.settings.headless) throw new Error('浏览器配置已改变，请关闭原浏览器后重新运行');
       const previousRun = job.run;
       const previousWorkflow = job.workflow;
-      const queued: RunSnapshot = { ...job.run, workflowName: workflow.name, revision: workflow.revision, stepId, status: 'queued' };
+      const queued: RunSnapshot = { ...job.run, workflowName: workflow.name, revision: workflow.revision, stepId, status: 'queued', attemptId: randomUUID(), startedAt: new Date().toISOString(), warnings: [], warningCount: 0 };
       delete queued.endedAt; delete queued.error; delete queued.currentStepId;
       job.run = queued; job.workflow = workflow;
       try {
         await this.store.createRun(workflow, queued);
         if (!job.child?.connected || !job.run.browserOpen) throw new Error('所选浏览器已关闭，请重新选择');
         this.publish({ type: 'run', runId: browserRunId, at: new Date().toISOString(), status: 'queued', run: structuredClone(queued), data: { stepId, workflow } });
-        await this.sendRequest(job, { type: 'run-step', workflow, stepId });
+        await this.sendRequest(job, { type: 'run-step', workflow, stepId, attemptId: queued.attemptId });
       } catch (error) {
         job.workflow = previousWorkflow;
         job.run = { ...previousRun, browserOpen: Boolean(job.child?.connected && job.run.browserOpen) };
@@ -284,6 +285,7 @@ export class RunManager extends EventEmitter {
       runId: randomUUID(), workflowId: workflow.workflowId, workflowName: workflow.name, revision: workflow.revision,
       status: 'queued', startedAt: new Date().toISOString(), variables: structuredClone(workflow.variables), artifacts: [], browserOpen: false,
       ...schedule, stepId,
+      attemptId: randomUUID(), warnings: [], warningCount: 0,
     };
     await this.store.createRun(workflow, run);
     this.jobs.set(run.runId, { workflow: structuredClone(workflow), run }); this.pending.push(run.runId);
@@ -299,6 +301,8 @@ export class RunManager extends EventEmitter {
     for (const job of retained) await this.applyControlRun(job.run.runId, 'closeBrowser');
   }
   private publish(event: RunEvent) {
+    event.eventId ??= randomUUID();
+    event.attemptId ??= this.jobs.get(event.runId)?.run.attemptId;
     this.store.recordEvent(event).catch(error => this.emit('storage-error', error));
     this.emit('event', structuredClone(event));
   }
@@ -370,7 +374,7 @@ export class RunManager extends EventEmitter {
       }
       job.exit?.(); this.drain();
     });
-    child.send({ type: 'start', workflow: job.workflow, stepId: job.run.stepId, options: { dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor } }, error => { if (error) job.run.error = error.message; });
+    child.send({ type: 'start', workflow: job.workflow, stepId: job.run.stepId, options: { dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor, attemptId: job.run.attemptId } }, error => { if (error) job.run.error = error.message; });
   }
   private async sendRequest(job: Job, message: Record<string, unknown>): Promise<void> {
     if (!job.child?.connected) throw new Error('任务进程未连接');

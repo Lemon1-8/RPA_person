@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Search, X } from "lucide-react";
-import type { RunEvent } from "../../../../packages/contracts/src/index.js";
+import type { RunEvent, DesktopApi, EventPage } from "../../../../packages/contracts/src/index.js";
 import { LogMessage } from "./LogMessage.js";
 import { filterLogRows, logRows, logRowText, logStepName, type LogFilter } from "./log-view.js";
 
@@ -13,6 +13,7 @@ const filters: { id: LogFilter; label: string }[] = [
   { id: "output", label: "输出与文件" }, { id: "failed", label: "失败" },
 ];
 const stepDetailsPreference = "rpa.logStepDetails";
+const api = (window as Window & { rpa?: DesktopApi }).rpa;
 
 function eventPath(event: RunEvent): string | undefined {
   if (!event.data || typeof event.data !== "object" || !("path" in event.data)) return undefined;
@@ -35,7 +36,31 @@ export function LogViewer({ events, runId, stepNames, emptyMessage, onSelectStep
     catch { return false; }
   });
   const scrollRef = useRef<HTMLDivElement>(null);
-  const allRows = useMemo(() => logRows(events, runId, showStepDetails), [events, runId, showStepDetails]);
+  const [history, setHistory] = useState<RunEvent[]>([]);
+  const [page, setPage] = useState<EventPage>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const request = useRef(0);
+  useEffect(() => {
+    const generation = ++request.current; setHistory([]); setPage(undefined); setError('');
+    if (!api || !runId) return;
+    const timer = setTimeout(() => {
+      setLoading(true);
+      void api.getRunEvents(runId, { limit: 200, query }).then(value => { if (generation === request.current) { setHistory(value.events); setPage(value); } }).catch(cause => { if (generation === request.current) setError(String(cause)); }).finally(() => { if (generation === request.current) setLoading(false); });
+    }, query ? 250 : 0);
+    return () => { clearTimeout(timer); request.current++; };
+  }, [runId, query]);
+  const loadEarlier = () => {
+    if (!api || !page?.hasMore || loading) return;
+    const generation = request.current; setLoading(true);
+    void api.getRunEvents(runId, { before: page.before, limit: 200, query }).then(value => { if (generation === request.current) { setHistory(previous => [...value.events, ...previous]); setPage(value); setFollowing(false); } }).catch(cause => setError(String(cause))).finally(() => setLoading(false));
+  };
+  const merged = useMemo(() => {
+    const unique = new Map<string, RunEvent>();
+    for (const event of [...events.filter(event => event.runId === runId), ...history]) unique.set(event.eventId ?? JSON.stringify(event), event);
+    return [...unique.values()].sort((a, b) => a.at.localeCompare(b.at) || (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER));
+  }, [events, history, runId]);
+  const allRows = useMemo(() => logRows(merged, runId, showStepDetails), [merged, runId, showStepDetails]);
   const rows = useMemo(() => filterLogRows(allRows, filter, query, stepNames), [allRows, filter, query, stepNames]);
 
   useEffect(() => {
@@ -58,6 +83,7 @@ export function LogViewer({ events, runId, stepNames, emptyMessage, onSelectStep
   };
   return <div className="log-viewer">
     <div className="log-toolbar">
+      <details className="log-history-menu"><summary>历史</summary><div><button disabled={!page?.hasMore || loading} onClick={loadEarlier}>{loading ? '读取中…' : '加载更早日志'}</button><button disabled={!runId} onClick={() => void api?.exportRunEvents(runId).then(path => { if (path) onOpenPath(path); }).catch(cause => setError(String(cause)))}>导出日志</button>{!!page?.damagedLines && <span role="status">有 {page.damagedLines} 条损坏记录，原文件已保留</span>}{error && <span role="alert">{error}</span>}</div></details>
       <label className="log-search">
         <Search size={15} aria-hidden="true" />
         <input aria-label="搜索运行日志" value={query} onChange={event => { setQuery(event.target.value); startInspecting(); }} placeholder="搜索步骤或内容" />

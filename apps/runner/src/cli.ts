@@ -41,6 +41,7 @@ async function main() {
     const run = await manager.runWorkflow(saved);
     const result = await manager.waitForRun(run.runId);
     console.log(JSON.stringify(result, null, 2));
+    if (result.warningCount) console.log(`完成但有警告：${result.warningCount} 项，请检查 warnings。`);
     if (result.status !== 'succeeded') process.exitCode = 1;
     if (result.browserOpen) {
       console.log('流程已结束，浏览器已保留。关闭浏览器窗口或按 Ctrl+C 退出；下次可用 --close-browser 自动关闭。');

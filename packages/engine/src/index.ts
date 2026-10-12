@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
 import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
@@ -15,7 +16,7 @@ import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type
 const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
 class ContainerTimeoutError extends Error {
   constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
@@ -107,6 +108,7 @@ export class WorkflowEngine {
       status: 'queued', startedAt: new Date().toISOString(), artifacts: [], browserOpen: false,
       scheduleId: options.scheduleId, scheduledFor: options.scheduledFor,
       variables: structuredClone(workflow.variables),
+      attemptId: options.attemptId ?? randomUUID(), warnings: [], warningCount: 0,
     };
   }
   getSnapshot(): RunSnapshot { return structuredClone(this.snapshot); }
@@ -133,7 +135,7 @@ export class WorkflowEngine {
     await pick.done.catch(() => undefined);
   }
   private emit(event: Omit<RunEvent, 'runId' | 'at'>) {
-    this.options.onEvent?.({ ...event, ...(event.stepId ? { stepName: this.stepNames.get(event.stepId) } : {}), runId: this.snapshot.runId, at: new Date().toISOString() });
+    this.options.onEvent?.({ ...event, eventId: randomUUID(), attemptId: this.snapshot.attemptId, ...(event.stepId ? { stepName: this.stepNames.get(event.stepId) } : {}), runId: this.snapshot.runId, at: new Date().toISOString() });
   }
   private rebuildStepNumbers() {
     const numbers = new Map<string, number>();
@@ -579,6 +581,9 @@ export class WorkflowEngine {
             } catch { /* Capture failure must not replace the action error. */ }
           }
           if (step.onError === 'continue') {
+            this.snapshot.warnings ??= [];
+            this.snapshot.warnings.push({ stepId: step.stepId, stepName: step.name, message, at: new Date().toISOString() });
+            this.snapshot.warningCount = this.snapshot.warnings.length;
             this.emit({ type: 'log', stepId: step.stepId, message: '已忽略失败，继续执行后续指令。', data: this.stepData(step) });
             delete this.snapshot.error;
             this.state('running');
@@ -598,7 +603,7 @@ export class WorkflowEngine {
     this.consumed = true;
     return this.runExecution(() => this.executeSteps(this.workflow.steps), false);
   }
-  runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow): Promise<RunSnapshot> {
+  runSingleStep(stepId: string, input: WorkflowDefinition = this.workflow, attemptId?: string): Promise<RunSnapshot> {
     if (this.pointPick) throw new Error('请先完成或取消取点');
     const workflow = workflowSchema.parse(input);
     validateActions(workflow);
@@ -632,6 +637,7 @@ export class WorkflowEngine {
     this.snapshot.workflowName = workflow.name;
     this.snapshot.revision = workflow.revision;
     this.snapshot.stepId = stepId;
+    if (attemptId) this.snapshot.attemptId = attemptId;
     this.consumed = true;
     const executeAt = (index: number): Promise<void> => index === path.length - 1
       ? this.executeSteps([path[index]])
@@ -645,6 +651,7 @@ export class WorkflowEngine {
     this.executionFinished = false;
     this.stopped = false;
     this.pauseRequested = false;
+    this.snapshot.startedAt = new Date().toISOString(); this.snapshot.warnings = []; this.snapshot.warningCount = 0;
     delete this.snapshot.endedAt;
     delete this.snapshot.error;
     delete this.snapshot.currentStepId;

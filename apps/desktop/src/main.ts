@@ -7,6 +7,7 @@ import { createDemoWorkflow } from '../../../examples/demo.js';
 import { startFixtureServer } from '../../../tests/fixtures/server.js';
 import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
 import { DesktopElementService } from './desktop-elements.js';
+import { registerWorkbenchIpc, flushRendererDrafts } from './workbench-ipc.js';
 import type { DesktopPoint, RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
 const root = process.env.RPA_ROOT ?? resolve(__dirname, '../..');
@@ -30,7 +31,7 @@ else {
     event.preventDefault(); quitting = true;
     desktopPointPick?.finish(null);
     desktopElements.close();
-    Promise.all([manager?.shutdown(), fixture?.close()]).finally(() => { tray?.destroy(); app.quit(); });
+    void flushRendererDrafts(window).then(() => Promise.all([manager?.shutdown(), fixture?.close()])).then(() => { tray?.destroy(); app.quit(); }).catch(error => { quitting = false; window?.show(); dialog.showErrorBox('退出前保存失败', String(error)); });
   });
   app.whenReady().then(async () => {
     const dataDir = process.env.RPA_DATA_DIR ? resolve(process.env.RPA_DATA_DIR) : join(app.getPath('userData'), 'data');
@@ -43,6 +44,7 @@ else {
     const trusted = (event: Electron.IpcMainInvokeEvent) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('不受信任的调用来源');
     };
+    registerWorkbenchIpc(manager, () => window, trusted);
     ipcMain.handle('rpa:bootstrap', async event => {
       trusted(event);
       const workflows = await manager.listWorkflows();

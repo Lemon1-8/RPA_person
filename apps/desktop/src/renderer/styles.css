@@ -2235,3 +2235,16 @@ button.danger { color: var(--danger); }
 .desktop-element-node { display: grid; gap: 6px; padding: 8px 0; border-top: 1px solid #e2e8f0; }
 .desktop-element-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 .desktop-element-message { margin: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+:root { --warning-ink: #765200; --warning-surface: #fff6d7; }
+.draft-recovery { padding: 10px 20px; background: var(--warning-surface); color: var(--warning-ink); max-height: 160px; overflow: auto; }
+.draft-recovery > div, .log-history-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.draft-recovery > div { margin: 4px 0; }
+.draft-recovery span { flex: 1; min-width: 220px; }
+.log-history-tools { padding: 6px 10px; font-size: 12px; border-bottom: 1px solid #dde2e7; }
+.run-warning { margin: 8px; padding: 8px; background: var(--warning-surface); color: var(--warning-ink); }
+.warning-text { color: var(--warning-ink); }
+.revision-diff pre { max-height: 260px; overflow: auto; font-size: 12px; }
+.log-toolbar .log-search { flex-basis: calc(100% - 112px); }
+.log-history-menu { position: relative; order: 2; font-size: 12px; color: #344c58; }
+.log-history-menu summary { cursor: pointer; padding: 6px 4px; }
+.log-history-menu > div { position: absolute; right: 0; top: 100%; z-index: 5; padding: 10px; width: 180px; display: grid; gap: 8px; background: #fff; border: 1px solid #c7dcd7; box-shadow: 0 4px 14px #18223826; }

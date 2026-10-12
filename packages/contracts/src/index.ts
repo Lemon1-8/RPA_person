@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import type { WorkflowSchedule } from './schedule.js';
+import type { WorkbenchApi, RunWarning } from './workbench.js';
+export * from './workbench.js';
 import { desktopElementSchema, type DesktopElementRef, type DesktopElementSnapshot, type DesktopElementValidation } from './windows.js';
 export * from './windows.js';
 export { scheduleSchema, scheduleIdentifier, type WorkflowSchedule } from './schedule.js';
@@ -10,6 +12,7 @@ export interface ElementRef { pageRef?: string; framePath?: string[]; selector: 
 export interface StepDefinition {
   stepId: string; name: string; actionType: string; params: Record<string, unknown>; output?: string;
   disabled?: boolean;
+  recoveryChecks?: StepDefinition[];
   timeoutMs?: number; retry?: { maxAttempts: number; delayMs: number }; onError?: 'fail' | 'pause' | 'continue';
   variables?: Record<string, JsonValue>; elements?: Record<string, ElementRef>;
   desktopElements?: Record<string, DesktopElementRef>;
@@ -20,7 +23,8 @@ export interface WorkflowDefinition {
   schemaVersion: 1; workflowId: string; name: string; revision: number;
   variables: Record<string, JsonValue>; elements: Record<string, ElementRef>; steps: StepDefinition[];
   desktopElements?: Record<string, DesktopElementRef>;
-  settings: { downloadDir: string; headless: boolean; keepBrowserOpen?: boolean; profileId?: string; pythonExecutable?: string; popupPolicy?: 'off' | 'smart' | 'strict' };
+  inputs?: string[]; outputs?: string[];
+  settings: { downloadDir: string; headless: boolean; keepBrowserOpen?: boolean; profileId?: string; pythonExecutable?: string; popupPolicy?: 'off' | 'smart' | 'strict'; foregroundIdleMs?: number; foregroundWaitMs?: number };
 }
 export function findStepPath(workflow: WorkflowDefinition, stepId: string): StepDefinition[] | undefined {
   const visit = (steps: StepDefinition[], ancestors: StepDefinition[]): StepDefinition[] | undefined => {
@@ -58,13 +62,17 @@ export interface RunSnapshot {
   startedAt: string; endedAt?: string; currentStepId?: string; variables: Record<string, unknown>;
   artifacts: Artifact[]; error?: string; browserOpen?: boolean;
   scheduleId?: string; scheduledFor?: string; stepId?: string;
+  attemptId?: string; warnings?: RunWarning[]; warningCount?: number; waitingReason?: string;
+  resumedFromRunId?: string; archived?: boolean;
 }
 export interface RunEvent {
   type: 'run' | 'step' | 'log' | 'artifact'; runId: string; at: string; stepId?: string;
   stepName?: string;
+  eventId?: string; sequence?: number; attemptId?: string;
+  variableChanges?: Record<string, unknown>; deletedVariables?: string[];
   status?: string; message?: string; data?: unknown; run?: RunSnapshot;
 }
-export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser';
+export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser' | 'step' | 'skip' | 'confirm' | 'retry' | 'check';
 export interface BrowserPageInfo {
   pageId: string; title: string; url: string; current: boolean; openerPageId?: string;
 }
@@ -75,7 +83,7 @@ export interface BootstrapData {
   schedules: WorkflowSchedule[];
   demoUrl: string; dataDir: string; defaultDownloadDir: string;
 }
-export interface DesktopApi {
+export interface DesktopApi extends WorkbenchApi {
   bootstrap(): Promise<BootstrapData>;
   getRunWorkflow(runId: string): Promise<WorkflowDefinition | null>;
   saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowDefinition>;
@@ -109,6 +117,7 @@ const elementSchema = z.object({ pageRef: z.string().optional(), framePath: z.ar
 const stepSchema: z.ZodType<StepDefinition> = z.lazy(() => z.object({
   stepId: identifier, name: z.string().min(1), actionType: z.string().min(1), params: z.record(safeKey, jsonValue),
   disabled: z.boolean().optional(),
+  recoveryChecks: z.array(stepSchema).optional(),
   output: safeKey.optional(), timeoutMs: z.number().int().min(100).max(3_600_000).optional(),
   retry: z.object({ maxAttempts: z.number().int().min(1).max(5), delayMs: z.number().int().min(0).max(60_000) }).optional(),
   variables: z.record(safeKey, jsonValue).optional(),
@@ -129,7 +138,8 @@ export const workflowSchema: z.ZodType<WorkflowDefinition> = z.object({
   schemaVersion: z.literal(1), workflowId: identifier, name: z.string().min(1).max(120), revision: z.number().int().nonnegative(),
   variables: z.record(safeKey, jsonValue), elements: z.record(safeKey, elementSchema), steps: z.array(stepSchema).max(1000),
   desktopElements: z.record(safeKey, desktopElementSchema).optional(),
-  settings: z.object({ downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径'), headless: z.boolean(), keepBrowserOpen: z.boolean().optional(), profileId: identifier.optional(), pythonExecutable: z.string().min(1).optional(), popupPolicy: z.enum(['off', 'smart', 'strict']).optional() }),
+  inputs: z.array(safeKey).optional(), outputs: z.array(safeKey).optional(),
+  settings: z.object({ downloadDir: z.string().min(1).refine(value => isAbsolute(value) && (process.platform !== 'win32' || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(value)), '下载目录必须是完整绝对路径'), headless: z.boolean(), keepBrowserOpen: z.boolean().optional(), profileId: identifier.optional(), pythonExecutable: z.string().min(1).optional(), popupPolicy: z.enum(['off', 'smart', 'strict']).optional(), foregroundIdleMs: z.number().int().min(0).max(60000).optional(), foregroundWaitMs: z.number().int().min(1000).max(3600000).optional() }),
 }).superRefine((flow, ctx) => {
   const ids = new Set<string>(); let count = 0;
   const visit = (steps: StepDefinition[], depth: number) => {

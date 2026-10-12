@@ -60,6 +60,8 @@ describe('流程公共执行接口', () => {
     });
     const result = await runner.run();
     expect(result.status, result.error).toBe('succeeded');
+    expect(result.warningCount).toBe(1);
+    expect(result.warnings?.[0]).toMatchObject({ stepId: 'optional' });
     expect(result.variables).toMatchObject({ continued: true });
     expect(result.variables).not.toHaveProperty('caught');
     expect(events).toEqual(expect.arrayContaining([

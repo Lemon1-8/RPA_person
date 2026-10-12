@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { scheduleIdentifier, scheduleSchema, workflowSchema, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../contracts/src/index.js';
 import { validateActions } from '../../actions/src/index.js';
 
@@ -13,7 +14,15 @@ export function normalizeWorkflowForStorage(input: WorkflowDefinition): Workflow
 export async function writeJsonAtomic(path: string, value: unknown) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(value, null, 2), 'utf8');
-  await rename(temporary, path);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporary, path); break; }
+      catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '') || attempt >= 5) throw error;
+        await delay(20 * (attempt + 1));
+      }
+    }
+  } finally { await unlink(temporary).catch(() => {}); }
 }
 export class FileStore {
   private queue: Promise<unknown> = Promise.resolve();
