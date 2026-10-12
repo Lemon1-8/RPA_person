@@ -2,11 +2,29 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WindowsSession } from '../packages/windows/src/index.js';
 import { withDesktopInteraction } from '../packages/windows/src/interaction-lock.js';
 import { desktopInteractionAvailable, startWindowsFixture, type WindowsFixture } from './fixtures/windows.js';
+import type { DesktopElementSnapshot } from '../packages/contracts/src/index.js';
 
 describe.skipIf(process.platform !== 'win32')('真实 Windows UIA 控件', () => {
   let fixture: WindowsFixture; let session: WindowsSession;
   beforeEach(async () => { fixture = await startWindowsFixture(); session = new WindowsSession(); });
   afterEach(async () => { session?.close(); await fixture?.close(); });
+  it('捕获同级同属性控件时保留序号，并能唯一重新定位', async () => {
+    const duplicate = fixture.element('重复');
+    const snapshots: DesktopElementSnapshot[] = [];
+    for (const index of [0, 1]) {
+      const target = { ...duplicate, path: [{ ...duplicate.path[0], index }] };
+      const snapshot = await session.call('windows.find', { element: target }) as DesktopElementSnapshot;
+      expect(await session.validate(snapshot.element)).toMatchObject({ count: 1 });
+      const bounds = await session.call('windows.bounds', { element: snapshot.element });
+      expect(bounds).toEqual(snapshot.bounds);
+      snapshots.push(snapshot);
+    }
+    expect(snapshots[1].bounds.x).toBeGreaterThan(snapshots[0].bounds.x);
+    await fixture.call('move');
+    const moved = await Promise.all(snapshots.map(snapshot => session.call('windows.bounds', { element: snapshot.element }) as Promise<{ x: number }>));
+    expect(moved[0].x).toBeGreaterThan(snapshots[0].bounds.x);
+    expect(moved[1].x - moved[0].x).toBe(snapshots[1].bounds.x - snapshots[0].bounds.x);
+  });
   it('获取窗口、捕获和读取；移动窗口及重建控件后按保存条件重新定位', async () => {
     const capture = await session.inspect(fixture.x, fixture.y);
     expect(capture?.attributes).toMatchObject({ Name: '输入', ControlType: 'Edit', AutomationId: 'input' });

@@ -45,7 +45,7 @@ $combo.DropDownStyle='DropDownList'; [void]$combo.Items.Add('杭州'); [void]$co
 $disabled=New-Object System.Windows.Forms.Button
 $disabled.AccessibleName='禁用'; $disabled.Text='禁用'; $disabled.Enabled=$false; $disabled.Left=25; $disabled.Top=210
 $form.Controls.AddRange(@($inputBox,$button,$label,$check,$combo,$disabled))
-foreach ($x in @(25,160)) { $duplicate=New-Object System.Windows.Forms.Button; $duplicate.AccessibleName='重复'; $duplicate.Text='重复'; $duplicate.Left=$x; $duplicate.Top=260; $form.Controls.Add($duplicate) }
+foreach ($x in @(25,160)) { $duplicate=New-Object System.Windows.Forms.Button; $duplicate.Name='duplicate'; $duplicate.AccessibleName='重复'; $duplicate.Text='重复'; $duplicate.Left=$x; $duplicate.Top=260; $form.Controls.Add($duplicate) }
 [void]$form.AccessibilityObject
 foreach ($control in $form.Controls) { [void]$control.AccessibilityObject }
 [RpaFixtureReader]::Start()

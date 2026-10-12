@@ -126,7 +126,8 @@ function Ref($el) {
     }
     $node = @{axis='child';properties=$props}
     $nodeObject = ($node | ConvertTo-Json -Depth 15 -Compress | ConvertFrom-Json)
-    $siblings = @(NodeItems $parent $nodeObject)
+    # NodeItems already returns one array object. Wrapping it again hides duplicates.
+    $siblings = NodeItems $parent $nodeObject
     if ($siblings.Count -gt 1) {
       for ($i=0; $i -lt $siblings.Count; $i++) { if ([System.Windows.Automation.Automation]::Compare($siblings[$i],$child)) { $node.index=$i; break } }
     }
