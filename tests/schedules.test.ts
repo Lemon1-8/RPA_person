@@ -39,9 +39,55 @@ async function setup(schedulePollMs = 0) {
 }
 
 describe('定时运行', () => {
+  it('新计划固定原修订，只有显式更新使用版本后才变化', async () => {
+    const state = await setup();
+    const plan = await state.manager.saveSchedule(state.schedule); expect(plan.revision).toBe(1);
+    await state.manager.saveWorkflow({ ...state.workflow, name:'修改后的版本' });
+    state.setTime('2030-01-01T00:01:01Z'); await state.manager.checkSchedules();
+    const result = await state.manager.waitForRun(state.manager.listRuns()[0].runId);
+    expect(result.revision).toBe(1); expect(result.workflowName).toBe('定时测试');
+    const next = await state.manager.saveSchedule({ ...plan, enabled:true, at:'2030-01-01T00:02:00Z', revision:2 });
+    expect(next.revision).toBe(2);
+  });
+
+  it('领取后创建运行前退出，重启使用已领取运行标识补齐且不重复', async () => {
+    const state = await setup(); await state.manager.saveSchedule(state.schedule); await state.manager.shutdown();
+    const occurrence = { scheduleId:state.schedule.scheduleId,scheduledFor:state.schedule.at!,runId:'claimed-run',outcome:'claimed' as const,workflowId:state.workflow.workflowId,revision:1 };
+    await state.manager.store.saveOccurrence(occurrence);
+    state.setTime('2030-01-01T00:01:03Z'); const restarted = await state.createManager();
+    await restarted.checkSchedules(); const result = await restarted.waitForRun('claimed-run');
+    expect(result.status).toBe('succeeded'); await restarted.checkSchedules(); expect(restarted.listRuns()).toHaveLength(1);
+    expect((await restarted.store.listOccurrences(state.schedule.scheduleId))[0].outcome).toBe('started');
+  });
+
+  it('旧计划缺少修订仍跟随最新；固定修订丢失在重启时停用', async () => {
+    const state = await setup(); await state.manager.store.saveSchedule({ ...state.schedule,nextRunAt:state.schedule.at });
+    await state.manager.saveWorkflow({ ...state.workflow,name:'新版本' });
+    await state.manager.shutdown(); const restarted = await state.createManager();
+    expect(restarted.listSchedules()[0].revision).toBeUndefined();
+    state.setTime('2030-01-01T00:01:03Z'); await restarted.checkSchedules();
+    expect((await restarted.waitForRun(restarted.listRuns()[0].runId)).revision).toBe(2);
+    await restarted.saveSchedule({ ...state.schedule,scheduleId:'missing-revision',revision:1,at:'2030-01-01T01:00:00Z' });
+    await restarted.shutdown(); await rm(join(state.dataDir,'revisions',state.workflow.workflowId,'1.json'));
+    const again = await state.createManager(); expect(again.listSchedules().find(plan => plan.scheduleId === 'missing-revision')).toMatchObject({ enabled:false,lastError:expect.stringContaining('不存在') });
+  });
+
+  it('读取运行信息和 SDK 只读接口不自动注入变量', async () => {
+    const state = await setup(); const workflow = await state.manager.saveWorkflow({ ...state.workflow,steps:[
+      { stepId:'info',name:'运行信息',actionType:'core.runContext',params:{},output:'context' },
+      { stepId:'sdk',name:'SDK',actionType:'script.run',params:{language:'javascript',code:'rpa.output(await rpa.getRunContext());'},output:'sdkContext' },
+    ] });
+    await state.manager.saveSchedule(state.schedule); state.setTime('2030-01-01T00:01:00Z'); await state.manager.checkSchedules();
+    const result = await state.manager.waitForRun(state.manager.listRuns()[0].runId);
+    expect(result.status,result.error).toBe('succeeded'); expect(Object.keys(result.variables)).toEqual(['context','sdkContext']);
+    expect(result.variables.context).toMatchObject({ runId:result.runId,scheduledFor:state.schedule.at });
+    expect(result.variables.sdkContext).toMatchObject({ runId:result.runId,attemptId:result.attemptId });
+    expect(result.revision).toBe(workflow.revision);
+  });
+
   it('运行已保存版本一次，传递计划时间，并在重复检查与重启时避免重复', async () => {
     const state = await setup();
-    const saved = await state.manager.saveSchedule({ ...state.schedule, nextRunAt: '2099-01-01T00:00:00.000Z', lastRunId: 'forged' });
+    const saved = await state.manager.saveSchedule({ ...state.schedule, followLatest: true, nextRunAt: '2099-01-01T00:00:00.000Z', lastRunId: 'forged' });
     expect(saved.nextRunAt).toBe(state.schedule.at);
     expect(saved.lastRunId).toBeUndefined();
     await state.manager.saveWorkflow({ ...state.workflow, name: '最新保存版本' });
@@ -120,15 +166,21 @@ describe('定时运行', () => {
     expect(reassigned.lastRunId).toBeUndefined(); expect(reassigned.lastRunAt).toBeUndefined();
   });
 
-  it('重启跳过已错过的单次计划及重复计划，不补跑', async () => {
+  it('重启只补最近一次，活动流程主动跳过且账本防重', async () => {
     const state = await setup();
     await state.manager.saveSchedule(state.schedule);
     await state.manager.saveSchedule({ ...state.schedule, scheduleId: 'interval', kind: 'interval', at: undefined, intervalMinutes: 10 });
     await state.manager.shutdown(); state.setTime('2030-01-02T12:00:00.000Z');
     const restarted = await state.createManager(); await restarted.checkSchedules();
-    expect(restarted.listRuns()).toHaveLength(0);
-    expect(restarted.listSchedules().find(schedule => schedule.scheduleId === 'schedule-1')).toMatchObject({ enabled: false, lastError: expect.stringContaining('错过') });
+    expect(restarted.listRuns()).toHaveLength(1);
+    await restarted.waitForRun(restarted.listRuns()[0].runId);
+    expect(restarted.listSchedules().find(schedule => schedule.scheduleId === 'schedule-1')).toMatchObject({ enabled: false });
     expect(restarted.listSchedules().find(schedule => schedule.scheduleId === 'interval')).toMatchObject({ enabled: true, nextRunAt: '2030-01-02T12:10:00.000Z' });
+    const ledger = [...await restarted.store.listOccurrences('interval'), ...await restarted.store.listOccurrences('schedule-1')];
+    expect(ledger.filter(entry => entry.outcome === 'skipped')[0].reason).toContain('主动跳过');
+    expect(ledger.filter(entry => entry.outcome === 'started')).toHaveLength(1);
+    expect((await restarted.store.listOccurrences('interval'))[0].scheduledFor).toBe('2030-01-02T12:00:00.000Z');
+    await restarted.checkSchedules(); expect(restarted.listRuns()).toHaveLength(1);
   });
 
   it('同一流程有活动任务时记录触发失败且不反复重试同一时刻', async () => {
@@ -177,7 +229,7 @@ describe('定时运行', () => {
       await state.manager.saveWorkflow(demo);
       await refreshDemoUrls(state.manager, fixture.url);
       const saved = (await state.manager.listWorkflows()).find(workflow => workflow.workflowId === demo.workflowId)!;
-      expect(saved).toMatchObject({ revision: 2, variables: {}, steps: [{ params: { url: fixture.url } }] });
+      expect(saved).toMatchObject({ revision: 2, variables: {}, steps: [{ params: { url: 'rpa://demo' } }] });
       await refreshDemoUrls(state.manager, fixture.url);
       expect((await state.manager.listWorkflows()).find(workflow => workflow.workflowId === demo.workflowId)!.revision).toBe(2);
       await state.manager.saveSchedule({ ...state.schedule, workflowId: demo.workflowId });

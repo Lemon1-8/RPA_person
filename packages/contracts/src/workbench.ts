@@ -16,6 +16,7 @@ export interface PreflightIssue { stepId?: string; level: 'error' | 'warning'; m
 export interface ScheduleOccurrence {
   scheduleId: string; scheduledFor: string; runId: string;
   outcome: 'claimed' | 'started' | 'skipped'; reason?: string;
+  workflowId?: string; revision?: number;
 }
 export interface WorkbenchApi {
   listDrafts(): Promise<WorkflowDraft[]>;

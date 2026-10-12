@@ -161,6 +161,7 @@ add('core.note', '备注', '流程控制', '为流程添加说明，支持多行
   { text: '', color: '#FFE08A' }, z.object({ text: z.string(), color: z.string().regex(/^#[0-9a-fA-F]{6}$/, '颜色必须为 #RRGGBB 格式').default('#FFE08A') }));
 add('core.assert', '校验结果', '校验', '比较两个 JSON 值是否相等。', true,
   [json('actual', '实际值（JSON）'), json('expected', '期望值（JSON）')], { actual: '{{result}}', expected: '' }, z.object({ actual: z.unknown(), expected: z.unknown() }));
+add('core.runContext', '读取运行信息', '流程控制', '只读返回计划时间、实际时间、运行和执行尝试标识；在输出字段指定变量名。', true, [], {}, z.object({}));
 add('control.if', '条件分支', '流程控制', '满足条件执行子步骤，否则执行另一分支。', false,
   [json('left', '左值（JSON）'), { key: 'operator', label: '比较方式', type: 'select', options: [{ label: '等于', value: 'equals' }, { label: '不等于', value: 'notEquals' }, { label: '为真', value: 'truthy' }], required: true }, json('right', '右值（JSON）')],
   { left: true, operator: 'truthy', right: null }, z.object({ left: z.unknown(), operator: z.enum(['equals', 'notEquals', 'truthy']), right: z.unknown().optional() }));

@@ -50,6 +50,9 @@ class RpaClient:
     def get(self, name):
         return self.call("variables.get", dict(name=name))
 
+    def get_run_context(self):
+        return self.call("core.runContext")
+
     def set(self, name, value):
         return self.call("variables.set", dict(name=name, value=value))
 

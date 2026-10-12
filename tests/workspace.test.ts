@@ -23,7 +23,7 @@ function workspace(workflow: WorkflowDefinition) {
   const saveWorkflow = vi.fn(async (next: WorkflowDefinition) => {
     saved = structuredClone({ ...next, revision: saved.revision + 1 }); return saved;
   });
-  const manager = { listWorkflows: async () => [structuredClone(saved)], saveWorkflow } as unknown as RunManager;
+  const manager = { setDemoUrl: vi.fn(), listWorkflows: async () => [structuredClone(saved)], saveWorkflow } as unknown as RunManager;
   return { manager, saveWorkflow, workflow: () => saved };
 }
 
@@ -52,7 +52,7 @@ describe('内置示例默认值迁移', () => {
     const state = workspace(legacyDemo());
     await refreshDemoUrls(state.manager, currentUrl);
     expect(state.workflow().variables).toEqual({});
-    expect(state.workflow().steps[0].params.url).toBe(currentUrl);
+    expect(state.workflow().steps[0].params.url).toBe('rpa://demo');
     expect(state.workflow().steps[1].params.value).toBe('跨语言订单');
     expect(state.workflow().steps.find(step => step.stepId === 'verify')!.params.text).toBe('查询完成：跨语言订单');
     await refreshDemoUrls(state.manager, currentUrl);
@@ -90,7 +90,7 @@ describe('内置示例默认值迁移', () => {
     await refreshDemoUrls(state.manager, currentUrl);
     expect(state.workflow().variables).toEqual({});
     const branch = state.workflow().steps[0];
-    expect(branch.children![0].params.url).toBe(currentUrl);
+    expect(branch.children![0].params.url).toBe('rpa://demo');
     expect(branch.children![1]).toMatchObject({ variables: { customer: '局部客户' }, params: { value: '{{customer}}' } });
     expect(branch.elseSteps![0].children![0].params.message).toBe('{{customer}}');
   });
@@ -154,7 +154,7 @@ describe('内置示例默认值迁移', () => {
     const state = workspace(workflow);
     await refreshDemoUrls(state.manager, currentUrl);
     expect(state.workflow().variables).toEqual({});
-    expect(state.workflow().steps[0].params.url).toBe(currentUrl);
+    expect(state.workflow().steps[0].params.url).toBe('rpa://demo');
     expect(state.workflow().steps.at(-1)!.params.message).toBe(currentUrl);
     await refreshDemoUrls(state.manager, currentUrl);
     expect(state.saveWorkflow).toHaveBeenCalledTimes(1);
@@ -297,7 +297,7 @@ describe('内置示例默认值迁移', () => {
     workflow.steps.push({ stepId: 'other', name: '自定义本地网页', actionType: 'browser.open', params: { url: oldUrl } });
     const state = workspace(workflow);
     await refreshDemoUrls(state.manager, currentUrl);
-    expect(state.workflow().steps[0].params.url).toBe(currentUrl);
+    expect(state.workflow().steps[0].params.url).toBe('rpa://demo');
     expect(state.workflow().steps.at(-1)!.params.url).toBe(oldUrl);
     const pathWorkflow = createDemoWorkflow(`${oldUrl}/custom`, tmpdir());
     const pathState = workspace(pathWorkflow);

@@ -39,7 +39,7 @@ else {
     manager = new RunManager({ dataDir, rootDir: root, maxConcurrent: Number(process.env.RPA_MAX_CONCURRENT ?? 2), autoStartSchedules: false }); await manager.initialize();
     fixture = await startFixtureServer();
     const defaultDownloadDir = app.getPath('desktop');
-    await seedDesktopWorkspace(manager, createDemoWorkflow(fixture.url, defaultDownloadDir));
+    await seedDesktopWorkspace(manager, createDemoWorkflow('rpa://demo', defaultDownloadDir));
     await refreshDemoUrls(manager, fixture.url);
     const trusted = (event: Electron.IpcMainInvokeEvent) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('不受信任的调用来源');

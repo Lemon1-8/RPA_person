@@ -17,7 +17,7 @@ import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type
 const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string; demoUrl?: string }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
 class ContainerTimeoutError extends Error {
   constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
@@ -400,6 +400,7 @@ export class WorkflowEngine {
   }
   private async dispatch(method: string, rawParams: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     this.checkStop(); signal?.throwIfAborted();
+    if (method === 'core.runContext') return { runId: this.snapshot.runId, attemptId: this.snapshot.attemptId, scheduleId: this.snapshot.scheduleId ?? null, scheduledFor: this.snapshot.scheduledFor ?? null, startedAt: this.snapshot.startedAt, actualTime: new Date().toISOString() };
     if (method === 'browser.listPages') return this.listBrowserPages();
     if (method === 'variables.get') {
       if (typeof rawParams.name !== 'string' || !rawParams.name) throw new Error('变量名称必须是非空文本');
@@ -452,6 +453,11 @@ export class WorkflowEngine {
   private async execute(step: StepDefinition, params: Record<string, unknown>): Promise<unknown> {
     const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
+    if (step.actionType === 'core.runContext') return this.dispatch(step.actionType, params, timeout, signal);
+    if (step.actionType === 'browser.open' && (params.url === 'rpa://demo' || this.options.demoUrl && this.workflow.workflowId === 'order-export-demo' && step.stepId === 'open' && /^http:\/\/127\.0\.0\.1:\d+\/?$/.test(String(params.url)))) {
+      if (!this.options.demoUrl) throw new Error('内置示例网页尚未启动，请从桌面工作台运行');
+      params = { ...params, url: this.options.demoUrl };
+    }
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType.startsWith('windows.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal, this.inputPolicy());

@@ -8,7 +8,7 @@ import { normalizeWorkflowForStorage } from '../../../packages/persistence/src/i
 import { WorkbenchStore } from '../../../packages/persistence/src/workbench.js';
 import { validateActions } from '../../../packages/actions/src/index.js';
 import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type BrowserPageInfo, type BrowserPoint, type RunCommand, type RunEvent, type RunSnapshot, type WorkflowDefinition, type WorkflowSchedule } from '../../../packages/contracts/src/index.js';
-import { nextScheduleTime } from './schedule.js';
+import { nextScheduleTime, latestScheduleTime } from './schedule.js';
 import type { EngineOptions } from '../../../packages/engine/src/index.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
@@ -35,6 +35,8 @@ export class RunManager extends EventEmitter {
   private scheduleTimer?: NodeJS.Timeout;
   private checkingSchedules = false;
   private emergencyStopping = false;
+  private demoUrl?: string;
+  setDemoUrl(value: string) { this.demoUrl = new URL(value).href; }
   async stopAll() {
     this.emergencyStopping = true; this.pending = [];
     try { await Promise.all([...this.jobs.values()].filter(job => !terminal(job.run.status) || job.run.browserOpen).map(job => this.controlRun(job.run.runId, terminal(job.run.status) ? 'closeBrowser' : 'stop'))); }
@@ -74,14 +76,14 @@ export class RunManager extends EventEmitter {
     for (const schedule of await this.store.listSchedules()) {
       if (!workflows.some(workflow => workflow.workflowId === schedule.workflowId)) {
         schedule.enabled = false; schedule.nextRunAt = undefined; schedule.lastError = '关联流程已不存在，定时计划已停用。';
-      } else if (schedule.enabled && (!schedule.nextRunAt || Date.parse(schedule.nextRunAt) <= now.getTime())) {
+      } else if (schedule.enabled && schedule.revision && !await this.store.getRevision(schedule.workflowId, schedule.revision).catch(() => null)) {
+        schedule.enabled = false; schedule.nextRunAt = undefined; schedule.lastError = `固定修订 v${schedule.revision} 不存在，计划已停用。`;
+      } else if (schedule.enabled && !schedule.nextRunAt) {
         if (schedule.kind === 'once' && Date.parse(schedule.at!) <= now.getTime()) {
           schedule.enabled = false; schedule.nextRunAt = undefined;
-          schedule.lastError = '工作台未运行时错过执行时间，单次计划已停用，请重新选择时间。';
+          schedule.lastError = '缺少可识别的历史触发时间，单次计划已停用，请重新选择时间。';
         } else {
-          const missed = Boolean(schedule.nextRunAt);
           schedule.nextRunAt = nextScheduleTime(schedule, now);
-          if (missed) schedule.lastError = '工作台未运行时错过的执行已跳过，将从下一次开始。';
         }
       }
       await this.store.saveSchedule(schedule);
@@ -200,22 +202,27 @@ export class RunManager extends EventEmitter {
   saveSchedule(input: WorkflowSchedule): Promise<WorkflowSchedule> {
     const parsed = scheduleSchema.parse(input);
     return this.serialize(async () => {
-      if (!(await this.listWorkflows()).some(workflow => workflow.workflowId === parsed.workflowId)) throw new Error('请先保存要定时运行的流程');
+      const workflow = (await this.listWorkflows()).find(workflow => workflow.workflowId === parsed.workflowId);
+      if (!workflow) throw new Error('请先保存要定时运行的流程');
       const now = this.now();
       if (parsed.enabled && parsed.kind === 'once' && Date.parse(parsed.at!) <= now.getTime()) throw new Error('单次运行时间必须晚于当前时间');
       const previous = this.schedules.get(parsed.scheduleId);
       const sameWorkflow = previous?.workflowId === parsed.workflowId;
       const sameTrigger = sameWorkflow && previous?.kind === parsed.kind && (
-        parsed.kind === 'once' ? previous.at === parsed.at : parsed.kind === 'daily' ? previous.time === parsed.time : previous.intervalMinutes === parsed.intervalMinutes
+        parsed.kind === 'once' ? previous.at === parsed.at : parsed.kind === 'interval' ? previous.intervalMinutes === parsed.intervalMinutes : previous.time === parsed.time && previous.day === parsed.day && JSON.stringify(previous.weekdays) === JSON.stringify(parsed.weekdays) && previous.startDate === parsed.startDate && previous.intervalDays === parsed.intervalDays
       );
       const saved: WorkflowSchedule = {
         scheduleId: parsed.scheduleId, workflowId: parsed.workflowId, name: parsed.name, enabled: parsed.enabled,
         kind: parsed.kind, at: parsed.kind === 'once' ? parsed.at : undefined,
-        time: parsed.kind === 'daily' ? parsed.time : undefined, intervalMinutes: parsed.kind === 'interval' ? parsed.intervalMinutes : undefined,
+        time: ['daily','weekly','monthly','intervalDays'].includes(parsed.kind) ? parsed.time : undefined, intervalMinutes: parsed.kind === 'interval' ? parsed.intervalMinutes : undefined,
+        weekdays: parsed.kind === 'weekly' ? [...new Set(parsed.weekdays)].sort() : undefined, day: parsed.kind === 'monthly' ? parsed.day : undefined,
+        startDate: parsed.kind === 'intervalDays' ? parsed.startDate : undefined, intervalDays: parsed.kind === 'intervalDays' ? parsed.intervalDays : undefined,
+        revision: parsed.followLatest ? undefined : parsed.revision ?? (!previous || !sameWorkflow ? workflow.revision : previous.revision), followLatest: parsed.followLatest,
         lastRunAt: sameWorkflow ? previous?.lastRunAt : undefined, lastRunId: sameWorkflow ? previous?.lastRunId : undefined,
         lastError: sameTrigger ? previous?.lastError : undefined,
-        nextRunAt: parsed.enabled ? (sameTrigger && previous.enabled && previous.nextRunAt ? previous.nextRunAt : nextScheduleTime(parsed, now)) : undefined,
+        nextRunAt: parsed.enabled ? (sameTrigger && previous.enabled && previous.nextRunAt ? previous.nextRunAt : nextScheduleTime({ ...parsed, nextRunAt: undefined }, now)) : undefined,
       };
+      if (saved.revision) await this.store.getRevision(saved.workflowId, saved.revision);
       await this.store.saveSchedule(saved); this.schedules.set(saved.scheduleId, saved); return structuredClone(saved);
     });
   }
@@ -230,22 +237,43 @@ export class RunManager extends EventEmitter {
     return this.serialize(async () => {
       const now = this.now();
       for (const schedule of this.schedules.values()) {
+        for (const occurrence of await this.store.listOccurrences(schedule.scheduleId)) if (occurrence.outcome === 'claimed') await this.finishOccurrence(schedule, occurrence);
         if (!schedule.enabled || !schedule.nextRunAt || Date.parse(schedule.nextRunAt) > now.getTime()) continue;
-        const scheduledFor = schedule.nextRunAt;
+        const scheduledFor = latestScheduleTime(schedule, now);
         const claimed: WorkflowSchedule = { ...schedule, lastRunAt: now.toISOString(), lastRunId: undefined, lastError: undefined };
+        let occurrence = await this.store.readOccurrence(schedule.scheduleId, scheduledFor);
+        if (!occurrence) {
+          const workflow = (await this.listWorkflows()).find(flow => flow.workflowId === schedule.workflowId);
+          occurrence = { scheduleId: schedule.scheduleId, scheduledFor, runId: randomUUID(), outcome: 'claimed', workflowId: schedule.workflowId, revision: schedule.revision ?? workflow?.revision };
+          await this.store.saveOccurrence(occurrence);
+        }
+        await this.finishOccurrence(claimed, occurrence);
+        claimed.lastRunId = occurrence.outcome === 'started' ? occurrence.runId : undefined;
+        claimed.lastError = occurrence.reason;
         if (claimed.kind === 'once') { claimed.enabled = false; claimed.nextRunAt = undefined; }
         else claimed.nextRunAt = nextScheduleTime(claimed, now);
-        // Persist the occurrence before creating a run so restarting cannot execute it twice.
         await this.store.saveSchedule(claimed); this.schedules.set(claimed.scheduleId, claimed);
-        try {
-          const workflow = (await this.listWorkflows()).find(item => item.workflowId === claimed.workflowId);
-          if (!workflow) throw new Error('关联流程已不存在');
-          const run = await this.startWorkflow(workflow, { scheduleId: claimed.scheduleId, scheduledFor });
-          claimed.lastRunId = run.runId;
-        } catch (error) { claimed.lastError = error instanceof Error ? error.message : String(error); }
-        await this.store.saveSchedule(claimed);
       }
     });
+  }
+  private async finishOccurrence(schedule: WorkflowSchedule, occurrence: import('../../../packages/contracts/src/index.js').ScheduleOccurrence) {
+    if (occurrence.outcome !== 'claimed') return;
+    if (this.jobs.has(occurrence.runId)) occurrence.outcome = 'started';
+    else if ([...this.jobs.values()].some(job => job.run.workflowId === schedule.workflowId && !terminal(job.run.status))) {
+      occurrence.outcome = 'skipped'; occurrence.reason = '主动跳过：同一流程正在运行或等待人工，不进入补跑队列。';
+    } else {
+      try {
+        const workflow = occurrence.revision ? await this.store.getRevision(occurrence.workflowId ?? schedule.workflowId, occurrence.revision) : (await this.listWorkflows()).find(flow => flow.workflowId === schedule.workflowId);
+        if (!workflow) throw new Error('关联流程已不存在');
+        await this.startWorkflow(workflow, { scheduleId: schedule.scheduleId, scheduledFor: occurrence.scheduledFor, runId: occurrence.runId });
+        occurrence.outcome = 'started';
+      } catch (error) {
+        occurrence.outcome = 'skipped'; occurrence.reason = error instanceof Error ? error.message : String(error);
+        if (schedule.revision) { schedule.enabled = false; schedule.nextRunAt = undefined; }
+      }
+    }
+    schedule.lastRunAt = this.now().toISOString(); schedule.lastRunId = occurrence.outcome === 'started' ? occurrence.runId : undefined; schedule.lastError = occurrence.reason;
+    await this.store.saveOccurrence(occurrence); await this.store.saveSchedule(schedule);
   }
   runWorkflow(input: WorkflowDefinition): Promise<RunSnapshot> {
     const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
@@ -310,7 +338,7 @@ export class RunManager extends EventEmitter {
     if (!hasProgress(workflow.steps) || !job.run.attemptId) throw new Error('该运行没有配置业务键和进度记录，不能自动跳到中间步骤');
     return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { resumeFromRunId: id, resumeFromAttemptId: job.run.attemptId }));
   }
-  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string }, stepId?: string, executionOptions?: Partial<EngineOptions>): Promise<RunSnapshot> {
+  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string; runId?: string }, stepId?: string, executionOptions?: Partial<EngineOptions>): Promise<RunSnapshot> {
     if (this.emergencyStopping) throw new Error('紧急停止正在处理，请稍后再启动任务');
     if (this.shuttingDown) throw new Error('运行器正在退出');
     if (!stepId) {
@@ -336,7 +364,7 @@ export class RunManager extends EventEmitter {
       const target = join(this.options.dataDir, 'runs', run.runId, 'attempts', run.attemptId!, 'progress');
       await cp(source, target, { recursive: true }).catch(error => { if (error.code !== 'ENOENT') throw error; });
     }
-    this.jobs.set(run.runId, { workflow: structuredClone(workflow), run, executionOptions }); this.pending.push(run.runId);
+    this.jobs.set(run.runId, { workflow: structuredClone(workflow), run, executionOptions: { demoUrl: this.demoUrl, ...executionOptions } }); this.pending.push(run.runId);
     this.publish({ type: 'run', runId: run.runId, at: new Date().toISOString(), status: 'queued', run: structuredClone(run), ...(stepId ? { data: { stepId, workflow } } : {}) });
     this.drain(); return structuredClone(run);
   }

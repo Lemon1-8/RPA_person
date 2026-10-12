@@ -88,6 +88,7 @@ function removeDemoDefault(workflow: WorkflowDefinition, name: 'demoUrl' | 'cust
 
 /** Refresh the built-in fixture's port and migrate its former example variables. */
 export async function refreshDemoUrls(manager: RunManager, demoUrl: string) {
+  manager.setDemoUrl(demoUrl);
   for (const workflow of await manager.listWorkflows()) {
     if (workflow.workflowId !== 'order-export-demo') continue;
     let changed = false;
@@ -97,8 +98,8 @@ export async function refreshDemoUrls(manager: RunManager, demoUrl: string) {
     }
     if (workflow.variables.customer === '跨语言订单') changed = removeDemoDefault(workflow, 'customer', '跨语言订单') || changed;
     visitSteps(workflow.steps, step => {
-      if (step.stepId === 'open' && step.actionType === 'browser.open' && isFixtureUrl(step.params.url) && step.params.url !== demoUrl) {
-        step.params.url = demoUrl; changed = true;
+      if (step.stepId === 'open' && step.actionType === 'browser.open' && isFixtureUrl(step.params.url)) {
+        step.params.url = 'rpa://demo'; changed = true;
       }
     });
     if (changed) await manager.saveWorkflow(workflow);

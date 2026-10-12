@@ -4,6 +4,7 @@ export interface RpaClient {
   call(method: string, params?: Record<string, unknown>): Promise<unknown>;
   get(name: string): Promise<unknown>;
   set(name: string, value: unknown): Promise<unknown>;
+  getRunContext(): Promise<unknown>;
   output(value: unknown): Promise<void>;
 }
 
@@ -31,6 +32,7 @@ export function createRpaClient(
   };
   return {
     call,
+    getRunContext: () => call('core.runContext'),
     get: (name) => call('variables.get', { name }),
     set: (name, value) => call('variables.set', { name, value }),
     output: async (value) => { assertJson(value); output(value); },
