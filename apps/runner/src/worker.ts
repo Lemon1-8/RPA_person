@@ -28,7 +28,15 @@ function observeExecution(pending: Promise<unknown>) {
     console.error(error); process.exitCode = 1; finished = true; releaseWorkerWhenClosed();
   });
 }
-process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string; attemptId?: string }) => {
+process.on('message', (message: { type: string; requestId?: string; pickId?: string; pageId?: string; command?: RunCommand; workflow?: WorkflowDefinition; options?: EngineOptions; stepId?: string; attemptId?: string; method?: string; params?: Record<string, unknown> }) => {
+  if (message.type === 'browser-tool') {
+    controls++;
+    void (async () => {
+      try { if (!engine) throw new Error('执行器未启动'); const value = await engine.browserTool(message.method!, message.params ?? {}); sendMessage({ type: 'tool-result', requestId: message.requestId, value }); }
+      catch (error) { sendMessage({ type: 'tool-result', requestId: message.requestId, error: String(error) }); }
+      finally { controls--; releaseWorkerWhenClosed(); }
+    })();
+  }
   if (message.type === 'pick-browser-point' || message.type === 'cancel-browser-point') {
     controls++;
     void (async () => {

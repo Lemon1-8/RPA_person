@@ -2248,3 +2248,26 @@ button.danger { color: var(--danger); }
 .log-history-menu { position: relative; order: 2; font-size: 12px; color: #344c58; }
 .log-history-menu summary { cursor: pointer; padding: 6px 4px; }
 .log-history-menu > div { position: absolute; right: 0; top: 100%; z-index: 5; padding: 10px; width: 180px; display: grid; gap: 8px; background: #fff; border: 1px solid #c7dcd7; box-shadow: 0 4px 14px #18223826; }
+.advanced-actions summary { cursor: pointer; padding: 8px 12px; font-size: 12px; font-weight: 650; color: #344c58; }
+.step-tools, .web-elements, .preflight-report { padding: 8px 12px; border: 1px solid #d5e0e3; border-radius: 6px; margin: 8px 0; }
+.step-tools summary, .preflight-report summary { cursor: pointer; font-size: 12px; color: #344c58; }
+.batch-tools, .element-tools, .script-tools { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.batch-tools select { min-width: 120px; max-width: 240px; }
+.step-search-results { display: flex; flex-wrap: wrap; gap: 6px; }
+.web-elements fieldset { min-width: 0; margin-top: 10px; border: 1px solid #c7dcd7; }
+.element-row { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 0; border-bottom: 1px solid #d5e0e3; }
+.element-row small { flex-basis: 100%; overflow-wrap: anywhere; }
+.value-viewer { padding: 10px; overflow-wrap: anywhere; }
+.value-viewer > section { border-bottom: 1px solid #d5e0e3; padding: 8px 0; }
+.value-tree > div { padding-left: 12px; margin: 6px 0; }
+.value-tree button, .value-scalar button { padding: 2px 5px; min-height: 24px; font-size: 11px; margin-left: 6px; }
+.data-table-wrap { overflow: auto; max-height: 300px; }
+.data-table-wrap table { border-collapse: collapse; font-size: 12px; }
+.data-table-wrap th, .data-table-wrap td { padding: 5px 8px; border: 1px solid #d5e0e3; white-space: nowrap; max-width: 250px; overflow: hidden; text-overflow: ellipsis; }
+.script-editor { width: 100%; min-width: 0; }
+.script-editor.expanded { position: fixed; inset: 60px 40px; z-index: 30; padding: 16px; background: #fff; border: 1px solid #c7dcd7; box-shadow: 0 8px 28px #18223833; overflow: auto; }
+.script-code { display: flex; min-height: 160px; }
+.script-code pre { color: #52666f; margin: 0; padding: 10px 6px; background: #f6f7f8; font: 13px/20px monospace; user-select: none; max-height: 360px; overflow: hidden; }
+.script-code textarea { flex: 1; min-width: 0; line-height: 20px; }
+.script-editor.expanded .script-code { height: 65%; }
+.script-tools button { font-size: 12px; min-height: 28px; }

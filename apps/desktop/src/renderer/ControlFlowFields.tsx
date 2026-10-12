@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { DraftContext } from './DraftContext.js';
 import type {
   DesktopApi,
   StepDefinition,
@@ -198,6 +199,9 @@ function ValueField({
     initial.text = asJson(value);
   }
   const [draft, setDraft] = useState(initial);
+  const persistedDraft = useContext(DraftContext);
+  const draftKey = `${stepId}:control:${fieldKey}`;
+  useEffect(() => { const raw = persistedDraft.texts[draftKey]; if (raw) { try { const restored = JSON.parse(raw) as ValueDraft; if (['variable','text','number','boolean','json'].includes(restored.mode) && typeof restored.text === 'string') setDraft(restored); } catch { /* malformed metadata leaves the original file available */ } } }, [draftKey, persistedDraft.texts[draftKey]]);
   const [touched, setTouched] = useState(false);
   const ownValue = useRef(serialize(value));
   const drafts = useRef<Partial<Record<ValueMode, string>>>({ [initial.mode]: initial.text });
@@ -228,6 +232,7 @@ function ValueField({
     drafts.current[next.mode] = next.text;
     setDraft(next);
     const result = parseControlValue(next.mode, next.text, listOnly);
+    persistedDraft.write(draftKey, result.error ? JSON.stringify(next) : undefined);
     validity.current(fieldKey, !result.error);
     if (!result.error) {
       ownValue.current = serialize(result.value);

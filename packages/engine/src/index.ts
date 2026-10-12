@@ -96,6 +96,17 @@ export class WorkflowEngine {
   private scopedSettings: NonNullable<StepDefinition['settings']>;
   private stepNumbers = new Map<string, number>();
   private stepNames = new Map<string, string>();
+  private elementPick?: { id: string; abort: AbortController };
+  async browserTool(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (method === 'cancelElement') { const pick = this.elementPick; if (pick && pick.id === params.requestId) pick.abort.abort(); return null; }
+    if (!this.executionFinished || !this.browser?.isOpen()) throw new Error('请先结束运行并保留浏览器');
+    if (method === 'validateElement') return this.browser.validateElement(params.element as ElementRef);
+    if (method !== 'pickElement') throw new Error('不支持的浏览器工具');
+    if (this.elementPick || this.pointPick) throw new Error('浏览器已在拾取目标');
+    const abort = new AbortController(); this.elementPick = { id: String(params.requestId), abort };
+    try { return await this.browser.pickElement(String(params.pageId), abort.signal); }
+    finally { if (this.elementPick?.abort === abort) this.elementPick = undefined; }
+  }
   constructor(workflow: WorkflowDefinition, private options: EngineOptions) {
     this.workflow = workflowSchema.parse(workflow);
     validateActions(this.workflow);
@@ -165,6 +176,7 @@ export class WorkflowEngine {
     this.emit({ type: 'run', run: this.getSnapshot(), status });
   }
   async control(command: RunCommand): Promise<void> {
+    if (this.elementPick) { if (['stop', 'closeBrowser'].includes(command)) this.elementPick.abort.abort(); else throw new Error('请先结束元素拾取'); }
     if (this.pointPick) {
       if (command === 'stop' || command === 'closeBrowser') await this.cancelBrowserPoint(this.pointPick.id);
       else throw new Error('请先完成或取消取点');

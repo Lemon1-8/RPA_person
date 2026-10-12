@@ -72,6 +72,11 @@ import { editorReducer, emptyEditorState } from "./editor-history.js";
 import { explainError, runRecovery } from "./run-feedback.js";
 import { DraftContext } from './DraftContext.js';
 import { RevisionHistory } from './RevisionHistory.js';
+import { WebElements } from './WebElements.js';
+import { ValueViewer } from './ValueViewer.js';
+import { ScriptEditor } from './ScriptEditor.js';
+import { editSelectedSteps } from './step-editing.js';
+import type { PreflightIssue } from '../../../../packages/contracts/src/index.js';
 import type { WorkflowDraft, StorageIssue } from '../../../../packages/contracts/src/index.js';
 
 const api = (window as Window & { rpa?: DesktopApi }).rpa;
@@ -81,6 +86,7 @@ const terminalStatuses = new Set([
   "stopped",
   "interrupted",
 ]);
+const advancedActions = new Set(['browser.text', 'browser.table', 'browser.response', 'browser.select', 'browser.assertText', 'core.assert']);
 const statusLabels: Record<string, string> = {
   queued: "排队中",
   running: "运行中",
@@ -208,6 +214,9 @@ function RetainedBrowserStatus() {
       浏览器保留中
     </span>
   );
+}
+function ActionLibraryGroup({ category, children }: { category: string; children: ReactNode }) {
+  return category === '高级采集与校验' ? <details className="action-group advanced-actions"><summary>{category}</summary>{children}</details> : <section className="action-group"><h3>{category}</h3>{children}</section>;
 }
 
 function IconButton({
@@ -337,6 +346,7 @@ export function App() {
   const [pendingDrafts, setPendingDrafts] = useState<WorkflowDraft[]>([]);
   const [draftTexts, setDraftTexts] = useState<Record<string, Record<string, string>>>({});
   const [storageIssues, setStorageIssues] = useState<StorageIssue[]>([]);
+  const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
   const draftQueue = useRef<Promise<unknown>>(Promise.resolve());
   const flushDrafts = useRef<() => Promise<void>>(async () => {});
   const firstDraftEditAt = useRef<number | undefined>(undefined);
@@ -423,13 +433,7 @@ export function App() {
   const availableActions = useMemo(() => actions.filter(action => ![
     "browser.start",
     "browser.switchPage",
-    "core.assert",
-    "browser.assertText",
-    "browser.table",
-    "browser.text",
-    "browser.response",
-    "browser.select",
-  ].includes(action.type)), [actions]);
+  ].includes(action.type)).map(action => advancedActions.has(action.type) ? { ...action, category: '高级采集与校验' } : action), [actions]);
   const run = runs.find((item) => item.runId === runId);
   const runWorkflow = runWorkflows[runId];
   const stepNames = useMemo(() => new Map(flatten(runWorkflow?.steps ?? []).map(item => [item.step.stepId, item.step.name])), [runWorkflow]);
@@ -483,7 +487,7 @@ export function App() {
   const actionGroups = useMemo(() => {
     const groups = new Map<string, ActionDefinition[]>();
     for (const action of availableActions.filter((item) =>
-      (query || actionCategory === "全部" || (actionCategory === "网页" ? item.type.startsWith("browser.")
+      (query || actionCategory === "全部" || (actionCategory === '高级' ? advancedActions.has(item.type) : actionCategory === "网页" ? item.type.startsWith("browser.")
         : actionCategory === "软件" ? item.type.startsWith("windows.") || item.type.startsWith("desktop.")
         : ["browser.open", "browser.fill", "browser.click", "core.wait", "core.log", "variables.set"].includes(item.type))) && `${item.label} ${item.type} ${item.description}`
         .toLowerCase()
@@ -727,6 +731,10 @@ export function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [view, busy, workflowId, history, selectedId]);
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') { event.preventDefault(); void saveWorkflow(); } };
+    window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener);
+  }, [workflow, busy, invalidWorkflow]);
 
   function showRunPanel() {
     setRightPane("run"); setView("editor");
@@ -759,6 +767,7 @@ export function App() {
     setBusy(thenRun ? "run" : "save");
     setError("");
     try {
+      if (thenRun) { const issues = await api.preflight(workflow); setPreflightIssues(issues); if (issues.some(issue => issue.level === 'error')) { setError('运行前检查发现错误，请修正后运行。'); return; } }
       const persisted = await api.saveWorkflow(workflow);
       setWorkflows((previous) =>
         previous.map((item) =>
@@ -1075,6 +1084,7 @@ export function App() {
           </IconButton>
         </div>
       )}
+      {!!preflightIssues.length && <details className="preflight-report"><summary>运行前检查 · {preflightIssues.filter(issue => issue.level === 'error').length} 个错误，{preflightIssues.filter(issue => issue.level === 'warning').length} 个提醒</summary>{preflightIssues.map((issue, index) => <p key={index}><strong>{issue.level === 'error' ? '错误' : '提醒'}</strong>：{issue.message}{issue.stepId && <button onClick={() => { setSelectedId(issue.stepId!); setView('editor'); setRightPane('step'); }}>定位步骤</button>}</p>)}</details>}
       {workflowErrors[0] && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status">
         <AlertCircle size={17} />
         <span>“{workflowErrors[0].stepName}”：{workflowErrors[0].error}{workflowErrors.length > 1 ? `（另有 ${workflowErrors.length - 1} 项待完善）` : ""}</span>
@@ -1340,7 +1350,7 @@ export function App() {
             <kbd>Ctrl K</kbd>
           </label>
           <div className="library-categories" role="group" aria-label="指令类别">
-            {["全部", "常用", "网页", "软件"].map(category => <button key={category} aria-pressed={actionCategory === category}
+            {["全部", "常用", "网页", "软件", "高级"].map(category => <button key={category} aria-pressed={actionCategory === category}
               onClick={() => { setActionCategory(category); setQuery(""); }}>{category}</button>)}
           </div>
           <div className="action-groups">
@@ -1352,8 +1362,7 @@ export function App() {
               </div>
             ) : actionGroups.length ? (
               actionGroups.map(([category, items]) => (
-                <section key={category} className="action-group">
-                  <h3>{category}</h3>
+                <ActionLibraryGroup key={category} category={category}>
                   {category === "键盘和鼠标操作" && <p className="action-group-notice" role="note">
                     会抢夺鼠标和键盘，操作当前前台窗口；可用于电脑中的任意软件或网页。运行时请勿同时操作电脑。
                   </p>}
@@ -1375,7 +1384,7 @@ export function App() {
                       <Plus size={14} className="add-sign" />
                     </button>
                   ))}
-                </section>
+                </ActionLibraryGroup>
               ))
             ) : (
               <div className="subtle-empty">
@@ -1398,6 +1407,7 @@ export function App() {
               <span className="count">{steps.length}</span>
             </div>
             <div className="editor-history" aria-label="编辑历史">
+              <button disabled={!!busy} onClick={() => void api?.preflight(workflow!).then(setPreflightIssues).catch(catchError)}>运行前检查</button>
               <IconButton label="撤销编辑" title="撤销编辑（Ctrl+Z；输入框内使用文本撤销）" disabled={!canUndo || !!busy} onClick={() => restoreEdit("undo")}><Undo2 size={16} /></IconButton>
               <IconButton label="重做编辑" title="重做编辑（Ctrl+Y 或 Ctrl+Shift+Z）" disabled={!canRedo || !!busy} onClick={() => restoreEdit("redo")}><Redo2 size={16} /></IconButton>
             </div>
@@ -1509,6 +1519,7 @@ export function App() {
                   onToggleComment={toggleComments}
                   onMutate={mutateStep}
                   onAdd={addAction}
+                  onBatch={(ids, command, target) => { try { const next = editSelectedSteps(workflow?.steps ?? [], ids, command, target); updateWorkflow(flow => ({ ...flow, steps: next })); if (command === 'delete') setSelectedId(''); } catch (error) { catchError(error); } }}
                 />
                 <div className="flow-terminal end">
                   <span />
@@ -1675,6 +1686,8 @@ export function App() {
                         <XlsxPathField api={api} mode={selected.step.actionType === "file.xlsxWrite" ? "save" : "open"}
                           value={String(selected.step.params.path ?? "")} disabled={!!busy}
                           onChange={value => setParam("path", value)} />
+                      ) : field.key === 'code' && workflow ? (
+                        <ScriptEditor api={api} workflow={workflow} stepId={selectedId} value={String(selected.step.params.code ?? '')} disabled={!!busy} onChange={value => setParam('code', value)}/>
                       ) : field.type === "json" ? (
                         <JsonEditor
                           key={parameterEdits[field.key] ?? 0}
@@ -1793,6 +1806,7 @@ export function App() {
                               return;
                             }
                             if (field.type === "json") {
+                              writeDraftText(`${selectedId}:${inspector}:${field.label}`, undefined);
                               setParam(field.key, reference);
                               // Reset a malformed draft even when the chosen value equals its last valid value.
                               setParameterEdits(previous => ({ ...previous, [field.key]: (previous[field.key] ?? 0) + 1 }));
@@ -1993,6 +2007,7 @@ export function App() {
             {inspector === "elements" && selected && selected.step.actionType !== "core.note" && (
               <>
                 {workflow && <DesktopElements key={`${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? "desktop-element" : "")} onChange={next => updateWorkflow(() => next)} />}
+                {workflow && <WebElements key={`web:${workflowId}:${selectedId}`} api={api} workflow={workflow} step={selected.step} runId={pageBrowserId} pageId={coordinatePage?.pageId ?? '$current'} disabled={!!busy || workflowRunning} onBusy={working => setBusy(working ? 'web-element' : '')} onChange={next => updateWorkflow(() => next)}/>}
                 <h2 className="panel-title">元素引用</h2>
                 <p className="help-text">
                   当前指令通过 @元素名 引用自己的元素；子步骤继承，其他指令不受影响。
@@ -2163,14 +2178,14 @@ export function App() {
               />}
               {runTab === "variables" &&
                 (run && Object.keys(run.variables).length ? (
-                  <dl className="runtime-values">
+                  <><ValueViewer variables={run.variables}/><dl className="runtime-values" hidden>
                     {Object.entries(run.variables).map(([name, value]) => (
                       <div key={name}>
                         <dt><code>{name}</code><span>{value === null ? "null" : Array.isArray(value) ? "array" : typeof value}</span></dt>
                         <dd><code className="variable-value">{toText(value)}</code></dd>
                       </div>
                     ))}
-                  </dl>
+                  </dl></>
                 ) : (
                   <div className="console-empty"><Braces size={23} /><span>所选运行尚未产生变量。</span></div>
                 ))}

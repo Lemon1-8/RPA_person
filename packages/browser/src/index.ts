@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Download, type FrameLocator, type Locator, type Page, type Request, type Response } from 'playwright';
 import { browserScreenshotParamsSchema, type BrowserPageInfo, type BrowserPoint, type BrowserScreenshotResult } from '../../contracts/src/index.js';
 import { coordinatePickerSource, disposeCoordinatePicker } from './coordinate-picker.js';
+import { describeElement, elementPickerSource, disposeElementPicker } from './element-picker.js';
+import type { ElementRef, BrowserElementCapture, BrowserElementValidation } from '../../contracts/src/index.js';
 import { assertDebugPortAvailable, BrowserSessionError, killNativeBrowser, launchNativeBrowser, resolveBrowser, type BrowserChannel, type NativeBrowser } from './native-browser.js';
 import { removeTemporaryDownloadHistory } from './download-history.js';
 import { PopupGuard, type PopupPolicy } from './popup-guard.js';
@@ -365,6 +367,54 @@ export class BrowserSession {
     });
     this.queue = result.catch(() => undefined);
     return result;
+  }
+
+  async pickElement(pageId: string, signal?: AbortSignal): Promise<BrowserElementCapture | null> {
+    if (this.picking) throw new Error('浏览器正在拾取目标');
+    if (signal?.aborted) return null;
+    const page = this.page({ pageId }); this.picking = true;
+    const key = `__rpaElement${randomUUID().replaceAll('-', '')}`;
+    let finish!: () => void;
+    const cancelled = new Promise<null>(resolve => { finish = () => resolve(null); });
+    const timer = setTimeout(finish, 120000);
+    signal?.addEventListener('abort', finish, { once: true }); page.on('close', finish); page.on('framenavigated', finish);
+    const frames = page.frames();
+    try {
+      await this.queue; await this.setWindowState('normal', { pageId }); await page.bringToFront();
+      const candidates = await Promise.all(frames.map(async frame => {
+        await frame.evaluate(elementPickerSource(key));
+        return frame;
+      }));
+      const result = await Promise.race([cancelled, ...candidates.map(async frame => {
+        const picked = await frame.evaluate(key => (window as unknown as Record<string, { result: Promise<{ selector: string; text: string; stable: boolean } | null> }>)[key].result, key);
+        if (!picked) return null;
+        const framePath: string[] = []; let current = frame;
+        while (current.parentFrame()) {
+          const handle = await current.frameElement();
+          const source = `(() => { const __name = fn => fn; return ${describeElement.toString()}; })()`;
+          const description = await handle.evaluate((element, source) => (0, eval)(source)(element), source) as { selector: string; stable: boolean };
+          framePath.unshift(description.selector); picked.stable &&= description.stable; current = current.parentFrame()!;
+        }
+        return { element: { selector: picked.selector, framePath, pageRef: this.pageIds.get(page), expectedCount: 1 }, text: picked.text, stable: picked.stable, title: await page.title() };
+      })]);
+      return result;
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener('abort', finish); page.off('close', finish); page.off('framenavigated', finish);
+      await Promise.all(frames.map(frame => bounded(frame.evaluate(disposeElementPicker, key), 2000).catch(() => {})));
+      this.picking = false;
+    }
+  }
+  async validateElement(element: ElementRef): Promise<BrowserElementValidation> {
+    if (this.picking) throw new Error('请先结束拾取');
+    let scope: Page | FrameLocator = this.page({ element });
+    for (const selector of element.framePath ?? []) {
+      const count = await scope.locator(selector).count(); if (count !== 1) throw new Error(`iframe 匹配 ${count} 个，需要唯一目标`);
+      scope = scope.frameLocator(selector);
+    }
+    const locator = scope.locator(locatorSelector(element.selector)); const count = await locator.count();
+    const texts = await locator.allTextContents();
+    if (count === 1) await locator.evaluate(node => { const previous = (node as HTMLElement).style.outline; (node as HTMLElement).style.outline = '3px solid #168477'; setTimeout(() => { (node as HTMLElement).style.outline = previous; }, 1500); });
+    return { count, texts: texts.slice(0, 10).map(text => text.trim().slice(0, 160)) };
   }
 
   private page(params: Record<string, unknown>): Page {

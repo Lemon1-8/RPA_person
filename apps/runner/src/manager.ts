@@ -32,6 +32,18 @@ export class RunManager extends EventEmitter {
   private schedules = new Map<string, WorkflowSchedule>();
   private scheduleTimer?: NodeJS.Timeout;
   private checkingSchedules = false;
+  private tools = new Map<string, { runId: string; resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+  queryBrowserTool(runId: string, method: 'pickElement' | 'cancelElement' | 'validateElement', params: Record<string, unknown>): Promise<unknown> {
+    const job = this.jobs.get(scheduleIdentifier.parse(runId)); if (!job?.child?.connected) return Promise.reject(new Error('浏览器会话不存在'));
+    if (method !== 'cancelElement' && !terminal(job.run.status)) return Promise.reject(new Error('任务执行中不能拾取或校验元素'));
+    if (method !== 'cancelElement' && [...this.tools.values()].some(tool => tool.runId === runId)) return Promise.reject(new Error('浏览器工具正在操作'));
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.tools.delete(requestId); reject(new Error('浏览器工具超时')); }, method === 'pickElement' ? 125000 : 10000);
+      this.tools.set(requestId, { runId, resolve, reject, timer });
+      job.child!.send({ type: 'browser-tool', method, params, requestId }, error => { if (error) { clearTimeout(timer); this.tools.delete(requestId); reject(error); } });
+    });
+  }
   constructor(private options: ManagerOptions) {
     super();
     const concurrency = options.maxConcurrent ?? 2;
@@ -247,6 +259,7 @@ export class RunManager extends EventEmitter {
       if (!job || !job.child?.connected || !job.run.browserOpen) throw new Error('所选浏览器已关闭或不存在，请重新选择');
       if (job.run.workflowId !== workflow.workflowId) throw new Error('只能复用当前流程的浏览器');
       if (!terminal(job.run.status) || job.controls?.size || job.stopping || job.pointPick) throw new Error('该浏览器正在执行任务或操作，请等待完成或取消取点');
+      if ([...this.tools.values()].some(tool => tool.runId === browserRunId)) throw new Error('请先结束浏览器工具操作');
       if ((workflow.settings.profileId ?? workflow.workflowId) !== (job.workflow.settings.profileId ?? job.workflow.workflowId)
         || workflow.settings.headless !== job.workflow.settings.headless) throw new Error('浏览器配置已改变，请关闭原浏览器后重新运行');
       const previousRun = job.run;
@@ -298,6 +311,7 @@ export class RunManager extends EventEmitter {
       job.run.workflowId === workflow.workflowId || (job.workflow.settings.profileId ?? job.workflow.workflowId) === profileId
     ));
     if (retained.some(job => job.pointPick)) throw new Error('请先完成或取消取点，再运行流程');
+    if (retained.some(job => [...this.tools.values()].some(tool => tool.runId === job.run.runId))) throw new Error('请先结束浏览器工具操作');
     for (const job of retained) await this.applyControlRun(job.run.runId, 'closeBrowser');
   }
   private publish(event: RunEvent) {
@@ -326,7 +340,10 @@ export class RunManager extends EventEmitter {
     job.child = child; job.controls = new Map(); job.pageQueries = new Map(); job.finished = new Promise(resolve => { job.exit = resolve; });
     child.stdout?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
     child.stderr?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
-    child.on('message', (message: { type: string; event?: RunEvent; message?: string; requestId?: string; error?: string; pages?: BrowserPageInfo[]; point?: BrowserPoint | null }) => {
+    child.on('message', (message: { type: string; event?: RunEvent; message?: string; requestId?: string; error?: string; pages?: BrowserPageInfo[]; point?: BrowserPoint | null; value?: unknown }) => {
+      if (message.type === 'tool-result' && message.requestId) {
+        const pending = this.tools.get(message.requestId); if (pending) { clearTimeout(pending.timer); this.tools.delete(message.requestId); message.error ? pending.reject(new Error(message.error)) : pending.resolve(message.value); }
+      }
       if (message.type === 'point-result' && message.requestId === job.pointPick?.id) {
         this.finishPointPick(job, message.point, message.error ? new Error(message.error) : undefined);
       }
@@ -358,6 +375,7 @@ export class RunManager extends EventEmitter {
     child.on('error', error => { job.run.error = error.message; });
     child.once('disconnect', () => { this.rejectPageQueries(job, new Error('任务进程已断开连接')); });
     child.once('close', (code, signal) => {
+      for (const [id, tool] of this.tools) if (tool.runId === job.run.runId) { clearTimeout(tool.timer); this.tools.delete(id); tool.reject(new Error('浏览器工具进程已退出')); }
       clearTimeout(job.stopping); job.child = undefined;
       for (const pending of job.controls?.values() ?? []) { clearTimeout(pending.timer); pending.reject(new Error('任务进程已退出')); }
       job.controls?.clear();

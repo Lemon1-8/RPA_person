@@ -1,10 +1,12 @@
 import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { RunManager } from '../../runner/src/manager.js';
+import { preflight } from '../../../packages/actions/src/preflight.js';
 
 export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserWindow | undefined, trusted: (event: IpcMainInvokeEvent) => void) {
   const handle = (channel: string, action: (...args: any[]) => unknown) => ipcMain.handle(channel, (event, ...args) => { trusted(event); return action(...args); });
   handle('rpa:drafts', () => manager.store.listDrafts());
+  handle('rpa:preflight', flow => preflight(flow));
   handle('rpa:draft-save', draft => manager.store.saveDraft(draft));
   handle('rpa:draft-discard', id => manager.store.discardDraft(id));
   handle('rpa:revisions', id => manager.store.listRevisions(id));
@@ -15,6 +17,9 @@ export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserW
   handle('rpa:storage-issues', () => manager.store.issues());
   handle('rpa:storage-retry', () => manager.store.retryFailed());
   handle('rpa:occurrences', id => manager.store.listOccurrences(id));
+  handle('rpa:element-pick', (runId, pageId, requestId) => manager.queryBrowserTool(runId, 'pickElement', { pageId, requestId }));
+  handle('rpa:element-cancel', (runId, requestId) => manager.queryBrowserTool(runId, 'cancelElement', { requestId }));
+  handle('rpa:element-validate', (runId, element) => manager.queryBrowserTool(runId, 'validateElement', { element }));
   handle('rpa:events-export', async id => {
     const result = await dialog.showSaveDialog(window()!, { title: '导出运行日志', defaultPath: '运行日志.jsonl', filters: [{ name: 'JSONL 日志', extensions: ['jsonl'] }] });
     if (result.canceled || !result.filePath) return null;

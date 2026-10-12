@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Copy, CornerDownRight, P
 import type { ActionDefinition, StepDefinition } from "../../../../packages/contracts/src/index.js";
 import { getStepCategory, getStepDetails } from "./step-summary.js";
 import { noteStyle } from "./NoteFields.js";
+import { listSteps } from './step-editing.js';
 
 type Branch = "children" | "elseSteps";
 type Props = {
@@ -19,13 +20,15 @@ type Props = {
   onToggleComment: (ids: string[]) => void;
   onMutate: (id: string, command: "up" | "down" | "copy" | "delete") => void;
   onAdd: (action: ActionDefinition, targetId: string, branch: "after" | Branch) => void;
+  onBatch?: (ids: string[], command: 'copy' | 'delete' | 'move', target?: string) => void;
 };
 
 function contains(steps: StepDefinition[], id: string): boolean {
   return steps.some(step => step.stepId === id || contains(step.children ?? [], id) || contains(step.elseSteps ?? [], id));
 }
 
-export function StepTree({ steps, actions, selectedId, disabled, cannotRun, statuses, renderIcon, renderStatus, onSelect, onRun, onToggleComment, onMutate, onAdd }: Props) {
+export function StepTree({ steps, actions, selectedId, disabled, cannotRun, statuses, renderIcon, renderStatus, onSelect, onRun, onToggleComment, onMutate, onAdd, onBatch }: Props) {
+  const [stepSearch, setStepSearch] = useState(''); const [moveTarget, setMoveTarget] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [picker, setPicker] = useState<{ id: string; branch: Branch }>();
   const [query, setQuery] = useState("");
@@ -242,6 +245,9 @@ export function StepTree({ steps, actions, selectedId, disabled, cannotRun, stat
     event.stopPropagation();
     onToggleComment(selection);
   }}>
+    <details className="step-tools"><summary>查找与批量编辑{selection.length > 1 ? ` · 已选 ${selection.length} 条` : ''}</summary><label className="field"><span>搜索流程步骤</span><input value={stepSearch} onChange={event => setStepSearch(event.target.value)}/></label>{stepSearch && <div className="step-search-results">{listSteps(steps).filter(step => `${step.name} ${step.actionType} ${JSON.stringify(step.params)}`.toLowerCase().includes(stepSearch.toLowerCase())).map(step => <button key={step.stepId} onClick={() => { onSelect(step.stepId); setStepSearch(''); }}>{step.name}</button>)}</div>}
+      <div className="batch-tools"><button disabled={disabled || !selection.length} onClick={() => onBatch?.(selection, 'copy')}>复制所选</button><button disabled={disabled || !selection.length} onClick={() => { if (confirm(`删除所选 ${selection.length} 条指令及其子步骤？可撤销恢复。`)) onBatch?.(selection, 'delete'); }}>删除所选</button><select aria-label="移动到分支" value={moveTarget} onChange={event => setMoveTarget(event.target.value)}><option value="">流程末尾</option>{listSteps(steps).filter(step => ['control.if','control.forEach','control.forEachXlsx','control.tryCatch'].includes(step.actionType)).flatMap(step => [<option key={`${step.stepId}:children`} value={`${step.stepId}:children`}>{step.name} / 执行区</option>, ...(['control.if','control.tryCatch'].includes(step.actionType) ? [<option key={`${step.stepId}:elseSteps`} value={`${step.stepId}:elseSteps`}>{step.name} / 否则或 Catch</option>] : [])])}</select><button disabled={disabled || !selection.length} onClick={() => onBatch?.(selection, 'move', moveTarget)}>移动所选</button></div>
+    </details>
     <div className="step-tree">{renderSteps(steps, 0)}</div>
   </div>;
 }
