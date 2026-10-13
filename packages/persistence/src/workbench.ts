@@ -26,7 +26,14 @@ export class WorkbenchStore extends FileStore {
   private logWrites:Promise<unknown>=Promise.resolve();
   private flushEvents() {
     clearTimeout(this.logTimer);this.logTimer=undefined;const buffers=this.logBuffers;this.logBuffers=new Map();
-    const operation=this.logWrites.then(async()=>{for(const [id,lines] of buffers) await this.guarded(`event-batch:${id}:${randomUUID()}`,()=>writeFile(join(this.directory,'runs',scheduleIdentifier.parse(id),'events.jsonl'),lines.join(''),{flag:'a'}));});
+    const operation=this.logWrites.then(async()=>{
+      const errors: unknown[] = [];
+      for(const [id,lines] of buffers) {
+        try { await this.guarded(`event-batch:${id}:${randomUUID()}`,()=>writeFile(join(this.directory,'runs',scheduleIdentifier.parse(id),'events.jsonl'),lines.join(''),{flag:'a'})); }
+        catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new AggregateError(errors, '运行日志保存失败');
+    });
     this.logWrites=operation.catch(()=>{});return operation;
   }
   prepareEvent(event: RunEvent) {
@@ -126,11 +133,13 @@ export class WorkbenchStore extends FileStore {
     const snapshot=structuredClone(run);this.latestRuns.set(run.runId,snapshot);
     const root=this.guarded(`run:${run.runId}`, async () => {
       const latest = this.latestRuns.get(run.runId)!;
+      if (!latest) return;
       await super.saveRun(latest);
+      if (this.latestRuns.get(run.runId) === latest) this.latestRuns.delete(run.runId);
     });
     if(!run.attemptId) return root;
     const key=`${run.runId}:${run.attemptId}`;this.latestAttempts.set(key,snapshot);
-    const attempt=this.guarded(`attempt:${key}`,()=>{const operation=this.attemptsQueue.then(async()=>{const latest=this.latestAttempts.get(key)!;const dir=join(this.directory,'runs',latest.runId,'attempts',latest.attemptId!);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'run.json'),latest);});this.attemptsQueue=operation.catch(()=>{});return operation;});
+    const attempt=this.guarded(`attempt:${key}`,()=>{const operation=this.attemptsQueue.then(async()=>{const latest=this.latestAttempts.get(key);if(!latest)return;const dir=join(this.directory,'runs',latest.runId,'attempts',latest.attemptId!);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'run.json'),latest);if(this.latestAttempts.get(key)===latest)this.latestAttempts.delete(key);});this.attemptsQueue=operation.catch(()=>{});return operation;});
     return Promise.all([root,attempt]).then(()=>{});
   }
   async createRun(workflow: WorkflowDefinition, run: RunSnapshot) {
@@ -141,6 +150,11 @@ export class WorkbenchStore extends FileStore {
       const path = join(dir, 'workflow.json');
       try { await readFile(path); } catch (error) { if (!missing(error)) throw error; await writeJsonAtomic(path, workflow); }
     }
+  }
+  forgetRun(runId: string) {
+    this.eventSequence.delete(runId);
+    this.latestRuns.delete(runId);
+    for (const key of this.latestAttempts.keys()) if (key.startsWith(`${runId}:`)) this.latestAttempts.delete(key);
   }
   async listAttempts(runId: string): Promise<RunAttempt[]> {
     const id = scheduleIdentifier.parse(runId); const dir = join(this.directory, 'runs', id, 'attempts');

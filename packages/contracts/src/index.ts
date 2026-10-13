@@ -77,7 +77,8 @@ export interface RunEvent {
   callStepId?: string; sourceWorkflowId?: string;
   status?: string; message?: string; data?: unknown; run?: RunSnapshot;
 }
-export type RunCommand = 'pause' | 'resume' | 'stop' | 'show' | 'hide' | 'closeBrowser' | 'step' | 'skip' | 'confirm' | 'retry' | 'check';
+export const runCommands = ['pause', 'resume', 'stop', 'show', 'hide', 'closeBrowser', 'step', 'skip', 'confirm', 'retry', 'check'] as const;
+export type RunCommand = typeof runCommands[number];
 export interface BrowserPageInfo {
   pageId: string; title: string; url: string; current: boolean; openerPageId?: string;
 }

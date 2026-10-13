@@ -43,6 +43,8 @@ await browser.close();
 
 初始当前网页为 `main`。省略、留空或使用 `$current` 的 `pageId` 指向流程当前网页；显式 `pageId` 优先于元素的 `pageRef`，否则使用 `pageRef` 或当前网页。元素动作支持直接传入 `selector`，或传入 `element: { pageRef, framePath, selector, expectedCount }`，其中 `framePath` 逐层描述 iframe 选择器。交互动作要求目标唯一。`timeoutMs` 默认 15000 毫秒，必须大于零。
 
+动作排队、浏览器启动、各层 iframe 和目标定位共用一个期限，各阶段只使用剩余时间。定位完成时已经到期，不会再发起点击；执行器到期后仍有未结束的浏览器操作时关闭本次会话。已经结束的普通定位失败仍保留浏览器供检查。低级网页鼠标、键盘动作的 `pageId` 只选择本次目标，不更新流程当前网页。
+
 | 方法 | 主要参数 | 输出 |
 | --- | --- | --- |
 | `browser.open` | `url`, `pageId?`, `openMode?: reuse / new` | `{ pageId, url }` |

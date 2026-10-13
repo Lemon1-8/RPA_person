@@ -11,10 +11,10 @@ export function normalizeWorkflowForStorage(input: WorkflowDefinition): Workflow
   return JSON.parse(JSON.stringify(workflow)) as WorkflowDefinition;
 }
 
-export async function writeJsonAtomic(path: string, value: unknown) {
+export async function writeFileAtomic(path: string, value: string | Uint8Array) {
   const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(value, null, 2), 'utf8');
   try {
+    await writeFile(temporary, value);
     for (let attempt = 0; ; attempt++) {
       try { await rename(temporary, path); break; }
       catch (error) {
@@ -23,6 +23,9 @@ export async function writeJsonAtomic(path: string, value: unknown) {
       }
     }
   } finally { await unlink(temporary).catch(() => {}); }
+}
+export async function writeJsonAtomic(path: string, value: unknown) {
+  await writeFileAtomic(path, JSON.stringify(value, null, 2));
 }
 export class FileStore {
   private queue: Promise<unknown> = Promise.resolve();

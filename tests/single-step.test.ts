@@ -32,6 +32,20 @@ beforeEach(() => { for (const mock of Object.values(browser)) mock.mockReset(); 
 afterEach(async () => { await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 
 describe('单条指令执行器', () => {
+  it('未结束的浏览器动作超时后关闭会话，阻止失败终态之后的迟到点击', async () => {
+    const runner = await engine(flow([{ stepId: 'click', name: '点击', actionType: 'browser.click', timeoutMs: 100, params: { selector: '#slow' } }]));
+    let clicks = 0; let timer: ReturnType<typeof setTimeout> | undefined;
+    browser.call.mockImplementationOnce(() => new Promise((resolve, reject) => {
+      timer = setTimeout(() => { clicks++; resolve({ ok: true }); }, 1700);
+      browser.close.mockImplementation(() => { clearTimeout(timer); reject(new Error('浏览器已关闭')); });
+    }));
+    try {
+      const result = await runner.runSingleStep('click');
+      expect(result.status).toBe('failed'); expect(result.browserOpen).toBe(false);
+      await new Promise(resolve => setTimeout(resolve, 750)); expect(clicks).toBe(0);
+    } finally { clearTimeout(timer); await runner.control('closeBrowser'); }
+  });
+
   it('只执行选中指令，继承祖先作用域但不计算祖先条件或执行相邻指令', async () => {
     const directory = join(tmpdir(), 'ancestor-downloads');
     const workflow = flow([

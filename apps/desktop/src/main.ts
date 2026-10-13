@@ -9,7 +9,7 @@ import { refreshDemoUrls, seedDesktopWorkspace } from './workspace.js';
 import { DesktopElementService } from './desktop-elements.js';
 import { createApplicationIcon } from './icons.js';
 import { registerWorkbenchIpc, flushRendererDrafts } from './workbench-ipc.js';
-import type { DesktopPoint, RunCommand, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
+import type { DesktopPoint, RunEvent, WorkflowDefinition, WorkflowSchedule } from '../../../packages/contracts/src/index.js';
 
 const root = process.env.RPA_ROOT ?? resolve(__dirname, '../..');
 process.env.RPA_ROOT = root;
@@ -107,11 +107,6 @@ else {
     ipcMain.handle('rpa:pick-desktop-element', (event, requestId: string) => { trusted(event); return desktopElements.pick(requestId); });
     ipcMain.handle('rpa:cancel-desktop-element', (event, requestId: string) => { trusted(event); desktopElements.cancel(requestId); });
     ipcMain.handle('rpa:validate-desktop-element', (event, element) => { trusted(event); return desktopElements.validate(element); });
-    ipcMain.handle('rpa:control', async (event, runId: string, command: RunCommand) => {
-      trusted(event);
-      if (typeof runId !== 'string' || !['pause', 'resume', 'stop', 'show', 'hide', 'closeBrowser'].includes(command)) throw new Error('无效的任务操作');
-      await manager.controlRun(runId, command);
-    });
     ipcMain.handle('rpa:directory', async event => {
       trusted(event); const result = await dialog.showOpenDialog(window!, { title: '选择下载保存目录', properties: ['openDirectory', 'createDirectory'] });
       return result.canceled ? null : result.filePaths[0];
@@ -135,9 +130,10 @@ else {
       trusted(event);
       if (typeof path !== 'string') throw new Error('文件路径无效');
       const candidate = resolve(path);
-      const artifacts = manager.listRuns().flatMap(run => run.artifacts).map(a => resolve(a.path));
+      const runs = manager.listRunHeaders();
+      const artifacts = runs.flatMap(run => run.artifacts).map(a => resolve(a.path));
       const allowedDirs = [dataDir, defaultDownloadDir, ...(await manager.listWorkflows()).map(w => w.settings.downloadDir)].map(p => resolve(p));
-      const screenshot = manager.listRuns().some(run => dirname(candidate) === join(dataDir, 'runs', run.runId) && /^[a-zA-Z0-9_-]+\.png$/.test(basename(candidate)));
+      const screenshot = runs.some(run => dirname(candidate) === join(dataDir, 'runs', run.runId) && /^[a-zA-Z0-9_-]+\.png$/.test(basename(candidate)));
       if (!artifacts.includes(candidate) && !allowedDirs.includes(candidate) && !screenshot) throw new Error('只能打开流程目录或运行产物');
       const error = await shell.openPath(candidate); if (error) throw new Error(error);
     });

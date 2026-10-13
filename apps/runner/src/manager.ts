@@ -14,7 +14,7 @@ import type { EngineOptions } from '../../../packages/engine/src/index.js';
 import { mergeRunEvent } from '../../../packages/contracts/src/run-events.js';
 import { workflowDependencies } from './dependencies.js';
 import { runMetadataFiles } from './history.js';
-import type { CleanupPreview,RunHistoryQuery } from '../../../packages/contracts/src/index.js';
+import type { CleanupPreview,RunHistoryQuery,ScheduleOccurrence } from '../../../packages/contracts/src/index.js';
 
 const terminal = (status: RunSnapshot['status']) => ['succeeded', 'failed', 'stopped', 'interrupted'].includes(status);
 interface PendingControl { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
@@ -37,6 +37,7 @@ export class RunManager extends EventEmitter {
   private shuttingDown = false;
   private startQueue: Promise<unknown> = Promise.resolve();
   private schedules = new Map<string, WorkflowSchedule>();
+  private pendingOccurrences = new Map<string, ScheduleOccurrence>();
   private scheduleTimer?: NodeJS.Timeout;
   private checkingSchedules = false;
   private emergencyStopping = false;
@@ -71,12 +72,12 @@ export class RunManager extends EventEmitter {
     if(!Array.isArray(runIds) || !Array.isArray(revisions) || runIds.length+revisions.length>1000) throw new Error('清理选择无效');
     await this.store.flush();const protectedKeys=await this.protectedRevisions();const preview:CleanupPreview={token:randomUUID(),runIds:[],revisions:[],files:[],bytes:0,protected:[]};
     const artifacts = [...this.jobs.values()].flatMap(job => job.run.artifacts.map(artifact => artifact.path));
-    for(const id of new Set(runIds.map(id=>scheduleIdentifier.parse(id)))) {const job=this.jobs.get(id);if(!job?.run.archived || !terminal(job.run.status) || job.run.browserOpen || [...this.jobs.values()].some(other=>!terminal(other.run.status) && other.run.resumedFromRunId===id)) {preview.protected.push(`运行 ${id} 未归档、仍占用会话或正在被续跑引用`);continue;}preview.runIds.push(id);preview.files.push(...await runMetadataFiles(this.options.dataDir,id,artifacts));}
+    for(const id of new Set(runIds.map(id=>scheduleIdentifier.parse(id)))) {const job=this.jobs.get(id);if(!job?.run.archived || !terminal(job.run.status) || job.run.browserOpen || this.pendingOccurrences.has(id) || [...this.jobs.values()].some(other=>!terminal(other.run.status) && other.run.resumedFromRunId===id)) {preview.protected.push(`运行 ${id} 未归档、仍占用会话或正在被续跑、触发账本引用`);continue;}preview.runIds.push(id);preview.files.push(...await runMetadataFiles(this.options.dataDir,id,artifacts));}
     for(const ref of revisions) {const id=scheduleIdentifier.parse(ref.workflowId);if(!Number.isSafeInteger(ref.revision) || ref.revision<1) throw new Error('清理修订无效');const key=`${id}@${ref.revision}`;if(protectedKeys.has(key)){preview.protected.push(`修订 ${key} 被保存流程或固定计划引用`);continue;}const path=join(this.options.dataDir,'revisions',id,`${ref.revision}.json`);try{await stat(path);preview.files.push(path);preview.revisions.push({workflowId:id,revision:ref.revision});}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT') throw error;}}
     preview.files=[...new Set(preview.files)];for(const path of preview.files) preview.bytes+=(await stat(path)).size;
     if(this.cleanups.size>=10) this.cleanups.delete(this.cleanups.keys().next().value!);this.cleanups.set(preview.token,{preview,at:Date.now()});return structuredClone(preview);
   }
-  applyCleanup(token:string) {return this.serialize(async()=>{const selected=this.cleanups.get(scheduleIdentifier.parse(token));if(!selected || Date.now()-selected.at>900000) throw new Error('清理预览已失效，请重新预览');const current=await this.previewCleanup(selected.preview.runIds,selected.preview.revisions);this.cleanups.delete(current.token);if(current.protected.length || current.files.some(path=>!selected.preview.files.includes(path))) throw new Error('清理引用或文件已变化，请重新预览');for(const path of current.files) await unlink(path).catch(error=>{if(error.code!=='ENOENT') throw error;});for(const id of current.runIds) this.jobs.delete(id);this.cleanups.delete(token);});}
+  applyCleanup(token:string) {return this.serialize(async()=>{const selected=this.cleanups.get(scheduleIdentifier.parse(token));if(!selected || Date.now()-selected.at>900000) throw new Error('清理预览已失效，请重新预览');const current=await this.previewCleanup(selected.preview.runIds,selected.preview.revisions);this.cleanups.delete(current.token);if(current.protected.length || current.files.some(path=>!selected.preview.files.includes(path))) throw new Error('清理引用或文件已变化，请重新预览');for(const path of current.files) await unlink(path).catch(error=>{if(error.code!=='ENOENT') throw error;});for(const id of current.runIds) {this.jobs.delete(id);this.store.forgetRun(id);}this.cleanups.delete(token);});}
   setDemoUrl(value: string) { this.demoUrl = new URL(value).href; }
   async stopAll() {
     this.emergencyStopping = true; this.pending = [];
@@ -100,6 +101,7 @@ export class RunManager extends EventEmitter {
     const concurrency = options.maxConcurrent ?? 2;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error('并发数须为 1–16 的整数');
     this.store = new WorkbenchStore(options.dataDir);
+    this.store.health.on('change', () => { for (const job of this.jobs.values()) if (!job.persistent) this.compactJob(job); });
   }
   async initialize() {
     await this.store.initialize();
@@ -129,6 +131,7 @@ export class RunManager extends EventEmitter {
       }
       await this.store.saveSchedule(schedule);
       this.schedules.set(schedule.scheduleId, schedule);
+      for (const occurrence of await this.store.listOccurrences(schedule.scheduleId)) if (occurrence.outcome === 'claimed') this.pendingOccurrences.set(occurrence.runId, occurrence);
     }
     if (this.options.autoStartSchedules !== false) this.startScheduling();
   }
@@ -154,6 +157,12 @@ export class RunManager extends EventEmitter {
     this.startQueue = operation.catch(() => {}); return operation;
   }
   listRuns() { return [...this.jobs.values()].map(job=>{if(!job.persistent)return structuredClone(job.run);const saved=this.store.readRunSnapshotSync(job.run.runId);return {...saved,...job.run,variables:saved.variables};}).sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+  listRunHeaders() { return [...this.jobs.values()].map(job => structuredClone({ ...job.run, variables: {} })); }
+  private compactJob(job: Job) {
+    if (job.child || !terminal(job.run.status) || job.run.browserOpen || this.store.issues().some(issue => issue.id === `run:${job.run.runId}`)) return;
+    job.run = { ...job.run, variables: {} }; job.persistent = true;
+    job.workflow = undefined as unknown as WorkflowDefinition; job.executionOptions = undefined;
+  }
   bootstrapRuns() {return [...this.jobs.values()].sort((a,b)=>b.run.startedAt.localeCompare(a.run.startedAt)).filter((job,index)=>index<50 || !terminal(job.run.status) || job.run.browserOpen).map(job=>job.persistent?this.store.readRunSnapshotSync(job.run.runId):structuredClone(job.run));}
   concurrencyLimit() { return this.options.maxConcurrent ?? 2; }
   async preflightWorkflow(flow:WorkflowDefinition) {
@@ -245,6 +254,7 @@ export class RunManager extends EventEmitter {
       if (!(await this.listWorkflows()).some(workflow => workflow.workflowId === id)) throw new Error('流程不存在');
       for (const schedule of this.schedules.values()) if (schedule.workflowId === id) {
         await this.store.deleteSchedule(schedule.scheduleId); this.schedules.delete(schedule.scheduleId);
+        for (const [runId, occurrence] of this.pendingOccurrences) if (occurrence.scheduleId === schedule.scheduleId) this.pendingOccurrences.delete(runId);
       }
       await this.store.deleteWorkflow(id);
     });
@@ -282,13 +292,14 @@ export class RunManager extends EventEmitter {
     return this.serialize(async () => {
       if (!this.schedules.has(id)) throw new Error('定时计划不存在');
       await this.store.deleteSchedule(id); this.schedules.delete(id);
+      for (const [runId, occurrence] of this.pendingOccurrences) if (occurrence.scheduleId === id) this.pendingOccurrences.delete(runId);
     });
   }
   checkSchedules(): Promise<void> {
     return this.serialize(async () => {
       const now = this.now();
       for (const schedule of this.schedules.values()) {
-        for (const occurrence of await this.store.listOccurrences(schedule.scheduleId)) if (occurrence.outcome === 'claimed') await this.finishOccurrence(schedule, occurrence);
+        for (const occurrence of [...this.pendingOccurrences.values()]) if (occurrence.scheduleId === schedule.scheduleId) await this.finishOccurrence(schedule, structuredClone(occurrence));
         if (!schedule.enabled || !schedule.nextRunAt || Date.parse(schedule.nextRunAt) > now.getTime()) continue;
         const scheduledFor = latestScheduleTime(schedule, now);
         const claimed: WorkflowSchedule = { ...schedule, lastRunAt: now.toISOString(), lastRunId: undefined, lastError: undefined };
@@ -297,6 +308,7 @@ export class RunManager extends EventEmitter {
           const workflow = (await this.listWorkflows()).find(flow => flow.workflowId === schedule.workflowId);
           occurrence = { scheduleId: schedule.scheduleId, scheduledFor, runId: randomUUID(), outcome: 'claimed', workflowId: schedule.workflowId, revision: schedule.revision ?? workflow?.revision };
           await this.store.saveOccurrence(occurrence);
+          this.pendingOccurrences.set(occurrence.runId, structuredClone(occurrence));
         }
         await this.finishOccurrence(claimed, occurrence);
         claimed.lastRunId = occurrence.outcome === 'started' ? occurrence.runId : undefined;
@@ -324,7 +336,7 @@ export class RunManager extends EventEmitter {
       }
     }
     schedule.lastRunAt = this.now().toISOString(); schedule.lastRunId = occurrence.outcome === 'started' ? occurrence.runId : undefined; schedule.lastError = occurrence.reason;
-    await this.store.saveOccurrence(occurrence); await this.store.saveSchedule(schedule);
+    await this.store.saveOccurrence(occurrence); this.pendingOccurrences.delete(occurrence.runId); await this.store.saveSchedule(schedule);
   }
   runWorkflow(input: WorkflowDefinition): Promise<RunSnapshot> {
     const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
@@ -511,7 +523,8 @@ export class RunManager extends EventEmitter {
         this.store.saveRun(job.run).catch(error => this.emit('storage-error', error));
         this.publish({ type: 'run', runId: job.run.runId, at: new Date().toISOString(), run: structuredClone(job.run), status: job.run.status, message: '浏览器已关闭' });
       }
-      job.exit?.(); this.drain();
+      void this.store.flush().then(() => this.compactJob(job), error => this.emit('storage-error', error)).finally(() => job.exit?.());
+      this.drain();
     });
     child.send({ type: 'start', workflow: job.workflow, stepId: job.run.stepId, options: { ...job.executionOptions, dataDir: this.options.dataDir, runId: job.run.runId, scheduleId: job.run.scheduleId, scheduledFor: job.run.scheduledFor, attemptId: job.run.attemptId } }, error => { if (error) job.run.error = error.message; });
   }
@@ -540,7 +553,7 @@ export class RunManager extends EventEmitter {
     if (job.run.status === 'queued' && !job.child) {
       if (command !== 'stop') throw new Error('任务正在排队，可停止或等待开始');
       job.run.status = 'stopped'; job.run.endedAt = new Date().toISOString(); await this.store.saveRun(job.run);
-      this.publish({ type: 'run', runId, at: new Date().toISOString(), run: structuredClone(job.run), status: 'stopped' }); return;
+      this.publish({ type: 'run', runId, at: new Date().toISOString(), run: structuredClone(job.run), status: 'stopped' }); this.compactJob(job); return;
     }
     if (!job.child?.connected) throw new Error('任务进程未连接');
     if (command === 'stop' || command === 'closeBrowser') {

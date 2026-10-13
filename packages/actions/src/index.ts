@@ -187,10 +187,19 @@ export function getAction(type: string) {
   if (!found) throw new Error(`不支持的动作：${type}`);
   return found;
 }
-export function validateActionParams(type: string, params: Record<string, unknown>): Record<string, unknown> {
+export function validateActionParams(type: string, params: Record<string, unknown>, runtimeValue?: (path: PropertyKey[]) => boolean): Record<string, unknown> {
   const action = getAction(type);
   const result = action.schema.safeParse(params);
-  if (!result.success) throw new Error(`${action.metadata.label} 参数错误：${result.error.issues.map(issue => {
+  if (!result.success) {
+    const relevant = (issue: z.core.$ZodIssue, prefix: PropertyKey[] = []): boolean => {
+      const path = [...prefix, ...issue.path];
+      if (runtimeValue?.(path)) return false;
+      if (issue.code === 'invalid_union' && issue.errors.some(branch => branch.every(child => !relevant(child, path)))) return false;
+      return true;
+    };
+    const issues = result.error.issues.filter(issue => relevant(issue));
+    if (!issues.length) return params;
+    throw new Error(`${action.metadata.label} 参数错误：${issues.map(issue => {
     const key = issue.path[0];
     const label = action.metadata.fields.find(field => field.key === key)?.label ?? (key ? String(key) : '参数');
     if (issue.code === 'invalid_type') {
@@ -203,7 +212,8 @@ export function validateActionParams(type: string, params: Record<string, unknow
       return `${label}必须是${expected}，当前为${received}`;
     }
     return issue.path.length ? `${label}：${issue.message}` : issue.message;
-  }).join('；')}`);
+    }).join('；')}`);
+  }
   return result.data as Record<string, unknown>;
 }
 export function validateActions(workflow: WorkflowDefinition) {

@@ -35,10 +35,14 @@ function requiredNumber(params: Record<string, unknown>, key: string): number {
   return params[key];
 }
 
-function timeout(params: Record<string, unknown>): number {
+const actionDeadline = Symbol('browserActionDeadline');
+type TimedParams = Record<string, unknown> & { [actionDeadline]?: number };
+function timeout(params: TimedParams): number {
   const value = params.timeoutMs ?? 15_000;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error('timeoutMs 必须是正数');
-  return value;
+  const remaining = Math.min(value, (params[actionDeadline] ?? Infinity) - Date.now());
+  if (remaining <= 0) throw new BrowserSessionError('BROWSER_TIMEOUT', `浏览器动作超时（${value} ms）`);
+  return remaining;
 }
 
 function clickMode(params: Record<string, unknown>): 'normal' | 'force' | 'dom' {
@@ -348,12 +352,13 @@ export class BrowserSession {
     this.lease = undefined;
   }
 
-  async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  async call(method: string, params: Record<string, unknown> = {}, deadlineAt?: number): Promise<unknown> {
     if (method === 'browser.listPages') return this.listPages();
     if (this.picking) throw new Error('浏览器正在获取坐标，请先完成或取消取点');
     if (method === 'browser.closePage' && params.closeMode !== undefined && params.closeMode !== 'page' && params.closeMode !== 'all') {
       throw new Error('关闭范围必须是 page 或 all');
     }
+    const input: TimedParams = { ...params, [actionDeadline]: Math.min(deadlineAt ?? Infinity, Date.now() + timeout(params)) };
     const result = this.queue.then(async () => {
       if (method === 'browser.closePage' && params.closeMode === 'all') {
         const closedPageIds = [...this.pages].filter(([, page]) => !page.isClosed()).map(([pageId]) => pageId);
@@ -363,7 +368,8 @@ export class BrowserSession {
         return { ok: true, closedPageIds };
       }
       await this.start();
-      return this.execute(method, params);
+      timeout(input);
+      return this.execute(method, input);
     });
     this.queue = result.catch(() => undefined);
     return result;
@@ -429,12 +435,6 @@ export class BrowserSession {
     const id = !alias || alias === '$current' ? this.currentPageId : alias;
     const page = this.pages.get(id);
     if (!page || page.isClosed()) throw new Error(`浏览器标签页不存在或已关闭：${id}`);
-    return page;
-  }
-
-  private async inputPage(params: Record<string, unknown>): Promise<Page> {
-    const page = this.page(params);
-    this.currentPageId = this.pageIds.get(page)!;
     return page;
   }
 
@@ -530,7 +530,7 @@ export class BrowserSession {
     }
     if (method === 'browser.show' || method === 'browser.hide') return this.setWindowState(method === 'browser.show' ? 'normal' : 'minimized', params);
     if (method === 'browser.mouseClick') {
-      const page = await this.inputPage(params);
+      const page = this.page(params);
       await page.mouse.click(requiredNumber(params, 'x'), requiredNumber(params, 'y'), {
         button: params.button === 'middle' || params.button === 'right' ? params.button : 'left',
         clickCount: typeof params.clickCount === 'number' ? params.clickCount : 1,
@@ -539,26 +539,26 @@ export class BrowserSession {
       return { ok: true };
     }
     if (method === 'browser.mouseMove') {
-      const page = await this.inputPage(params);
+      const page = this.page(params);
       await page.mouse.move(requiredNumber(params, 'x'), requiredNumber(params, 'y'), {
         steps: typeof params.steps === 'number' ? params.steps : 1,
       });
       return { ok: true };
     }
     if (method === 'browser.mouseWheel') {
-      const page = await this.inputPage(params);
+      const page = this.page(params);
       await page.mouse.wheel(requiredNumber(params, 'deltaX'), requiredNumber(params, 'deltaY'));
       return { ok: true };
     }
     if (method === 'browser.keyPress') {
-      const page = await this.inputPage(params);
+      const page = this.page(params);
       const holdMs = params.holdMs === undefined ? 70 + Math.round(Math.random() * 80) : requiredNumber(params, 'holdMs');
       if (!Number.isInteger(holdMs) || holdMs < 20 || holdMs > 1000) throw new Error('按键时长必须是 20–1000 毫秒的整数');
       await page.keyboard.press(requiredString(params, 'key'), { delay: holdMs });
       return { ok: true };
     }
     if (method === 'browser.keyboardType') {
-      const page = await this.inputPage(params);
+      const page = this.page(params);
       if (typeof params.text !== 'string') throw new Error('输入文本必须是文本');
       await page.keyboard.type(params.text, { delay: typeof params.delayMs === 'number' ? params.delayMs : 0 });
       return { ok: true };
@@ -642,7 +642,7 @@ export class BrowserSession {
         const deadline = Date.now() + options.timeout;
         let actual = '';
         do {
-          actual = await locator.innerText(options);
+          actual = await locator.innerText({ timeout: timeout(params) });
           if (actual.includes(expected)) return { ok: true, text: actual };
           await new Promise((resolve) => setTimeout(resolve, 40));
         } while (Date.now() < deadline);

@@ -27,6 +27,42 @@ async function setup(headless = true) {
 }
 
 describe('BrowserSession public browser boundary', () => {
+  it('跨网页键鼠操作只作用于指定网页，不改变后续默认目标', async () => {
+    const { browser, fixture } = await setup();
+    await browser.call('browser.open', { url: fixture.url });
+    await browser.call('browser.open', { url: fixture.url, pageId: 'detail', openMode: 'new' });
+    await browser.call('browser.switchPage', { pageId: 'main' });
+    for (const [method, params] of [
+      ['browser.mouseMove', { x: 0, y: 0 }],
+      ['browser.mouseClick', { x: 0, y: 0 }],
+      ['browser.mouseWheel', { deltaX: 0, deltaY: 0 }],
+      ['browser.keyPress', { key: 'Escape', holdMs: 20 }],
+      ['browser.keyboardType', { text: '' }],
+    ] as const) {
+      await browser.call(method, { ...params, pageId: 'detail' });
+      expect((await browser.listPages()).find(page => page.current)?.pageId).toBe('main');
+    }
+  });
+
+  it('分阶段定位共享动作期限，超时后不点击迟到按钮且可继续检查现场', async () => {
+    const { browser, fixture } = await setup();
+    await browser.call('browser.open', { url: fixture.url });
+    await browser.call('browser.evaluate', { expression: `
+      window.lateClicks = 0;
+      setTimeout(() => {
+        const frame = document.createElement('iframe'); frame.id = 'late-frame'; document.body.prepend(frame);
+        setTimeout(() => {
+          const button = frame.contentDocument.createElement('button'); button.id = 'late-button'; button.textContent = 'late';
+          button.onclick = () => window.lateClicks++; frame.contentDocument.body.append(button);
+        }, 600);
+      }, 300); null;
+    ` });
+    await expect(browser.call('browser.click', { element: { framePath: ['#late-frame'], selector: '#late-button' }, clickMode: 'dom', timeoutMs: 750 })).rejects.toThrow(/Timeout|超时|超过/);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(await browser.call('browser.evaluate', { expression: 'window.lateClicks' })).toBe(0);
+    expect(browser.isOpen()).toBe(true);
+  });
+
   it('queries real orders and reads the rendered table', async () => {
     const { browser, fixture } = await setup();
     await browser.call('browser.open', { url: fixture.url });
@@ -223,7 +259,7 @@ describe('BrowserSession public browser boundary', () => {
     await expect(browser.call('browser.evaluate', {
       expression: 'new Promise(resolve => setTimeout(() => { document.querySelector("#customer").value = "late mutation"; resolve(true); }, 500))',
       timeoutMs: 60,
-    })).rejects.toThrow('浏览器操作超过 60 毫秒');
+    })).rejects.toThrow(/浏览器操作超过 \d+ 毫秒/);
     await expect(browser.call('browser.text', { selector: '#status' })).rejects.toThrow('浏览器会话已经关闭');
   });
 

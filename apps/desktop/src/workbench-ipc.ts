@@ -1,9 +1,14 @@
 import { dialog, globalShortcut, ipcMain, Notification, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { RunManager } from '../../runner/src/manager.js';
+import { runCommands, type RunCommand } from '../../../packages/contracts/src/index.js';
 
 export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserWindow | undefined, trusted: (event: IpcMainInvokeEvent) => void) {
   const handle = (channel: string, action: (...args: any[]) => unknown) => ipcMain.handle(channel, (event, ...args) => { trusted(event); return action(...args); });
+  handle('rpa:control', (runId: string, command: RunCommand) => {
+    if (typeof runId !== 'string' || !runCommands.includes(command)) throw new Error('无效的任务操作');
+    return manager.controlRun(runId, command);
+  });
   handle('rpa:drafts', () => manager.store.listDrafts());
   handle('rpa:preflight', flow => manager.preflightWorkflow(flow));
   handle('rpa:debug', (flow, breakpoints, fromStepId) => manager.debugRun(flow, breakpoints, fromStepId));

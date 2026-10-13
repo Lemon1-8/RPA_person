@@ -1,11 +1,12 @@
 import { isDeepStrictEqual } from 'node:util';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import xlsx from 'xlsx';
 import { readXlsxArrayRows, readXlsxColumnValues, readXlsxRows } from './xlsx-file.js';
 import { progressPath, readProgress, saveProgress,forgetProgress, type BusinessProgress } from './progress.js';
+import { writeFileAtomic } from '../../persistence/src/index.js';
 import { runDesktopInput } from './desktop-input.js';
 import { WindowsSession } from '../../windows/src/index.js';
 import type { DesktopElementRef } from '../../contracts/src/index.js';
@@ -116,8 +117,8 @@ export class WorkflowEngine {
   private warn(step: StepDefinition, message: string) {
     this.snapshot.warnings ??= []; this.snapshot.warnings.push({ stepId: this.calls[0]?.stepId ?? step.stepId, stepName: step.name, message, at: new Date().toISOString() }); this.snapshot.warningCount = this.snapshot.warnings.length;
   }
-  private async waitManual(step: StepDefinition, message: string): Promise<'retry' | 'skip' | 'confirm'> {
-    this.manualStep = step; this.manualDecision = undefined; this.snapshot.currentStepId = step.stepId; this.snapshot.error = message;
+  private async waitManual(step: StepDefinition, message: string, variables = step.variables): Promise<'retry' | 'skip' | 'confirm'> {
+    this.manualStep = { ...step, variables }; this.manualDecision = undefined; this.snapshot.currentStepId = step.stepId; this.snapshot.error = message;
     this.snapshot.manualDecisionRequired = !getAction(step.actionType).metadata.safeToRetry || message.includes('INPUT_INTERRUPTED');
     try { await this.waitForResume(true); return this.manualDecision ?? 'retry'; }
     finally { this.manualStep = undefined; this.manualDecision = undefined; delete this.snapshot.manualDecisionRequired; }
@@ -222,8 +223,17 @@ export class WorkflowEngine {
       if(this.checkingRecovery) throw new Error('恢复检查正在执行');
       this.checkingRecovery=true; const priorAbort=this.stepAbort; this.stepAbort=new AbortController();
       const failedId = this.snapshot.currentStepId;
-      try { for (const check of step.recoveryChecks ?? []) { const result = await this.withinStepScope(check, () => this.execute(check, validateActionParams(check.actionType, resolveValue(check.params, this.snapshot.variables) as Record<string, unknown>))); if (check.output) this.setVariable(check.output, result ?? null); this.emit({ type: 'log', stepId: step.stepId, message: `恢复检查：${check.name}`, data: result }); } }
-      finally { this.stepAbort=priorAbort;this.checkingRecovery=false;this.snapshot.currentStepId = failedId;if(!this.stopped) this.state('waiting_manual'); }
+      const outputs: [string, unknown][] = [];
+      try {
+        await this.withinStepScope(step, async () => {
+          for (const check of step.recoveryChecks ?? []) {
+            const result = await this.withinStepScope(check, () => this.execute(check, validateActionParams(check.actionType, resolveValue(check.params, this.snapshot.variables) as Record<string, unknown>)));
+            if (check.output) { this.setVariable(check.output, result ?? null); outputs.push([check.output, result ?? null]); }
+            this.emit({ type: 'log', stepId: step.stepId, message: `恢复检查：${check.name}`, data: result });
+          }
+        });
+      }
+      finally { for (const [name, value] of outputs) this.setVariable(name, value); this.stepAbort=priorAbort;this.checkingRecovery=false;this.snapshot.currentStepId = failedId;if(!this.stopped) this.state('waiting_manual'); }
       return;
     }
     if (['retry', 'skip', 'confirm'].includes(command)) {
@@ -358,6 +368,8 @@ export class WorkflowEngine {
   }
   private async callBrowser(method: string, params: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     let expired = false;
+    let operationSettled = false;
+    const deadlineAt = Date.now() + timeoutMs;
     let timer: NodeJS.Timeout | undefined;
     let graceTimer: NodeJS.Timeout | undefined;
     let abort: (() => void) | undefined;
@@ -371,8 +383,8 @@ export class WorkflowEngine {
       this.checkStop(); signal?.throwIfAborted();
       if (expired) throw timeoutError();
       if (!browser || (closeAllPages && !browser.isOpen())) return { ok: true, closedPageIds: [] };
-      return method === 'browser.start' ? browser.getInfo() : browser.call(method, params);
-    })();
+      return method === 'browser.start' ? browser.getInfo() : browser.call(method, params, deadlineAt);
+    })().finally(() => { operationSettled = true; });
     try {
       return await new Promise<unknown>((resolve, reject) => {
         let finished = false;
@@ -398,8 +410,8 @@ export class WorkflowEngine {
     } catch (error) {
       if (expired || signal?.aborted) {
         // User stops and explicit "close all" actions must terminate the owned session.
-        // Ordinary action timeouts keep the browser visible so the failed page state can be inspected or reused.
-        if (signal?.aborted || closeAllPages) {
+        // Keep the failed page only after its operation has settled; pending calls can still click or type.
+        if (signal?.aborted || closeAllPages || !operationSettled) {
           await this.browser?.close();
           await operation.catch(() => {});
         } else {
@@ -498,7 +510,7 @@ export class WorkflowEngine {
       const worksheet = xlsxUtils.json_to_sheet(rows);
       const workbook = xlsxUtils.book_new();
       xlsxUtils.book_append_sheet(workbook, worksheet, sheetName);
-      await writeFile(target, writeWorkbook(workbook, { type: 'buffer', bookType: 'xlsx', compression: true }));
+      await writeFileAtomic(target, writeWorkbook(workbook, { type: 'buffer', bookType: 'xlsx', compression: true }));
       const file = await stat(target);
       const artifact: Artifact = { path: target, name: basename(target), size: file.size, stepId: this.snapshot.currentStepId };
       this.snapshot.artifacts.push(artifact);
@@ -644,6 +656,7 @@ export class WorkflowEngine {
       while (!completed) {
         const attempts = step.retry?.maxAttempts ?? 1;
         let error: unknown;
+        let failedVariables = step.variables;
         for (let attempt = 1; attempt <= attempts; attempt++) {
           this.checkStop();
           this.snapshot.currentStepId = step.stepId;
@@ -662,7 +675,11 @@ export class WorkflowEngine {
               const params = validateActionParams(step.actionType, raw);
               if (progressKey !== undefined) params.progressKey = progressKey;
               if (Number.isFinite(this.stepBudget)) { this.stepBudget--; if (this.stepBudget === 0) this.pauseRequested = true; }
-              return this.execute(step, params);
+              try { return await this.execute(step, params); }
+              catch (error) {
+                failedVariables = Object.fromEntries(Object.keys(step.variables ?? {}).map(name => [name, this.snapshot.variables[name]])) as StepDefinition['variables'];
+                throw error;
+              }
             });
             this.checkStop();
             // Publish only after restoring local declarations, including same-name outputs.
@@ -707,7 +724,7 @@ export class WorkflowEngine {
           }
           if (message.includes('INPUT_INTERRUPTED') || !this.errorBoundaryDepth && (step.onError === 'manual' || step.onError === 'pause' && getAction(step.actionType).metadata.safeToRetry)) {
             this.checkDeadline(error);
-            const decision = await this.waitManual(step, message);
+            const decision = await this.waitManual(step, message, failedVariables);
             if (decision !== 'retry') { if (decision === 'skip') this.warn(step, `人工跳过：${message}`); this.emit({ type: 'step', stepId: step.stepId, status: 'succeeded', message: decision === 'confirm' ? '人工确认已完成' : '人工跳过（有警告）', data: this.stepData(step) }); completed = true; }
           } else throw new StepExecutionError(step, error);
         }

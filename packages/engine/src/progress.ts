@@ -1,4 +1,4 @@
-import { mkdir, readFile, appendFile } from 'node:fs/promises';
+import { access, mkdir, readFile, appendFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join,sep } from 'node:path';
 import { scheduleIdentifier } from '../../contracts/src/index.js';
@@ -8,14 +8,24 @@ export function progressPath(dataDir: string, runId: string, attemptId: string, 
   return join(dataDir, 'runs', scheduleIdentifier.parse(runId), 'attempts', scheduleIdentifier.parse(attemptId), 'progress', `${createHash('sha256').update(JSON.stringify(scope)).digest('hex')}.json`);
 }
 export async function readProgress(path: string): Promise<BusinessProgress | undefined> {
+  let value: BusinessProgress;
+  try { value = JSON.parse(await readFile(path, 'utf8')) as BusinessProgress; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    for (const companion of [`${path}.input.json`, `${path}.journal.jsonl`]) {
+      const exists = await access(companion).then(() => true, error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false; });
+      if (exists) throw new Error('业务进度损坏：缺少进度主文件，不能自动续跑', { cause: error });
+    }
+    return undefined;
+  }
   try {
-    const value = JSON.parse(await readFile(path,'utf8')) as BusinessProgress;
-    if (!value.items) Object.assign(value,JSON.parse(await readFile(`${path}.input.json`,'utf8')));
+    const inlineInput = Object.hasOwn(value, 'items');
+    if (!inlineInput) Object.assign(value,JSON.parse(await readFile(`${path}.input.json`,'utf8')));
     if (!Array.isArray(value.items) || !Array.isArray(value.keys) || !Array.isArray(value.completed) || !Array.isArray(value.pending)) throw new Error('业务进度损坏，不能自动续跑');
-    try { for (const line of (await readFile(`${path}.journal.jsonl`,'utf8')).split('\n').filter(Boolean)) { const event = JSON.parse(line); if (!value.keys.includes(event.key) || !['pending','completed'].includes(event.status)) throw new Error('业务进度事件损坏'); if(event.status==='completed') { if(!value.completed.includes(event.key)) value.completed.push(event.key); value.pending=value.pending.filter(key=>key!==event.key); } else if(!value.pending.includes(event.key) && !value.completed.includes(event.key)) value.pending.push(event.key); } } catch(error) { if((error as NodeJS.ErrnoException).code!=='ENOENT') throw error; }
+    try { for (const line of (await readFile(`${path}.journal.jsonl`,'utf8')).split('\n').filter(Boolean)) { const event = JSON.parse(line); if (!value.keys.includes(event.key) || !['pending','completed'].includes(event.status)) throw new Error('业务进度事件损坏'); if(event.status==='completed') { if(!value.completed.includes(event.key)) value.completed.push(event.key); value.pending=value.pending.filter(key=>key!==event.key); } else if(!value.pending.includes(event.key) && !value.completed.includes(event.key)) value.pending.push(event.key); } } catch(error) { if(!inlineInput || (error as NodeJS.ErrnoException).code!=='ENOENT') throw error; }
     return value;
   }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('业务进度损坏：缺少输入快照或进度日志，不能自动续跑', { cause: error }); throw error; }
 }
 const states = new Map<string,{completed:Set<string>;pending:Set<string>}>();
 export function forgetProgress(prefix:string) {for(const path of states.keys())if(path.startsWith(prefix+sep))states.delete(path);}
