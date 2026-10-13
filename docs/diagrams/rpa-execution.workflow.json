@@ -66,7 +66,7 @@
       "lane": "request",
       "type": "frontend",
       "label": "发起运行",
-      "sublabel": "手动 / 计划 / 单条",
+      "sublabel": "运行 / 调试 / 续跑",
       "col": 0,
       "width": 136
     },
@@ -75,7 +75,7 @@
       "lane": "request",
       "type": "database",
       "label": "确定运行版本",
-      "sublabel": "保存版本 / 单条草稿",
+      "sublabel": "修订快照 / 单条草稿",
       "col": 1,
       "width": 136
     },
@@ -102,7 +102,7 @@
       "lane": "runtime",
       "type": "backend",
       "label": "执行指令",
-      "sublabel": "作用域与控制流",
+      "sublabel": "作用域、子流程与恢复",
       "col": 2,
       "width": 136
     },
@@ -111,7 +111,7 @@
       "lane": "runtime",
       "type": "messagebus",
       "label": "发送运行事件",
-      "sublabel": "步骤 / 日志 / 产物 / 状态",
+      "sublabel": "日志 / 产物 / 变量 / 状态",
       "col": 3,
       "width": 136
     },
@@ -224,7 +224,7 @@
       "title": "指令执行能力",
       "items": [
         "Playwright 网页动作与 Python / JS / TS RPC 共用会话",
-        "XLSX 读写与遍历、电脑键鼠、变量与日志"
+        "XLSX、电脑键鼠与 UIA、固定修订子流程"
       ]
     },
     {
@@ -239,7 +239,7 @@
       "dot": "amber",
       "title": "完整事件与可读日志",
       "items": [
-        "完整事件持续落盘；界面默认隐藏普通步骤信息",
+        "变量增量传输；完整事件合并写入，终态立即刷新",
         "发送积压清空且浏览器关闭后，任务进程才退出"
       ]
     }

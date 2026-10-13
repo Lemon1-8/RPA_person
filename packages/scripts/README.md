@@ -18,6 +18,26 @@ rpa.output({ 'count': rpa.get('count') })
 
 `rpa.get` 和 `rpa.set` 每次请求当前执行器的变量。JavaScript／TypeScript 接口为异步；Python 接口为同步。`rpa.output` 保存该步骤的输出；未指定时输出为 `null`。脚本异常仍会使步骤失败。
 
+## 运行信息
+
+运行标识和计划时间不自动注入变量。通过 JS／TS 的 `await rpa.getRunContext()` 或 Python 的 `rpa.get_run_context()` 显式读取，只读返回 `runId`、`attemptId`、`scheduleId`、`scheduledFor`、`startedAt` 和 `actualTime`；手动运行的计划字段为 `null`。低代码对应“读取运行信息”（`core.runContext`）。
+
+```typescript
+const context = await rpa.getRunContext();
+await rpa.set('context', context);
+await rpa.output(context);
+```
+
+```python
+context = rpa.get_run_context()
+rpa.set('context', context)
+rpa.output(context)
+```
+
+脚本源码原样执行，不替换 `{{变量}}` 文本；需要当前业务变量时使用 SDK。子流程中的脚本使用子流程局部变量和脚本环境，浏览器请求仍使用父流程共享的会话。
+
+## 动作与执行收尾
+
 Windows 软件控件使用 `rpa.call('windows.…', …)`，与低代码共用桌面元素库、参数校验、超时与取消机制，无需启动浏览器。`windows.find` 的输出含 JSON 定位引用，后续以 `element: result.element`（Python 为 `result['element']`）调用。接口和用法见 [Windows 元素自动化](../../docs/Windows元素自动化.md)，可粘贴的 [JavaScript 示例](../../examples/windows-elements.js) 和 [Python 示例](../../examples/windows-elements.py) 使用已捕获的命名元素。
 
 网页截图通过 `browser.screenshot` 使用当前任务浏览器，也会登记运行产物。例如 JS／TS：`await rpa.output(await rpa.call('browser.screenshot', { pageId: 'orders', filename: '订单.png', fullPage: true }));`；Python：`rpa.output(rpa.call('browser.screenshot', { 'pageId': 'orders', 'filename': '订单.png', 'fullPage': True }))`。省略保存目录时继承当前指令／流程的下载目录；返回 `path`、`name`、`size`、`sourceUrl`、`pageId`。
