@@ -1,0 +1,4 @@
+interface:
+  display_name: "Personal RPA"
+  short_description: "开发、检查和运行可复用的 Windows 网页、桌面与 XLSX 自动化"
+  default_prompt: "使用 $personal-rpa 为当前项目开发并验证一个可复用的自动化任务。"

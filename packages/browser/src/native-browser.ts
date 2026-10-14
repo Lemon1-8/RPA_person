@@ -37,7 +37,7 @@ export async function resolveBrowser(channel: BrowserChannel, headless: boolean)
     for (const path of paths) if (await exists(path)) return { channel: candidate, executablePath: path };
   }
   const label = channel === 'auto' ? (headless ? 'Chromium' : 'Google Chrome 或 Microsoft Edge') : { chrome: 'Google Chrome', msedge: 'Microsoft Edge', chromium: 'Chromium' }[channel];
-  throw new BrowserSessionError('BROWSER_NOT_INSTALLED', `未找到已安装的 ${label}。${channel === 'chromium' || (channel === 'auto' && headless) ? '请运行 npm run browser:install。' : '请先安装浏览器，或在启动浏览器指令中选择已安装的浏览器。'}`);
+  throw new BrowserSessionError('BROWSER_NOT_INSTALLED', `未找到已安装的 ${label}。${channel === 'chromium' || (channel === 'auto' && headless) ? `请运行 ${process.env.RPA_AGENT_MODE === '1' ? 'rpa-agent setup-browser' : 'npm run browser:install'}。` : '请先安装浏览器，或在启动浏览器指令中选择已安装的浏览器。'}`);
 }
 
 export async function assertDebugPortAvailable(port: number): Promise<void> {

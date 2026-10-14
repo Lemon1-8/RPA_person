@@ -12,7 +12,8 @@ import { findStepPath, scheduleIdentifier, scheduleSchema, workflowSchema, type 
 import { nextScheduleTime, latestScheduleTime } from './schedule.js';
 import type { EngineOptions } from '../../../packages/engine/src/index.js';
 import { mergeRunEvent } from '../../../packages/contracts/src/run-events.js';
-import { workflowDependencies } from './dependencies.js';
+import { workflowDependencies, resolveWorkflowDependencies } from './dependencies.js';
+import { acquireDataLock } from './data-lock.js';
 import { runMetadataFiles } from './history.js';
 import type { CleanupPreview,RunHistoryQuery,ScheduleOccurrence } from '../../../packages/contracts/src/index.js';
 
@@ -21,7 +22,7 @@ interface PendingControl { resolve: () => void; reject: (error: Error) => void; 
 interface PendingPages { resolve: (pages: BrowserPageInfo[]) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface PendingPoint { id: string; resolve: (point: BrowserPoint | null) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 interface Job { workflow: WorkflowDefinition; run: RunSnapshot; child?: ChildProcess; stopping?: NodeJS.Timeout; finished?: Promise<void>; exit?: () => void; controls?: Map<string, PendingControl>; pageQueries?: Map<string, PendingPages>; pointPick?: PendingPoint; executionOptions?: Partial<EngineOptions>;persistent?:boolean }
-async function killOwnedTree(child: ChildProcess) {
+export async function killOwnedTree(child: ChildProcess) {
   if (!child.pid) return;
   if (process.platform === 'win32') await new Promise<void>(resolve => {
     const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -43,6 +44,8 @@ export class RunManager extends EventEmitter {
   private emergencyStopping = false;
   private demoUrl?: string;
   private saveTimers = new Map<string, NodeJS.Timeout>();
+  private releaseDataLock?: () => Promise<void>;
+  private shutdownPromise?: Promise<void>;
   private persistState(job: Job) {
     const id = job.run.runId;
     if (!['running','queued'].includes(job.run.status)) {
@@ -104,6 +107,12 @@ export class RunManager extends EventEmitter {
     this.store.health.on('change', () => { for (const job of this.jobs.values()) if (!job.persistent) this.compactJob(job); });
   }
   async initialize() {
+    if (this.releaseDataLock || this.shuttingDown) throw new Error('运行器已初始化或正在退出，请创建新的运行器');
+    this.releaseDataLock = await acquireDataLock(this.options.dataDir);
+    try { await this.initializeStore(); }
+    catch (error) { await this.releaseDataLock(); this.releaseDataLock = undefined; throw error; }
+  }
+  private async initializeStore() {
     await this.store.initialize();
     for (const run of await this.store.listRunHeaders()) {
       const browserWasOpen = run.browserOpen;
@@ -165,9 +174,9 @@ export class RunManager extends EventEmitter {
   }
   bootstrapRuns() {return [...this.jobs.values()].sort((a,b)=>b.run.startedAt.localeCompare(a.run.startedAt)).filter((job,index)=>index<50 || !terminal(job.run.status) || job.run.browserOpen).map(job=>job.persistent?this.store.readRunSnapshotSync(job.run.runId):structuredClone(job.run));}
   concurrencyLimit() { return this.options.maxConcurrent ?? 2; }
-  async preflightWorkflow(flow:WorkflowDefinition) {
+  async preflightWorkflow(flow:WorkflowDefinition, suppliedDependencies?:Record<string,WorkflowDefinition>) {
     const issues=await preflight(flow);
-    let dependencies:Record<string,WorkflowDefinition>;try{dependencies=await workflowDependencies(this.store,workflowSchema.parse(flow));}catch(error){issues.push({level:'error',message:String(error)});return issues;}
+    let dependencies:Record<string,WorkflowDefinition>;try{dependencies=suppliedDependencies ? await resolveWorkflowDependencies(workflowSchema.parse(flow), async(id,revision)=>{const child=suppliedDependencies[`${id}@${revision}`];if(!child)throw new Error(`缺少子流程：${id}@${revision}`);return child;}) : await workflowDependencies(this.store,workflowSchema.parse(flow));}catch(error){issues.push({level:'error',message:String(error)});return issues;}
     for(const input of flow.inputs ?? []) if(!Object.hasOwn(flow.variables,input)) issues.push({level:'error',message:`单独运行需要流程输入变量：${input}，请在默认变量中填写。`});
     const visit=async(workflow:WorkflowDefinition,owner?:string)=>{const steps=[...workflow.steps];while(steps.length){const step=steps.shift()!;if(step.disabled)continue;steps.push(...step.children ?? [],...step.elseSteps ?? []);if(step.actionType!=='workflow.call')continue;const child=dependencies[`${step.params.workflowId}@${step.params.revision}`];if(!child)continue;const stepId=owner ?? step.stepId;const input=step.params.inputs;
       if(input && typeof input==='object' && !Array.isArray(input)){for(const name of Object.keys(input)) if(!child.inputs?.includes(name)) issues.push({level:'error',stepId,message:`子流程 ${child.name} 未声明输入：${name}`});for(const name of child.inputs ?? []) if(!Object.hasOwn(input,name)) issues.push({level:'error',stepId,message:`子流程 ${child.name} 缺少输入：${name}`});}
@@ -342,6 +351,17 @@ export class RunManager extends EventEmitter {
     const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
     return this.serialize(() => this.startWorkflow(workflow));
   }
+  runWorkflowSnapshot(input: WorkflowDefinition, dependencies: Record<string,WorkflowDefinition>, options: Pick<EngineOptions,'workingDirectory'|'agentMode'> = {}): Promise<RunSnapshot> {
+    const workflow = normalizeWorkflowForStorage(input); validateActions(workflow);
+    return this.serialize(async () => {
+      const resolved = await resolveWorkflowDependencies(workflow, async(id,revision) => {
+        const child = dependencies[`${id}@${revision}`];
+        if (!child) throw new Error(`缺少子流程：${id}@${revision}`);
+        return child;
+      });
+      return this.startWorkflow(workflow, undefined, undefined, { ...options, workflowDependencies: resolved }, true);
+    });
+  }
   runStep(input: WorkflowDefinition, stepId: string, browserRunId?: string, debug?: EngineOptions['debug']): Promise<RunSnapshot> {
     const workflow = workflowSchema.parse(input); validateActions(workflow);
     const path = findStepPath(workflow, scheduleIdentifier.parse(stepId));
@@ -403,12 +423,12 @@ export class RunManager extends EventEmitter {
     const dependencies = await this.store.readDependencies(job.run);
     return this.serialize(() => this.startWorkflow(workflow, undefined, undefined, { resumeFromRunId: id, resumeFromAttemptId: job.run.attemptId,workflowDependencies:dependencies }));
   }
-  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string; runId?: string }, stepId?: string, executionOptions?: Partial<EngineOptions>): Promise<RunSnapshot> {
+  private async startWorkflow(workflow: WorkflowDefinition, schedule?: { scheduleId: string; scheduledFor: string; runId?: string }, stepId?: string, executionOptions?: Partial<EngineOptions>, snapshot = false): Promise<RunSnapshot> {
     if (this.emergencyStopping) throw new Error('紧急停止正在处理，请稍后再启动任务');
     if (this.shuttingDown) throw new Error('运行器正在退出');
     executionOptions = { ...executionOptions,workflowDependencies:executionOptions?.workflowDependencies ?? await workflowDependencies(this.store,workflow) };
     if (!stepId) {
-      if (!executionOptions.resumeFromRunId) {
+      if (!snapshot && !executionOptions.resumeFromRunId) {
         const saved = await this.store.getRevision(workflow.workflowId, workflow.revision).catch(() => undefined);
         if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
       }
@@ -470,7 +490,7 @@ export class RunManager extends EventEmitter {
     const entry = this.options.workerPath ?? (typeof __filename !== 'undefined' && __filename.endsWith('.cjs') ? bundled : join(root, 'apps', 'runner', 'src', 'worker.ts'));
     const child = spawn(process.execPath, [...(entry.endsWith('.ts') ? ['--import', 'tsx'] : []), resolve(entry)], {
       cwd: root, detached: process.platform !== 'win32',
-      env: { ...process.env, RPA_ROOT: root, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
+      env: { ...process.env, RPA_ROOT: root, RPA_AGENT_MODE: job.executionOptions?.agentMode ? '1' : undefined, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
     });
     job.child = child; job.controls = new Map(); job.pageQueries = new Map(); job.finished = new Promise(resolve => { job.exit = resolve; });
     child.stdout?.on('data', d => this.publish({ type: 'log', runId: job.run.runId, at: new Date().toISOString(), message: String(d).trim() }));
@@ -577,7 +597,19 @@ export class RunManager extends EventEmitter {
     const job = this.jobs.get(runId); if (!job) throw new Error('任务不存在');
     await job.finished; await this.store.flush();
   }
-  async shutdown() {
+  shutdown(): Promise<void> {
+    if (!this.shutdownPromise) {
+      this.shutdownPromise = this.shutdownOwned();
+      void this.shutdownPromise.catch(() => { this.shutdownPromise = undefined; });
+    }
+    return this.shutdownPromise;
+  }
+  private async shutdownOwned() {
+    if (this.shuttingDown && !this.releaseDataLock) this.releaseDataLock = await acquireDataLock(this.options.dataDir);
+    try { await this.shutdownJobs(); }
+    finally { await this.releaseDataLock?.(); this.releaseDataLock = undefined; }
+  }
+  private async shutdownJobs() {
     this.shuttingDown = true;
     for (const job of this.jobs.values()) this.rejectPageQueries(job, new Error('运行器正在退出'));
     clearInterval(this.scheduleTimer); this.scheduleTimer = undefined;

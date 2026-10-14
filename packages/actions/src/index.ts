@@ -137,7 +137,7 @@ add('desktop.keyboardType', '键盘输入', '键盘和鼠标操作', '向当前�
   [text('text', '输入文本'), { key: 'inputMode', label: '输入方式', type: 'select', required: true, defaultValue: 'type', options: [{ label: '逐字输入', value: 'type' }, { label: '剪贴板粘贴', value: 'paste' }] }, number('delayMs', '字符间隔（毫秒）', false, '0'), { key: 'simulateTypo', label: '先输错字并删除', type: 'boolean' }, { ...text('typoText', '先输入的错字', false, '错'), defaultValue: '错' }],
   { text: '', delayMs: 0, inputMode: 'type', simulateTypo: false, typoText: '错' },
   z.object({ text: z.string(), delayMs: z.number().int().min(0).max(1000).optional(), ...typingOptions }));
-add('file.xlsxRead', '读取 XLSX', '文件', '读取 .xlsx 工作表为 JSON 行列表，输出可直接交给“遍历列表”处理。', true,
+add('file.xlsxRead', '读取 XLSX', '文件', '读取 .xlsx 工作表，返回 {sheetName, rows} 对象；rows 是可交给“遍历列表”的 JSON 行数组。', true,
   [text('path', '文件路径', true, 'C:\\RPA\\orders.xlsx'), text('sheetName', '工作表名称', false, '留空读取第一个工作表')],
   { path: '', sheetName: '' },
   z.object({ path: xlsxFilePath, sheetName: sheetName.optional() }));
@@ -147,7 +147,7 @@ add('file.xlsxWrite', '保存 XLSX', '文件', '把 JSON 对象列表或单行�
   z.object({ path: xlsxFilePath, rows: z.union([z.array(z.record(z.string(), z.unknown())), z.record(z.string(), z.unknown()).transform(row => [row])]), sheetName: sheetName.optional() }));
 add('script.run', '运行脚本', '脚本', '在独立进程运行本地脚本，通过 rpa 访问本任务的浏览器和变量。', false,
   [{ key: 'language', label: '脚本语言', type: 'select', required: true, options: [{ label: 'Python', value: 'python' }, { label: 'JavaScript', value: 'javascript' }, { label: 'TypeScript', value: 'typescript' }] }, { key: 'code', label: '脚本代码', type: 'textarea', required: true }],
-  { language: 'python', code: 'from rpa_sdk import rpa\nrpa.output("脚本执行完成")' }, z.object({ language: z.enum(['python', 'javascript', 'typescript']), code: z.string().min(1) }));
+  { language: 'python', code: 'from rpa_sdk import rpa\nrpa.output("脚本执行完成")' }, z.object({ language: z.enum(['python', 'javascript', 'typescript']), code: z.string().min(1).optional(), filePath: absoluteFilePath.optional() }).refine(p => (p.code === undefined) !== (p.filePath === undefined), '必须且只能指定 code 或 filePath'));
 add('variables.set', '设置变量', '流程控制', '设置一个 JSON 变量；完整 {{变量}} 引用保留原始类型。', true,
   [text('name', '变量名称'), json('value', '变量值（JSON）')], { name: 'result', value: '' }, z.object({ name: z.string().min(1), value: z.unknown() }));
 add('core.log', '打印日志', '流程控制', '将文字或变量值写入下方运行日志。放在循环体中可逐项查看当前值，无需打开浏览器。', true,

@@ -230,6 +230,10 @@ await rpa.output({ text });
 
 脚本中的代码原样执行，通过 SDK 读取变量，不进行 `{{…}}` 文本替换。通过「Python 可执行文件」选择虚拟环境解释器。不会隐式安装用户依赖；仅运行自己信任的本地脚本。脚本进程是生命周期隔离，不是安全沙箱。更多接口见 [脚本桥说明](packages/scripts/README.md) 和 [浏览器接口](packages/browser/README.md)。
 
+## Agent 开发入口
+
+Agent 可通过独立的 `rpa-agent` 开发、检查和运行流程 JSON 或 `.py`／`.js`／`.ts` 文件，无需启动桌面界面。提供 npm 运行时包、通用 `personal-rpa` Skill 和 Skill 插件包，支持本机跨项目及其他 Windows 电脑安装。构建、安装、机器输出、代码入口和运行边界见 [Agent 使用与分发](docs/Agent使用与分发.md)。
+
 ## 命令行
 
 ```powershell

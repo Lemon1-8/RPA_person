@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { setImmediate } from 'node:timers/promises';
 import { createRpaClient } from '../../sdk-js/src/index.js';
 
-interface Configuration { token: string; scriptPath: string }
+interface Configuration { token: string; scriptPath: string; fileMode?: boolean }
 
 async function main(): Promise<void> {
   const configuration = JSON.parse(await readFile(process.argv[2]!, 'utf8')) as Configuration;
@@ -39,7 +39,13 @@ async function main(): Promise<void> {
   }), (value) => { result = value; });
   Object.assign(globalThis, { rpa });
   try {
-    await import(pathToFileURL(configuration.scriptPath).href);
+    if (configuration.fileMode) process.argv = [process.execPath, configuration.scriptPath];
+    const module = await import(pathToFileURL(configuration.scriptPath).href);
+    if (configuration.fileMode) {
+      const main = module.main ?? module.default?.main;
+      if (typeof main !== 'function') throw new Error('JS/TS 文件必须导出 async function main(rpa)');
+      await main(rpa);
+    }
     // Wait independently of user Promises so awaiting/catching retains native semantics.
     do {
       while (pending.size) await new Promise<void>((resolve) => { pendingChanged = resolve; });

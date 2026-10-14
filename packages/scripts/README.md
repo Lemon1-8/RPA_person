@@ -46,6 +46,10 @@ JS／TS 脚本结束前会等待已经提交的 RPC。未处理的请求失败�
 
 ## 运行环境
 
+`script.run` 也可用 `filePath` 执行文件，与内联 `code` 二选一。Agent CLI 会按流程文件目录解析相对路径。JS／TS 文件需导出 `async function main(rpa)`，执行器等待其完成；结果仍由 `rpa.output()` 指定，main 返回值不作为结果。CommonJS 使用 `exports.main`，Python 按普通脚本执行并支持相邻模块导入。文件模式 cwd 由调用入口指定；旧内联脚本保持安装根 cwd 与顶层 await 行为。详见 [Agent 使用与分发](../../docs/Agent使用与分发.md)。
+
+脚本 RPC 现在也支持 `desktop.*`、`file.xlsxRead` 和 `file.xlsxWrite`，与流程步骤共用参数校验、输入保护和产物登记。容器、子流程调用和脚本执行动作不开放为 RPC。在 Agent 模式下，`INPUT_INTERRUPTED` 即使被脚本捕获也会停止后续操作，由 CLI 保存原因并收尾。
+
 - `RPA_ROOT` 指向项目／安装资源根目录，缺省为当前工作目录。
 - 生产构建将 `packages/scripts/src/child.ts` 打包为 `dist/scripts/child.cjs`，使用 esbuild `platform: 'node', format: 'cjs', target: 'node22'`。
 - `RPA_SCRIPT_CHILD` 可显式指定子进程入口；源码运行使用 `node --import tsx packages/scripts/src/child.ts`，生产 bundle 使用 `dist/scripts/child.cjs`，避免源码开发误用旧构建。

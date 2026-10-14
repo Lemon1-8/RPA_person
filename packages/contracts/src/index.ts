@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import type { WorkflowSchedule } from './schedule.js';
 import type { WorkbenchApi, RunWarning } from './workbench.js';
 export * from './workbench.js';
+export * from './agent.js';
 import { desktopElementSchema, type DesktopElementRef, type DesktopElementSnapshot, type DesktopElementValidation } from './windows.js';
 export * from './windows.js';
 export { scheduleSchema, scheduleIdentifier, type WorkflowSchedule } from './schedule.js';

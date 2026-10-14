@@ -18,7 +18,7 @@ import { findStepPath, workflowSchema, type Artifact, type BrowserPageInfo, type
 const { utils: xlsxUtils, write: writeWorkbook } = xlsx;
 const browserTimeoutErrorGraceMs = 1_000;
 
-export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string; demoUrl?: string; workflowDependencies?:Record<string,WorkflowDefinition> }
+export interface EngineOptions { dataDir: string; runId: string; onEvent?: (event: RunEvent) => void; scheduleId?: string; scheduledFor?: string; attemptId?: string; debug?: { breakpoints: string[]; fromStepId?: string }; resumeFromRunId?: string; resumeFromAttemptId?: string; demoUrl?: string; workflowDependencies?:Record<string,WorkflowDefinition>; workingDirectory?: string; agentMode?: boolean }
 interface ExecutionDeadline { expiresAt: number; stepName: string }
 class ContainerTimeoutError extends Error {
   constructor(readonly deadline: ExecutionDeadline) { super(`容器步骤超时：${deadline.stepName}`); }
@@ -87,6 +87,7 @@ export class WorkflowEngine {
   private stepAbort?: AbortController;
   private activeBrowserCalls = 0;
   private rpcQueue: Promise<unknown> = Promise.resolve();
+  private inputInterruption?: Error;
   private consumed = false;
   private executionFinished = false;
   private pointPick?: { id: string; abort: AbortController; done: Promise<BrowserPoint | null> };
@@ -426,6 +427,7 @@ export class WorkflowEngine {
   }
   private async dispatch(method: string, rawParams: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     this.checkStop(); signal?.throwIfAborted();
+    if (this.inputInterruption) throw this.inputInterruption;
     if (method === 'core.runContext') return { runId: this.snapshot.runId, attemptId: this.snapshot.attemptId, scheduleId: this.snapshot.scheduleId ?? null, scheduledFor: this.snapshot.scheduledFor ?? null, startedAt: this.snapshot.startedAt, actualTime: new Date().toISOString() };
     if (method === 'browser.listPages') return this.listBrowserPages();
     if (method === 'variables.get') {
@@ -448,6 +450,9 @@ export class WorkflowEngine {
       const params = validateActionParams(method, input);
       this.windows ??= new WindowsSession(this.inputPolicy());
       return this.windows.call(method, params, timeoutMs, signal);
+    }
+    if (method.startsWith('desktop.') || ['file.xlsxRead', 'file.xlsxWrite'].includes(method)) {
+      return this.executeSystemAction(method, validateActionParams(method, rawParams), timeoutMs, signal);
     }
     if (!method.startsWith('browser.')) throw new Error(`不支持的 RPC 方法：${method}`);
     const validated = actionDefinitions.some(action => action.type === method) ? validateActionParams(method, rawParams) : rawParams;
@@ -476,6 +481,23 @@ export class WorkflowEngine {
       return value;
     }
   }
+  private async executeSystemAction(method: string, params: Record<string, unknown>, timeout: number, signal?: AbortSignal): Promise<unknown> {
+    if (method.startsWith('desktop.')) return runDesktopInput(method, params, timeout, signal, this.inputPolicy());
+    if (method === 'file.xlsxRead') return jsonClone(readXlsxRows(String(params.path), String(params.sheetName ?? '')));
+    const target = String(params.path);
+    const sheetName = typeof params.sheetName === 'string' && params.sheetName.trim() ? params.sheetName : 'Sheet1';
+    const worksheet = xlsxUtils.json_to_sheet(params.rows as Record<string, unknown>[]);
+    const workbook = xlsxUtils.book_new();
+    xlsxUtils.book_append_sheet(workbook, worksheet, sheetName);
+    await mkdir(dirname(target), { recursive: true });
+    this.checkStop(); signal?.throwIfAborted();
+    await writeFileAtomic(target, writeWorkbook(workbook, { type: 'buffer', bookType: 'xlsx', compression: true }));
+    const file = await stat(target);
+    const artifact: Artifact = { path: target, name: basename(target), size: file.size, stepId: this.snapshot.currentStepId };
+    this.snapshot.artifacts.push(artifact);
+    this.emit({ type: 'artifact', stepId: this.snapshot.currentStepId, data: artifact });
+    return artifact;
+  }
   private async execute(step: StepDefinition, params: Record<string, unknown>): Promise<unknown> {
     const timeout = this.remainingTimeout(step.timeoutMs ?? (step.actionType === 'core.wait' ? Number(params.durationSeconds) * 1000 + 1000 : 30_000));
     const signal = this.stepAbort!.signal;
@@ -487,7 +509,7 @@ export class WorkflowEngine {
     }
     if (step.actionType.startsWith('browser.')) return this.dispatch(step.actionType, params, timeout, signal);
     if (step.actionType.startsWith('windows.')) return this.dispatch(step.actionType, params, timeout, signal);
-    if (step.actionType.startsWith('desktop.')) return runDesktopInput(step.actionType, params, timeout, signal, this.inputPolicy());
+    if (step.actionType.startsWith('desktop.') || ['file.xlsxRead', 'file.xlsxWrite'].includes(step.actionType)) return this.executeSystemAction(step.actionType, params, timeout, signal);
     if (step.actionType === 'variables.set') return this.setVariable(String(params.name), params.value);
     if (step.actionType === 'core.note') return null;
     if (step.actionType === 'core.wait') {
@@ -499,24 +521,6 @@ export class WorkflowEngine {
       this.emit({ type: 'log', stepId: step.stepId, message: message === '' ? '（空文本）' : message, data: { value: params.message } });
       return params.message;
     }
-    if (step.actionType === 'file.xlsxRead') {
-      return jsonClone(readXlsxRows(String(params.path), String(params.sheetName ?? '')));
-    }
-    if (step.actionType === 'file.xlsxWrite') {
-      const target = String(params.path);
-      const sheetName = typeof params.sheetName === 'string' && params.sheetName.trim() ? params.sheetName : 'Sheet1';
-      const rows = params.rows as Record<string, unknown>[];
-      await mkdir(dirname(target), { recursive: true });
-      const worksheet = xlsxUtils.json_to_sheet(rows);
-      const workbook = xlsxUtils.book_new();
-      xlsxUtils.book_append_sheet(workbook, worksheet, sheetName);
-      await writeFileAtomic(target, writeWorkbook(workbook, { type: 'buffer', bookType: 'xlsx', compression: true }));
-      const file = await stat(target);
-      const artifact: Artifact = { path: target, name: basename(target), size: file.size, stepId: this.snapshot.currentStepId };
-      this.snapshot.artifacts.push(artifact);
-      this.emit({ type: 'artifact', stepId: this.snapshot.currentStepId, data: artifact });
-      return artifact;
-    }
     if (step.actionType === 'core.assert') {
       if (!isDeepStrictEqual(params.actual, params.expected)) throw new Error(`结果校验失败：期望 ${JSON.stringify(params.expected)}，实际 ${JSON.stringify(params.actual)}`);
       return { ok: true };
@@ -525,7 +529,8 @@ export class WorkflowEngine {
       const deadline = Date.now() + timeout;
       try {
         const result = await runScript({
-          language: params.language as 'python' | 'javascript' | 'typescript', code: String(params.code),
+          language: params.language as 'python' | 'javascript' | 'typescript', code: params.code as string | undefined,
+          filePath: params.filePath as string | undefined, workingDirectory: this.options.workingDirectory,
           variables: this.snapshot.variables, timeoutMs: timeout, signal,
           pythonExecutable: this.scopedSettings.pythonExecutable,
           onLog: message => this.emit({ type: 'log', stepId: step.stepId, message }),
@@ -533,7 +538,13 @@ export class WorkflowEngine {
             const operation = this.rpcQueue.then(() => {
               signal.throwIfAborted();
               if (Date.now() >= deadline) throw new Error('脚本 RPC 已超时');
-              return this.dispatch(method, input, Math.max(100, deadline - Date.now()), signal);
+              return this.dispatch(method, input, Math.max(100, deadline - Date.now()), signal).catch(error => {
+                if (this.options.agentMode && String(error).includes('INPUT_INTERRUPTED')) {
+                  this.inputInterruption = error instanceof Error ? error : new Error(String(error));
+                  this.stepAbort?.abort(error);
+                }
+                throw error;
+              });
             });
             this.rpcQueue = operation.catch(() => {});
             return operation;
@@ -544,7 +555,7 @@ export class WorkflowEngine {
         this.stepAbort?.abort(error);
         // A timed-out script must not leave a browser operation mutating a later step.
         if (this.activeBrowserCalls) { await this.browser?.close(); this.browser = undefined; }
-        await this.rpcQueue; throw error;
+        await this.rpcQueue; throw this.inputInterruption ?? error;
       }
     }
     if (step.actionType === 'control.if') {

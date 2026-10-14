@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "workflowId": "agent-web-export",
+  "name": "网页读取与表格导出",
+  "revision": 0,
+  "variables": {},
+  "inputs": ["url", "selector", "reportFile"],
+  "outputs": ["text", "report"],
+  "elements": {},
+  "settings": { "downloadDir": "C:/RPA/downloads", "headless": true, "keepBrowserOpen": false },
+  "steps": [
+    { "stepId": "open", "name": "打开网页", "actionType": "browser.open", "params": { "url": "{{url}}" } },
+    { "stepId": "read", "name": "读取文本", "actionType": "browser.text", "params": { "selector": "{{selector}}" }, "output": "text" },
+    { "stepId": "write", "name": "导出表格", "actionType": "file.xlsxWrite", "params": { "path": "{{reportFile}}", "rows": [{ "text": "{{text}}" }] }, "output": "report" }
+  ]
+}

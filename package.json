@@ -20,6 +20,10 @@
     "test:desktop": "npm run build && node scripts/smoke-desktop-icons.mjs && node scripts/smoke-desktop.mjs && node scripts/smoke-workspace.mjs && node scripts/smoke-reliability.mjs && node scripts/smoke-schedules.mjs && npx tsx scripts/smoke-runtime-history.ts && node scripts/smoke-save-run.mjs && node scripts/smoke-single-step.mjs && node scripts/smoke-control-flow.mjs && node scripts/smoke-wait-try-catch.mjs && node scripts/smoke-note.mjs && node scripts/smoke-logging.mjs && node scripts/smoke-browser-pages.mjs && node scripts/smoke-browser-screenshot.mjs && node scripts/smoke-responsive-workspace.mjs && node scripts/smoke-ui-recovery.mjs && node scripts/smoke-step-comments.mjs && node scripts/smoke-coordinate-picker.mjs && npx tsx scripts/smoke-desktop-point.ts && node scripts/smoke-xlsx.mjs && npx tsx scripts/smoke-desktop-input.ts && npx tsx scripts/smoke-windows-elements.ts",
     "demo": "tsx apps/runner/src/cli.ts demo",
     "rpa": "tsx apps/runner/src/cli.ts",
+    "rpa:agent": "tsx apps/runner/src/agent-cli.ts",
+    "build:agent": "node scripts/build-agent.mjs",
+    "pack:agent": "node scripts/build-agent.mjs --pack",
+    "test:agent-package": "node scripts/smoke-agent-package.mjs",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

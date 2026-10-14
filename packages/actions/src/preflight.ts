@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { transform } from 'esbuild';
 import { workflowSchema, type WorkflowDefinition, type StepDefinition, type PreflightIssue } from '../../contracts/src/index.js';
@@ -34,7 +34,7 @@ export async function preflight(input: WorkflowDefinition): Promise<PreflightIss
         if (typeof step.params.selector === 'string' && step.params.selector.startsWith('@') && !refs.length && !targets.has(step.params.selector.slice(1))) add('error', `元素引用不存在：${step.params.selector}`);
         if (['file.xlsxRead', 'control.forEachXlsx'].includes(step.actionType) && typeof step.params.path === 'string' && !references(step.params.path).length) await access(step.params.path).catch(() => add('warning', '输入文件当前不存在或无法读取；可能由前序指令生成，将在读取时再次检查。'));
         if (step.actionType === 'script.run') {
-          const language = step.params.language; const code = String(step.params.code ?? '');
+          const language = step.params.language; const code = step.params.filePath ? await readFile(String(step.params.filePath), 'utf8') : String(step.params.code ?? '');
           if (language !== 'python') await transform(code, { loader: language === 'typescript' ? 'ts' : 'js', format: 'esm' }).catch(error => add('error', `脚本语法错误：${String(error)}`));
           else {
             const executable = settings.pythonExecutable ?? 'python';

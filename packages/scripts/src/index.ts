@@ -5,11 +5,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { transform } from 'esbuild';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { assertJson } from '../../sdk-js/src/index.js';
 
 export interface RunScriptOptions {
   language: 'python' | 'javascript' | 'typescript';
-  code: string;
+  code?: string;
+  filePath?: string;
+  workingDirectory?: string;
   variables: Record<string, unknown>;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -41,28 +45,30 @@ export async function runScript(options: RunScriptOptions): Promise<unknown> {
   assertJson(options.variables);
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) throw new TypeError('Script timeoutMs must be positive');
   if (options.signal?.aborted) throw cancellationError();
+  if ((options.code === undefined) === (options.filePath === undefined)) throw new TypeError('脚本必须且只能指定 code 或 filePath');
   const root = path.resolve(process.env.RPA_ROOT ?? process.cwd());
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'rpa-script-'));
   try {
     const token = randomUUID();
-    const scriptPath = path.join(temporaryDirectory, options.language === 'python' ? 'script.py' : 'script.mjs');
+    const scriptPath = options.filePath ? path.resolve(options.filePath) : path.join(temporaryDirectory, options.language === 'python' ? 'script.py' : 'script.mjs');
     const configurationPath = path.join(temporaryDirectory, 'config.json');
-    const code = options.language === 'typescript'
-      ? (await transform(options.code, { loader: 'ts', format: 'esm', target: 'node22', sourcefile: 'user-script.ts', sourcemap: 'inline' })).code
+    const code = !options.filePath && options.language === 'typescript'
+      ? (await transform(options.code!, { loader: 'ts', format: 'esm', target: 'node22', sourcefile: 'user-script.ts', sourcemap: 'inline' })).code
       : options.code;
-    await writeFile(scriptPath, code, 'utf8');
-    await writeFile(configurationPath, JSON.stringify({ token, scriptPath }), 'utf8');
+    if (!options.filePath) await writeFile(scriptPath, code!, 'utf8');
+    await writeFile(configurationPath, JSON.stringify({ token, scriptPath, fileMode: !!options.filePath }), 'utf8');
     const childEntry = process.env.RPA_SCRIPT_CHILD ?? (typeof __filename !== 'undefined' && __filename.endsWith('.cjs')
       ? path.join(root, 'dist', 'scripts', 'child.cjs')
       : path.join(root, 'packages', 'scripts', 'src', 'child.ts'));
-    const nodeArguments = [...(childEntry.endsWith('.ts') ? ['--import', 'tsx'] : []), childEntry, configurationPath];
+    const require = createRequire(path.join(root, 'package.json'));
+    const nodeArguments = [...(childEntry.endsWith('.ts') || options.filePath ? ['--import', pathToFileURL(require.resolve('tsx')).href] : []), childEntry, configurationPath];
     const isPython = options.language === 'python';
     const executable = isPython ? options.pythonExecutable ?? 'python' : process.execPath;
-    const childArguments = isPython ? ['-u', '-m', 'rpa_sdk', scriptPath] : nodeArguments;
+    const childArguments = isPython ? ['-u', '-m', 'rpa_sdk', scriptPath, ...(options.filePath ? ['--file-mode'] : [])] : nodeArguments;
     if (options.signal?.aborted) throw cancellationError();
     return await new Promise<unknown>((resolve, reject) => {
       const child = spawn(executable, childArguments, {
-        cwd: root,
+        cwd: options.filePath ? options.workingDirectory ?? root : root,
         env: {
           ...process.env, ELECTRON_RUN_AS_NODE: '1', RPA_RPC_TOKEN: token,
           PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',
