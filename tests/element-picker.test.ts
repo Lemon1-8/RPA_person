@@ -8,6 +8,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 let browser: Browser | undefined;
 afterEach(async () => { await browser?.close(); browser = undefined; });
+it.each([false, true])('Shadow DOM 拾取第二个按钮后仍定位原目标，隔离同名组件（稳定属性=%s）', async stable => {
+  browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+  await page.setContent('<div id="first"></div><div id="second"></div>');
+  await page.evaluate(stable => {
+    for (const id of ['first', 'second']) document.getElementById(id)!.attachShadow({ mode: 'open' }).innerHTML = `<button>确认删除</button><button ${stable ? 'id="cancel"' : ''} onclick="window.clicked=this.textContent">取消</button>`;
+  }, stable);
+  await page.evaluate(elementPickerSource('shadowPick'));
+  await page.locator('#second').getByRole('button', { name: '取消', exact: true }).click({ modifiers: ['Control', 'Alt'] });
+  const picked = await page.evaluate<{ selector: string; text: string; stable: boolean }>('window.shadowPick.result');
+  expect(picked.text).toBe('取消'); expect(picked.stable).toBe(stable);
+  const target = page.locator(picked.selector);
+  expect(await target.count()).toBe(1); expect(await target.textContent()).toBe('取消');
+  expect(await target.evaluate(element => element.getRootNode() instanceof ShadowRoot && (element.getRootNode() as ShadowRoot).host.id)).toBe('second');
+  await target.click(); expect(await page.evaluate('window.clicked')).toBe('取消');
+});
 it('iframe 内拦截普通业务点击，拾取唯一稳定元素并清理界面', async () => {
   browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
   await page.setContent('<iframe srcdoc="<button id=target onclick=window.clicked=true>目标</button>"></iframe>');

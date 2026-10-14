@@ -1,4 +1,4 @@
-import { dialog, globalShortcut, ipcMain, Notification, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+import { dialog, globalShortcut, ipcMain, Notification, shell, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import type { RunManager } from '../../runner/src/manager.js';
 import { runCommands, type RunCommand } from '../../../packages/contracts/src/index.js';
@@ -35,7 +35,9 @@ export function registerWorkbenchIpc(manager: RunManager, window: () => BrowserW
   handle('rpa:events-export', async id => {
     const result = await dialog.showSaveDialog(window()!, { title: '导出运行日志', defaultPath: '运行日志.jsonl', filters: [{ name: 'JSONL 日志', extensions: ['jsonl'] }] });
     if (result.canceled || !result.filePath) return null;
-    await manager.store.exportEvents(id, result.filePath); return result.filePath;
+    await manager.store.exportEvents(id, result.filePath);
+    const error = await shell.openPath(result.filePath); if (error) throw new Error(`日志已导出，但无法打开：${error}`);
+    return result.filePath;
   });
   manager.store.health.on('change', issues => window()?.webContents.send('rpa:storage-issues', issues));
   const lastStatus = new Map<string, string>();

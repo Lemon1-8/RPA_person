@@ -95,7 +95,7 @@ export function LogViewer({ events, runId, stepNames, emptyMessage, onSelectStep
   };
   return <div className="log-viewer">
     <div className="log-toolbar">
-      <LogHistoryMenu><select aria-label="查看执行尝试日志" value={attemptId} onChange={event=>setAttemptId(event.target.value)}><option value="">全部尝试</option>{attempts.map(attempt=><option key={attempt.attemptId} value={attempt.attemptId}>{attempt.label}</option>)}</select><button disabled={!page?.hasMore || loading} onClick={loadEarlier}>{loading ? '读取中…' : '加载更早日志'}</button><button disabled={!runId} onClick={() => void api?.exportRunEvents(runId).then(path => { if (path) onOpenPath(path); }).catch(cause => setError(String(cause)))}>导出日志</button>{!!page?.damagedLines && <span role="status">有 {page.damagedLines} 条损坏记录，原文件已保留</span>}{error && <span role="alert">{error}</span>}</LogHistoryMenu>
+      <LogHistoryMenu><select aria-label="查看执行尝试日志" value={attemptId} onChange={event=>setAttemptId(event.target.value)}><option value="">全部尝试</option>{attempts.map(attempt=><option key={attempt.attemptId} value={attempt.attemptId}>{attempt.label}</option>)}</select><button disabled={!page?.hasMore || loading} onClick={loadEarlier}>{loading ? '读取中…' : '加载更早日志'}</button><button disabled={!runId} onClick={() => void api?.exportRunEvents(runId).catch(cause => setError(String(cause)))}>导出日志</button>{!!page?.damagedLines && <span role="status">有 {page.damagedLines} 条损坏记录，原文件已保留</span>}{error && <span role="alert">{error}</span>}</LogHistoryMenu>
       <label className="log-search">
         <Search size={15} aria-hidden="true" />
         <input aria-label="搜索运行日志" value={query} onChange={event => { setQuery(event.target.value); startInspecting(); }} placeholder="搜索步骤或内容" />

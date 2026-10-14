@@ -681,11 +681,12 @@ export class BrowserSession {
 
   private async saveDownload(params: Record<string, unknown>, locator: Locator): Promise<unknown> {
     const page = this.page(params);
+    const milliseconds = timeout(params);
     let resolveDownload!: (download: Download) => void;
     let rejectDownload!: (error: Error) => void;
     const pending = new Promise<Download>((resolve, reject) => { resolveDownload = resolve; rejectDownload = reject; });
     const onClose = () => rejectDownload(new BrowserSessionError('BROWSER_CLOSED', '下载等待期间浏览器已关闭'));
-    const timer = setTimeout(() => rejectDownload(new BrowserSessionError('DOWNLOAD_TIMEOUT', `未在 ${timeout(params)} 毫秒内触发下载`)), timeout(params));
+    const timer = setTimeout(() => rejectDownload(new BrowserSessionError('DOWNLOAD_TIMEOUT', `未在 ${milliseconds} 毫秒内触发下载`)), milliseconds);
     page.on('download', resolveDownload);
     page.on('close', onClose);
     try {
@@ -748,6 +749,7 @@ export class BrowserSession {
 
   private async captureResponse(params: Record<string, unknown>, locator: Locator): Promise<unknown> {
     const page = this.page(params);
+    const milliseconds = timeout(params);
     const urlIncludes = requiredString(params, 'urlIncludes');
     const method = typeof params.method === 'string' ? params.method.toUpperCase() : undefined;
     const requestIncludes = typeof params.requestIncludes === 'string' ? params.requestIncludes : undefined;
@@ -763,7 +765,7 @@ export class BrowserSession {
         && (!requestIncludes || `${request.url()}\n${request.postData() ?? ''}`.includes(requestIncludes))) resolveResponse(response);
     };
     const onClose = () => rejectResponse(new BrowserSessionError('BROWSER_CLOSED', '响应等待期间浏览器已关闭'));
-    const timer = setTimeout(() => rejectResponse(new BrowserSessionError('RESPONSE_TIMEOUT', `未在 ${timeout(params)} 毫秒内收到匹配响应：${urlIncludes}`)), timeout(params));
+    const timer = setTimeout(() => rejectResponse(new BrowserSessionError('RESPONSE_TIMEOUT', `未在 ${milliseconds} 毫秒内收到匹配响应：${urlIncludes}`)), milliseconds);
     page.on('request', onRequest);
     page.on('response', onResponse);
     page.on('close', onClose);

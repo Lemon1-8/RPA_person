@@ -408,8 +408,10 @@ export class RunManager extends EventEmitter {
     if (this.shuttingDown) throw new Error('运行器正在退出');
     executionOptions = { ...executionOptions,workflowDependencies:executionOptions?.workflowDependencies ?? await workflowDependencies(this.store,workflow) };
     if (!stepId) {
-      const saved = await this.store.getRevision(workflow.workflowId, workflow.revision).catch(() => undefined);
-      if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
+      if (!executionOptions.resumeFromRunId) {
+        const saved = await this.store.getRevision(workflow.workflowId, workflow.revision).catch(() => undefined);
+        if (!saved || !isDeepStrictEqual(saved, workflow)) throw new Error('请先保存当前流程，再运行该修订版本。');
+      }
       await this.closeRetainedBrowsersFor(workflow);
     }
     const sameWorkflow = [...this.jobs.values()].find(j => j.run.workflowId === workflow.workflowId && (!terminal(j.run.status) || j.child));

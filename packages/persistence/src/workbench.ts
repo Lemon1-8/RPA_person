@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createReadStream,readFileSync } from 'node:fs';
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -24,17 +24,31 @@ export class WorkbenchStore extends FileStore {
   private logBuffers = new Map<string,string[]>();
   private logTimer?:NodeJS.Timeout;
   private logWrites:Promise<unknown>=Promise.resolve();
+  private appendEvents(id: string, lines: string[]) {
+    const operation = this.logWrites.then(async () => {
+      const path = join(this.directory, 'runs', scheduleIdentifier.parse(id), 'events.jsonl');
+      let reader; let prefix = '';
+      try {
+        reader = await open(path, 'r'); const { size } = await reader.stat();
+        if (size) {
+          const tail = Buffer.alloc(1); await reader.read(tail, 0, 1, size - 1);
+          if (tail[0] !== 10) prefix = '\n';
+        }
+      } catch (error) { if (!missing(error)) throw error; }
+      finally { await reader?.close(); }
+      // Preserve partial writes for diagnosis without adding blank lines to healthy logs.
+      await writeFile(path, prefix + lines.join(''), { flag: 'a' });
+    });
+    this.logWrites = operation.catch(() => {}); return operation;
+  }
   private flushEvents() {
     clearTimeout(this.logTimer);this.logTimer=undefined;const buffers=this.logBuffers;this.logBuffers=new Map();
-    const operation=this.logWrites.then(async()=>{
-      const errors: unknown[] = [];
-      for(const [id,lines] of buffers) {
-        try { await this.guarded(`event-batch:${id}:${randomUUID()}`,()=>writeFile(join(this.directory,'runs',scheduleIdentifier.parse(id),'events.jsonl'),lines.join(''),{flag:'a'})); }
-        catch (error) { errors.push(error); }
-      }
+    const writes = [...buffers].map(([id, lines]) => this.guarded(`event-batch:${id}:${randomUUID()}`, () => this.appendEvents(id, lines)));
+    return Promise.allSettled(writes).then(async results => {
+      await this.logWrites;
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw new AggregateError(errors, '运行日志保存失败');
     });
-    this.logWrites=operation.catch(()=>{});return operation;
   }
   prepareEvent(event: RunEvent) {
     if (event.type !== 'step' || !event.data || typeof event.data !== 'object' || !('result' in event.data)) return;

@@ -1,19 +1,22 @@
 export function describeElement(element: Element): { selector: string; text: string; stable: boolean } {
   const root = element.getRootNode() as Document | ShadowRoot;
+  const host = root instanceof ShadowRoot ? describeElement(root.host) : undefined;
+  const scoped = (selector: string) => host ? `${host.selector} >> ${selector}` : selector;
   const candidates: string[] = [];
   if (element.id) candidates.push(`#${CSS.escape(element.id)}`);
   for (const name of ['data-testid', 'data-test', 'data-qa', 'name', 'aria-label']) {
     const value = element.getAttribute(name); if (value) candidates.push(`${element.tagName.toLowerCase()}[${name}=${JSON.stringify(value)}]`);
   }
-  for (const selector of candidates) if (root.querySelectorAll(selector).length === 1) return { selector, text: (element.textContent ?? '').trim().slice(0, 160), stable: true };
+  for (const selector of candidates) if (root.querySelectorAll(selector).length === 1) return { selector: scoped(selector), text: (element.textContent ?? '').trim().slice(0, 160), stable: host?.stable ?? true };
   const path: string[] = []; let current: Element | null = element;
   while (current) {
     const tag = current.tagName.toLowerCase();
-    const siblings: Element[] = current.parentElement ? Array.from(current.parentElement.children).filter(child => child.tagName === current!.tagName) : [current];
+    const parent = current.parentNode as ParentNode | null;
+    const siblings: Element[] = parent ? Array.from(parent.children).filter(child => child.tagName === current!.tagName) : [current];
     path.unshift(`${tag}:nth-of-type(${siblings.indexOf(current) + 1})`);
     current = current.parentElement;
   }
-  return { selector: path.join(' > '), text: (element.textContent ?? '').trim().slice(0, 160), stable: false };
+  return { selector: scoped(path.join(' > ')), text: (element.textContent ?? '').trim().slice(0, 160), stable: false };
 }
 
 export function installElementPicker(key: string) {

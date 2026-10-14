@@ -356,6 +356,7 @@ export function App() {
   const [breakpoints, setBreakpoints] = useState<Record<string, string[]>>({});
   const [attempts, setAttempts] = useState<import('../../../../packages/contracts/src/index.js').RunAttempt[]>([]);
   const draftQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const managedDrafts = useRef(new Set<string>());
   const flushDrafts = useRef<() => Promise<void>>(async () => {});
   const firstDraftEditAt = useRef<number | undefined>(undefined);
   const workflows = editorState.workflows;
@@ -456,8 +457,9 @@ export function App() {
   const dirty = !!workflow && saved[workflowId] !== JSON.stringify(workflow);
   const validationScope = `${workflowId}:${selectedId}:${inspector}:${view}:`;
   const invalid = !(inspector === "step" && selectedCommented) && Object.entries(invalidFields).some(([key, value]) => key.startsWith(validationScope) && value);
+  const unfinishedJson = Object.keys(draftTexts[workflowId] ?? {}).filter(key => steps.some(item => key.startsWith(`${item.step.stepId}:`)) || /:(流程默认|子流程输入声明|子流程输出声明)/.test(key));
   const workflowErrors = useMemo(() => workflow ? [...getBrowserPageErrors(workflow), ...getControlStepErrors(workflow), ...getNoteStepErrors(workflow)] : [], [workflow]);
-  const invalidWorkflow = invalid || workflowErrors.length > 0;
+  const invalidWorkflow = invalid || unfinishedJson.length > 0 || workflowErrors.length > 0;
   const activeRun = run && !terminalStatuses.has(run.status);
   const currentActiveRun = activeRun && run.workflowId === workflowId;
   const retainedBrowser = !!run?.browserOpen && !activeRun;
@@ -572,8 +574,10 @@ export function App() {
     });
     api
       .bootstrap()
-      .then((state) => {
+      .then(async (state) => {
+        const drafts = await api.listDrafts();
         if (!mounted) return;
+        setPendingDrafts(drafts);
         setWorkflows(state.workflows);
         if (!state.workflows.length) setView("workflows");
         setSchedules(state.schedules);
@@ -619,7 +623,6 @@ export function App() {
   }, [panels]);
   useEffect(() => {
     if (!api) return;
-    void api.listDrafts().then(setPendingDrafts).catch(cause => setError(String(cause)));
     void api.getStorageIssues().then(setStorageIssues).catch(cause => setError(String(cause)));
     const offIssues = api.onStorageIssues(setStorageIssues);
     const offFlush = api.onFlushDrafts(() => flushDrafts.current());
@@ -628,9 +631,15 @@ export function App() {
   }, []);
   flushDrafts.current = async () => {
     if (!api || loading) return;
-    const drafts = workflows.filter(flow => !pendingDrafts.some(draft => draft.workflowId === flow.workflowId) && (saved[flow.workflowId] !== JSON.stringify(flow) || Object.keys(draftTexts[flow.workflowId] ?? {}).length));
+    const editable = workflows.filter(flow => !pendingDrafts.some(draft => draft.workflowId === flow.workflowId));
+    const drafts = editable.filter(flow => saved[flow.workflowId] !== JSON.stringify(flow) || Object.keys(draftTexts[flow.workflowId] ?? {}).length);
+    const clean = editable.filter(flow => !drafts.includes(flow)).map(flow => flow.workflowId);
     const snapshots = drafts.map(flow => ({ workflowId: flow.workflowId, baseRevision: flow.revision, updatedAt: new Date().toISOString(), workflow: clone(flow), selectedId: flow.workflowId === workflowId ? selectedId : '', fieldTexts: draftTexts[flow.workflowId] ?? {} }));
-    const operation = draftQueue.current.then(async () => { for (const draft of snapshots) await api!.saveDraft(draft); });
+    const operation = draftQueue.current.then(async () => {
+      for (const draft of snapshots) { await api!.saveDraft(draft); managedDrafts.current.add(draft.workflowId); }
+      // Only clean up drafts written here or explicitly restored; preserve unreadable old files.
+      for (const id of clean) if (managedDrafts.current.has(id)) { await api!.discardDraft(id); managedDrafts.current.delete(id); }
+    });
     draftQueue.current = operation.catch(() => {}); await operation;
   };
   useEffect(() => {
@@ -649,6 +658,7 @@ export function App() {
     const conflict = !!current && current.revision !== draft.baseRevision;
     const restored = conflict ? { ...draft.workflow, workflowId: uuid(), revision: 0, name: `${draft.workflow.name} 恢复副本` } : draft.workflow;
     if(conflict && api) { await api.saveDraft({...draft,workflowId:restored.workflowId,workflow:restored,baseRevision:0,updatedAt:new Date().toISOString()});await api.discardDraft(draft.workflowId); }
+    managedDrafts.current.add(restored.workflowId);
     setWorkflows(previous => [...previous.filter(flow => flow.workflowId !== restored.workflowId), restored]);
     setWorkflowId(restored.workflowId); setSelectedId(draft.selectedId); setView('editor'); setInspector('step'); setRightPane('step');
     setDraftTexts(previous => ({ ...previous, [restored.workflowId]: draft.fieldTexts }));
@@ -789,6 +799,7 @@ export function App() {
       }));
       setDraftTexts(previous => ({ ...previous, [persisted.workflowId]: {} }));
       await draftQueue.current; await api.discardDraft(persisted.workflowId);
+      managedDrafts.current.delete(persisted.workflowId);
       if (thenRun) {
         const snapshot = await api.runWorkflow(persisted);
         setRunWorkflows(previous => ({ ...previous, [snapshot.runId]: persisted }));
@@ -823,7 +834,7 @@ export function App() {
     }
   }
   async function startDebug(fromStepId?: string) {
-    if (!api || !workflow || busy) return; setBusy('debug'); setError('');
+    if (!api || !workflow || busy || invalidWorkflow) return; setBusy('debug'); setError('');
     try {
       const checks = await api.preflight(workflow); setPreflightIssues(checks); if (checks.some(issue => issue.level === 'error')) throw new Error('请修正运行前检查错误');
       const persisted = await api.saveWorkflow(workflow); setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) }));
@@ -1102,6 +1113,7 @@ export function App() {
         </div>
       )}
       {!!preflightIssues.length && <details className="preflight-report"><summary>运行前检查 · {preflightIssues.filter(issue => issue.level === 'error').length} 个错误，{preflightIssues.filter(issue => issue.level === 'warning').length} 个提醒</summary>{preflightIssues.map((issue, index) => <p key={index}><strong>{issue.level === 'error' ? '错误' : '提醒'}</strong>：{issue.message}{issue.stepId && <button onClick={() => { setSelectedId(issue.stepId!); setView('editor'); setRightPane('step'); }}>定位步骤</button>}</p>)}</details>}
+      {!!unfinishedJson.length && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status"><AlertCircle size={17} /><span>流程中有未完成的 JSON，请修正后再保存、运行或调试。</span></div>}
       {workflowErrors[0] && ["editor", "settings"].includes(view) && <div className="alert page-validation" role="status">
         <AlertCircle size={17} />
         <span>“{workflowErrors[0].stepName}”：{workflowErrors[0].error}{workflowErrors.length > 1 ? `（另有 ${workflowErrors.length - 1} 项待完善）` : ""}</span>
@@ -1309,7 +1321,7 @@ export function App() {
                     </button>
                   </div>
                 )}
-                {api && <RevisionHistory api={api} workflow={workflow} beforeRestore={() => flushDrafts.current()} onError={catchError} onRestore={persisted => { setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) })); setNotice(`已恢复为 v${persisted.revision}`); }} />}
+                {api && <RevisionHistory api={api} workflow={workflow} beforeRestore={async () => { await flushDrafts.current(); setPendingDrafts(await api.listDrafts()); }} onError={catchError} onRestore={persisted => { setWorkflows(previous => previous.map(flow => flow.workflowId === persisted.workflowId ? persisted : flow)); setSaved(previous => ({ ...previous, [persisted.workflowId]: JSON.stringify(persisted) })); setDraftTexts(previous => ({ ...previous, [persisted.workflowId]: {} })); setNotice(`已恢复为 v${persisted.revision}`); }} />}
                 {demoUrl && (
                   <div className="environment-info">
                     <span>受控演示页</span>
@@ -1430,7 +1442,7 @@ export function App() {
               <IconButton label="撤销编辑" title="撤销编辑（Ctrl+Z；输入框内使用文本撤销）" disabled={!canUndo || !!busy} onClick={() => restoreEdit("undo")}><Undo2 size={16} /></IconButton>
               <IconButton label="重做编辑" title="重做编辑（Ctrl+Y 或 Ctrl+Shift+Z）" disabled={!canRedo || !!busy} onClick={() => restoreEdit("redo")}><Redo2 size={16} /></IconButton>
             </div>
-            <details className="debug-tools"><summary>调试</summary><div><button disabled={!!busy || workflowRunning} onClick={() => void startDebug()}>按断点调试</button><button disabled={!!busy || workflowRunning || !workflow?.steps.some(step => step.stepId === selectedId)} onClick={() => void startDebug(selectedId)}>从选中顶层步骤调试</button><button disabled={!selectedId || !!busy} onClick={() => setBreakpoints(previous => { const current = previous[workflowId] ?? []; return { ...previous, [workflowId]: current.includes(selectedId) ? current.filter(id => id !== selectedId) : [...current, selectedId] }; })}>{breakpoints[workflowId]?.includes(selectedId) ? '取消当前断点' : '设置当前断点'}</button><p>断点：{breakpoints[workflowId]?.map(id => steps.find(item => item.step.stepId === id)?.step.name ?? id).join('、') || '无'}</p></div></details>
+            <details className="debug-tools"><summary>调试</summary><div><button disabled={!!busy || invalidWorkflow || workflowRunning} onClick={() => void startDebug()}>按断点调试</button><button disabled={!!busy || invalidWorkflow || workflowRunning || !workflow?.steps.some(step => step.stepId === selectedId)} onClick={() => void startDebug(selectedId)}>从选中顶层步骤调试</button><button disabled={!selectedId || !!busy} onClick={() => setBreakpoints(previous => { const current = previous[workflowId] ?? []; return { ...previous, [workflowId]: current.includes(selectedId) ? current.filter(id => id !== selectedId) : [...current, selectedId] }; })}>{breakpoints[workflowId]?.includes(selectedId) ? '取消当前断点' : '设置当前断点'}</button><p>断点：{breakpoints[workflowId]?.map(id => steps.find(item => item.step.stepId === id)?.step.name ?? id).join('、') || '无'}</p></div></details>
             <button
               className="text-button"
               disabled={!workflow}

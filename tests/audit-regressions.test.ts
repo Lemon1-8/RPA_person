@@ -10,13 +10,13 @@ import { preflight } from '../packages/actions/src/preflight.js';
 import { RunManager } from '../apps/runner/src/manager.js';
 import type { RunSnapshot, WorkflowDefinition } from '../packages/contracts/src/index.js';
 
-const writeFault = vi.hoisted(() => ({ target: '' }));
+const writeFault = vi.hoisted(() => ({ target: '', appendBytes: 0 }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
     const path = String(args[0]);
     if (writeFault.target && (path === writeFault.target || path.startsWith(writeFault.target + '.'))) {
-      await actual.writeFile(args[0], 'partial');
+      await actual.writeFile(args[0], writeFault.appendBytes ? String(args[1]).slice(0, writeFault.appendBytes) : 'partial', args[2]);
       throw Object.assign(new Error('模拟磁盘写入失败'), { code: 'ENOSPC' });
     }
     return actual.writeFile(...args);
@@ -26,6 +26,7 @@ const dirs: string[] = [];
 const managers: RunManager[] = [];
 afterEach(async () => {
   writeFault.target = '';
+  writeFault.appendBytes = 0;
   await Promise.all(managers.splice(0).map(manager => manager.shutdown()));
   for (const dir of dirs.splice(0)) {
     if (dirname(resolve(dir)) !== resolve(tmpdir()) || !basename(dir).startsWith('rpa-audit-test-')) throw new Error('拒绝清理非测试目录');
@@ -42,6 +43,65 @@ async function manager(dir?: string) {
 }
 
 describe('审计发现的可靠性回归', () => {
+  it('正常日志没有空行，每一行均可直接解析为 JSON', async () => {
+    const dir = await directory(); const store = new WorkbenchStore(dir); await store.initialize(); await mkdir(join(dir, 'runs', 'lines'));
+    for (const message of ['first', 'second']) {
+      await store.recordEvent({ type: 'log', runId: 'lines', at: new Date().toISOString(), eventId: randomUUID(), message }); await store.flush();
+    }
+    const rows = (await readFile(join(dir, 'runs', 'lines', 'events.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+    expect(rows.map(event => event.message)).toEqual(['first', 'second']);
+  });
+
+  it.each([false, true])('JSONL 部分追加失败后重试保留全部事件并去重（已有完整行=%s）', async completeFirst => {
+    const dir = await directory(); const store = new WorkbenchStore(dir); await store.initialize();
+    await mkdir(join(dir, 'runs', 'partial'));
+    const events = ['first', 'second'].map(message => ({ type: 'log' as const, runId: 'partial', eventId: randomUUID(), at: new Date().toISOString(), message }));
+    for (const event of events) await store.recordEvent(event);
+    writeFault.target = join(dir, 'runs', 'partial', 'events.jsonl');
+    writeFault.appendBytes = completeFirst ? JSON.stringify({ ...events[0], sequence: 1 }).length + 13 : 12;
+    await expect(store.flush()).rejects.toThrow();
+    writeFault.target = '';
+    await store.recordEvent({ type: 'log', runId: 'partial', at: new Date().toISOString(), eventId: randomUUID(), message: 'after-retry' }); await store.flush();
+    expect(await store.retryFailed()).toEqual([]);
+    const page = await store.getRunEvents('partial');
+    expect(page.events.map(event => event.message)).toEqual(['first', 'second', 'after-retry']);
+    expect(new Set(page.events.map(event => event.eventId)).size).toBe(3);
+    expect(page.damagedLines).toBe(1);
+  });
+
+  it('前序生成 XLSX 后读取或遍历可以首次运行，缺失文件仍在读取时失败', async () => {
+    const dir = await directory(); const path = join(dir, 'generated.xlsx');
+    const definition = flow(dir, [
+      { stepId: 'write', name: '写入', actionType: 'file.xlsxWrite', params: { path, rows: [{ id: 1 }] } },
+      { stepId: 'read', name: '读取', actionType: 'file.xlsxRead', params: { path }, output: 'loaded' },
+      { stepId: 'loop', name: '遍历', actionType: 'control.forEachXlsx', params: { path, itemVariable: 'row' } },
+    ]);
+    expect((await preflight(definition)).filter(issue => issue.level === 'error')).toEqual([]);
+    const result = await new WorkflowEngine(definition, { dataDir: dir, runId: 'generated' }).run();
+    expect(result.status, result.error).toBe('succeeded'); expect(result.variables.loaded).toMatchObject({ rows: [{ id: 1 }] });
+    await unlink(path);
+    const missing = flow(dir, [definition.steps[1]]);
+    expect((await preflight(missing)).some(issue => issue.level === 'warning' && issue.message.includes('文件'))).toBe(true);
+    expect((await new WorkflowEngine(missing, { dataDir: dir, runId: 'missing' }).run()).status).toBe('failed');
+  });
+
+  it('清理原修订后重启仍用运行快照续跑，普通运行继续拒绝未保存内容', async () => {
+    const runner = await manager(); const dir = runner.store.directory;
+    const original = await runner.saveWorkflow(flow(dir, [{ stepId: 'loop', name: '业务循环', actionType: 'control.forEach', params: { items: [1, 2], itemVariable: 'item', progressKey: '{{item}}' }, children: [
+      { stepId: 'set', name: '处理', actionType: 'variables.set', params: { name: 'last', value: '{{item}}' } },
+    ] }]));
+    const run = await runner.runWorkflow(original); expect((await runner.waitForRun(run.runId)).status).toBe('succeeded');
+    const latest = await runner.saveWorkflow({ ...original, name: '新版' });
+    const preview = await runner.previewCleanup([], [{ workflowId: original.workflowId, revision: 1 }]);
+    expect(preview.revisions).toHaveLength(1); await runner.applyCleanup(preview.token); await runner.shutdown();
+    const restarted = await manager(dir);
+    await expect(restarted.runWorkflow({ ...latest, name: '未保存修改' })).rejects.toThrow('先保存');
+    const resumed = await restarted.recoverRun(run.runId); const result = await restarted.waitForRun(resumed.runId);
+    expect(result.status, result.error).toBe('succeeded'); expect(result.revision).toBe(1); expect(result.workflowName).toBe(original.name);
+    expect(result.resumedFromRunId).toBe(run.runId);
+    expect((await restarted.store.getRunEvents(result.runId)).events.filter(event => event.message?.includes('续跑跳过已完成项目'))).toHaveLength(2);
+  });
+
   it.each(['main', '.input.json', '.journal.jsonl'])('已有进度缺少 %s 时拒绝续跑，不当成未执行', async suffix => {
     const dir = await directory(); const path = progressPath(dir, 'original', 'first', ['loop']);
     await saveProgress(path, { items: [1, 2], keys: ['1', '2'], completed: [], pending: [] });

@@ -32,7 +32,7 @@ export async function preflight(input: WorkflowDefinition): Promise<PreflightIss
           return typeof value === 'string' && references(value).length > 0;
         });
         if (typeof step.params.selector === 'string' && step.params.selector.startsWith('@') && !refs.length && !targets.has(step.params.selector.slice(1))) add('error', `元素引用不存在：${step.params.selector}`);
-        if (['file.xlsxRead', 'control.forEachXlsx'].includes(step.actionType) && typeof step.params.path === 'string' && !references(step.params.path).length) await access(step.params.path).catch(() => add('error', '输入文件不存在或无法读取。'));
+        if (['file.xlsxRead', 'control.forEachXlsx'].includes(step.actionType) && typeof step.params.path === 'string' && !references(step.params.path).length) await access(step.params.path).catch(() => add('warning', '输入文件当前不存在或无法读取；可能由前序指令生成，将在读取时再次检查。'));
         if (step.actionType === 'script.run') {
           const language = step.params.language; const code = String(step.params.code ?? '');
           if (language !== 'python') await transform(code, { loader: language === 'typescript' ? 'ts' : 'js', format: 'esm' }).catch(error => add('error', `脚本语法错误：${String(error)}`));
