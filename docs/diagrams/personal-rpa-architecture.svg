@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="personal-rpa-architecture-title personal-rpa-architecture-desc" id="personal-rpa-architecture-root">
+        <title id="personal-rpa-architecture-title">Personal RPA 系统架构</title>
+        <desc id="personal-rpa-architecture-desc">架构图展示桌面工作台和 Agent CLI 如何经过运行管理器、独立任务进程与流程执行器，调用浏览器、Windows、脚本和 XLSX 适配器，并将运行事件与产物写入本地数据目录。</desc>
+        <defs>
+      <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif:ital@0;1&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');
+      #personal-rpa-architecture-root { --color-paper: #f5f5f5;
+      --color-ink: #2d3142;
+      --color-muted: #4f5d75;
+      --color-soft: #5a6580;
+      --color-accent: #bf4520;
+      --color-link: #2e5aa8;
+      --font-sans: 'Geist', 'Microsoft YaHei', system-ui, sans-serif;
+      --font-serif: 'Instrument Serif', 'Noto Serif', 'Noto Serif TC', serif;
+      --font-mono: 'Geist Mono', ui-monospace, monospace; }
+      #personal-rpa-architecture-root { font-family: var(--font-sans); color: var(--color-ink); }
+      #personal-rpa-architecture-root .diagram-container { width: 100%; overflow-x: auto; }
+      #personal-rpa-architecture-root .diagram-container { overflow-x: visible; }</style>
+          <pattern id="personal-rpa-architecture-personal-rpa-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity="0.10"/>
+          </pattern>
+          <marker id="personal-rpa-architecture-personal-rpa-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+          </marker>
+          <marker id="personal-rpa-architecture-personal-rpa-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+          </marker>
+          <marker id="personal-rpa-architecture-personal-rpa-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+          </marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+        <rect width="100%" height="100%" fill="url(#personal-rpa-architecture-personal-rpa-dots)" opacity="0.55"/>
+
+        <!-- Zones: draw before connectors and nodes. -->
+        <rect x="40" y="112" width="260" height="200" rx="8" fill="#4f5d75" stroke="#4f5d75" stroke-width="0.8" fill-opacity="0.04" stroke-opacity="0.18"/>
+        <rect x="144" y="116" width="52" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="170" y="125" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">ENTRY</text>
+
+        <rect x="328" y="112" width="300" height="300" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="0.8" fill-opacity="0.02" stroke-opacity="0.12"/>
+        <rect x="446" y="116" width="64" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="478" y="125" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">EXECUTION</text>
+
+        <rect x="656" y="112" width="264" height="300" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="0.8" fill-opacity="0.02" stroke-opacity="0.12"/>
+        <rect x="756" y="116" width="64" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="788" y="125" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">ADAPTERS</text>
+
+        <!-- Orthogonal connectors, drawn before nodes. -->
+        <path d="M 160,208 H 336" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow-link)"/>
+        <path d="M 276,224 H 344" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow-link)"/>
+        <path d="M 408,240 V 264" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+        <path d="M 472,296 H 488" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow-accent)"/>
+        <path d="M 616,280 H 640 Q 648,280 648,272 V 152 Q 648,144 656,144 H 776 Q 784,144 784,152 V 184" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+        <path d="M 616,312 H 680" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+        <path d="M 472,224 H 632 Q 640,224 640,232 V 420 Q 640,428 632,428 H 484 Q 476,428 476,436 V 456" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+        <path d="M 344,232 H 320 Q 312,232 312,240 V 340 Q 312,348 304,348 H 112 Q 104,348 104,340 V 240" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+
+        <!-- Connector labels sit on opaque masks away from nodes. -->
+        <rect x="228" y="188" width="40" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="248" y="198" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">IPC</text>
+        <rect x="278" y="328" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="306" y="338" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EVENTS</text>
+        <rect x="620" y="344" width="48" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="644" y="354" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">JSONL</text>
+
+        <!-- Entry nodes. -->
+        <rect x="64" y="176" width="96" height="64" rx="6" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity="0.10"/>
+        <rect x="72" y="184" width="28" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8" stroke-opacity="0.40"/>
+        <text x="86" y="193" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UI</text>
+        <text x="112" y="212" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">桌面工作台</text>
+        <text x="112" y="228" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Electron · React</text>
+
+        <rect x="180" y="176" width="96" height="64" rx="6" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity="0.10"/>
+        <rect x="188" y="184" width="32" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8" stroke-opacity="0.40"/>
+        <text x="204" y="193" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
+        <text x="228" y="212" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">Agent CLI</text>
+        <text x="228" y="228" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">rpa-agent</text>
+
+        <!-- Execution nodes. -->
+        <rect x="344" y="176" width="128" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="352" y="184" width="36" height="12" rx="2" fill="none" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.35"/>
+        <text x="370" y="193" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+        <text x="456" y="236" fill="#2d3142" font-size="28" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="end" fill-opacity="0.06">01</text>
+        <text x="408" y="212" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">运行管理器</text>
+        <text x="408" y="228" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">RunManager</text>
+
+        <rect x="344" y="264" width="128" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="352" y="272" width="36" height="12" rx="2" fill="none" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.35"/>
+        <text x="370" y="281" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">IPC</text>
+        <text x="456" y="324" fill="#2d3142" font-size="28" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="end" fill-opacity="0.06">02</text>
+        <text x="408" y="300" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">独立任务进程</text>
+        <text x="408" y="316" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">worker.ts</text>
+
+        <rect x="488" y="264" width="128" height="64" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity="0.08"/>
+        <rect x="496" y="272" width="36" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="0.8" stroke-opacity="0.50"/>
+        <text x="514" y="281" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ENGINE</text>
+        <text x="600" y="324" fill="#bf4520" font-size="28" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="end" fill-opacity="0.10">03</text>
+        <text x="552" y="300" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">流程执行器</text>
+        <text x="552" y="316" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">WorkflowEngine</text>
+
+        <!-- Adapter nodes. -->
+        <rect x="680" y="184" width="208" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="688" y="192" width="64" height="12" rx="2" fill="none" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.35"/>
+        <text x="720" y="201" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ADAPTER</text>
+        <text x="784" y="220" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">浏览器与桌面</text>
+        <text x="784" y="236" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Playwright · UIA · input guard</text>
+
+        <rect x="680" y="288" width="208" height="64" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity="0.05"/>
+        <rect x="688" y="296" width="64" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-width="0.8" stroke-opacity="0.45"/>
+        <text x="720" y="305" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ADAPTER</text>
+        <text x="784" y="324" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">脚本与文件</text>
+        <text x="784" y="340" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Python · JS · TS · XLSX</text>
+
+        <!-- Local run data store. -->
+        <rect x="352" y="456" width="248" height="64" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity="0.05"/>
+        <rect x="360" y="464" width="44" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-width="0.8" stroke-opacity="0.45"/>
+        <text x="382" y="473" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+        <text x="476" y="492" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">运行数据与产物</text>
+        <text x="476" y="508" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">FileStore · .rpa · JSON / JSONL</text>
+
+        <!-- Legend strip. -->
+        <line x1="40" y1="544" x2="920" y2="544" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.10"/>
+        <text x="40" y="560" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+        <rect x="40" y="572" width="14" height="10" rx="2" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity="0.08"/>
+        <text x="60" y="580" fill="#4f5d75" font-size="8.5" font-family="'Geist', 'Microsoft YaHei', sans-serif">Focal engine</text>
+        <rect x="164" y="572" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="184" y="580" fill="#4f5d75" font-size="8.5" font-family="'Geist', 'Microsoft YaHei', sans-serif">Core service</text>
+        <rect x="286" y="572" width="14" height="10" rx="2" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity="0.05"/>
+        <text x="306" y="580" fill="#4f5d75" font-size="8.5" font-family="'Geist', 'Microsoft YaHei', sans-serif">Adapter / store</text>
+        <line x1="448" y1="577" x2="476" y2="577" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow-link)"/>
+        <text x="484" y="580" fill="#4f5d75" font-size="8.5" font-family="'Geist', 'Microsoft YaHei', sans-serif">IPC / primary flow</text>
+        <line x1="668" y1="577" x2="696" y2="577" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#personal-rpa-architecture-personal-rpa-arrow)"/>
+        <text x="704" y="580" fill="#4f5d75" font-size="8.5" font-family="'Geist', 'Microsoft YaHei', sans-serif">Return / async</text>
+      </svg>

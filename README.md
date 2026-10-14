@@ -16,52 +16,11 @@ Electron + React + TypeScript 界面，独立 Node 任务进程，Playwright 浏
 
 ## 系统架构
 
-项目级 `personal-rpa` Skill 负责指导 `rpa-agent` 的环境检查、动作查询、流程校验、运行和结果诊断；桌面工作台与 Agent 入口最终复用同一套 Runner、Engine 和动作能力。
+`diagram-design` Skill 按默认 editorial 样式绘制了入口、执行核心、适配器与本地数据四个区域。主路径从桌面工作台或 `rpa-agent` 进入 `RunManager`，再由独立任务进程交给 `WorkflowEngine`；适配器负责浏览器、Windows 控件、脚本和 XLSX，运行事件与产物写入 `.rpa` 数据目录。
 
-```mermaid
-flowchart LR
-  user[用户 / Agent] --> skill[项目级 Skill<br/>.codex/skills/personal-rpa]
-  skill -. 指导 .-> cli[rpa-agent CLI<br/>doctor · actions · check · run · logs · result]
+![Personal RPA 系统架构](docs/diagrams/personal-rpa-architecture.png)
 
-  user --> ui[Electron + React 工作台]
-  ui --> preload[Preload / contextBridge]
-  preload --> main[Electron 主进程<br/>apps/desktop/src/main.ts]
-  cli --> agent[Agent 运行入口<br/>apps/runner/src/agent.ts]
-  agent --> manager
-  main --> manager[运行管理器<br/>apps/runner/src/manager.ts]
-
-  manager --> schedule[计划调度与历史]
-  manager -->|任务进程 IPC| worker[独立任务进程<br/>apps/runner/src/worker.ts]
-  worker --> engine[WorkflowEngine<br/>packages/engine]
-  engine -. 共享协议与校验 .-> contracts[packages/contracts]
-  engine --> actions[动作定义与预检<br/>packages/actions]
-  engine --> browser[BrowserSession<br/>Playwright]
-  engine --> windows[WindowsSession<br/>UIA / 键鼠输入保护]
-  engine --> scripts[脚本桥<br/>Python / JavaScript / TypeScript<br/>JSON RPC]
-  engine --> xlsx[XLSX 与文件动作]
-
-  browser --> browserRuntime[Chrome / Edge / Chromium]
-  windows --> desktopRuntime[Windows 应用与桌面]
-  scripts --> scriptRuntime[Python / Node 子进程]
-
-  worker -->|RunEvent / 运行状态| manager
-  manager --> persistence[FileStore<br/>JSON / JSONL 快照、事件、产物]
-  persistence --> data[.rpa 数据目录]
-  manager -->|IPC 事件与控制| main
-  main --> preload
-  preload --> ui
-
-  classDef entry fill:#e8f0fe,stroke:#4a78c2,color:#1f2937;
-  classDef core fill:#e9f7ef,stroke:#3b8f5a,color:#1f2937;
-  classDef adapter fill:#fff4df,stroke:#c48728,color:#1f2937;
-  classDef storage fill:#f3eafe,stroke:#8056b3,color:#1f2937;
-  class user,skill,cli,ui,preload,main,agent entry;
-  class manager,worker,engine,contracts,actions core;
-  class browser,windows,scripts,xlsx,browserRuntime,desktopRuntime,scriptRuntime adapter;
-  class schedule,persistence,data storage;
-```
-
-运行时链路是：界面或 `rpa-agent` 提交流程 → `RunManager` 创建独立任务进程 → `WorkflowEngine` 按流程调度动作 → 浏览器、Windows 控件、脚本桥和 XLSX 适配器执行 → 运行事件由管理器持久化并通过 IPC 回传界面。流程、运行快照、事件、日志和产物默认保存在调用项目的 `.rpa` 数据目录中。
+可编辑的 [HTML 图源](docs/diagrams/personal-rpa-architecture.html) 以及导出的 [SVG](docs/diagrams/personal-rpa-architecture.svg) 和 PNG 一并保存在 `docs/diagrams/`。
 
 ## 启动
 
